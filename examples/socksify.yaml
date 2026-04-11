@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+# Local proxy endpoints for socksify-like experiments.
+wireguard:
+  config_file: ./client.conf
+
+api:
+  listen: unix:/run/uwgsocks/api.sock
+  allow_unauthenticated_unix: true
+
+proxy:
+  http_listeners:
+    # uwgfdproxy can connect to this Unix HTTP listener and use /uwg/socket.
+    - unix:/run/uwgsocks/http.sock
+
+socket_api:
+  bind: true
+  transparent_bind: false
+  udp_inbound: false

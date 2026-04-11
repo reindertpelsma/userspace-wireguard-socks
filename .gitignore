@@ -1,0 +1,19 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+/uwgsocks
+/uwgfdproxy
+/dist/
+/build/
+/tmp/
+*.test
+*.prof
+*.pprof
+*.out
+*.log
+
+# Local, real VPN configs used during manual testing. The repository examples
+# use demonstration-only keys instead.
+/nordvpn.conf
+/*.local.conf
+/*.local.yaml

@@ -1,0 +1,55 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+wireguard:
+  config_file: ./examples/client.conf
+  roam_fallback_seconds: 120
+
+proxy:
+  socks5: 127.0.0.1:1080
+  http: 127.0.0.1:8082
+  mixed: ""
+  username: ""
+  password: ""
+  fallback_direct: true
+  fallback_socks5: ""
+  honor_environment: true
+  outbound_proxies: []
+  udp_associate: true
+  bind: false
+  prefer_ipv6_for_udp_over_socks: false
+
+host_forward:
+  proxy:
+    enabled: true
+    redirect_ip: 127.0.0.1
+  inbound:
+    enabled: false
+    redirect_ip: ""
+
+routing:
+  enforce_address_subnets: true
+
+filtering:
+  drop_ipv6_link_local_multicast: true
+  drop_ipv4_invalid: true
+
+forwards:
+  - proto: tcp
+    listen: 127.0.0.1:15432
+    target: 10.10.0.20:5432
+  - proto: udp
+    listen: 127.0.0.1:15353
+    target: 100.64.90.1:53
+
+inbound:
+  transparent: false
+  host_dial_bind_address: ""
+  tcp_max_buffered_bytes: 268435456
+  tcp_idle_timeout_seconds: 900
+  udp_idle_timeout_seconds: 30
+
+acl:
+  inbound_default: allow
+  outbound_default: allow
+  relay_default: deny

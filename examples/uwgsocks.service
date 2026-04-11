@@ -1,0 +1,28 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+[Unit]
+Description=Userspace WireGuard SOCKS Gateway
+Documentation=https://github.com/reindertpelsma/userspace-wireguard-socks
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uwgsocks
+Group=uwgsocks
+ExecStart=/usr/local/bin/uwgsocks --config /etc/uwgsocks/server.yaml
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/run/uwgsocks /var/lib/uwgsocks
+RuntimeDirectory=uwgsocks
+RuntimeDirectoryMode=0750
+StateDirectory=uwgsocks
+StateDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+wireguard:
+  config_file: ./exit-client.conf
+
+proxy:
+  socks5: 127.0.0.1:1080
+  http: 127.0.0.1:8080
+  fallback_direct: false
+
+acl:
+  outbound_default: allow
