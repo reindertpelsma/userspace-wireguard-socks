@@ -25,8 +25,10 @@ The app is designed to replace most functionalities that regular Wireguard tunne
 Since it does not use your regular network routing, applications connect through Wireguard in a variety of supported ways:
 - You can forward local TCP/UDP ports over Wireguard or vice versa. Proxy protocol is supported so that the source IP will not get lost. 
 - Connecting to the local network of the machine running ugwsocks
-- Using SOCKS to connect applications to Wireguard for both TCP/UDP.
-- Letting existing applications built on libc that do not support SOCKS connect to Wireguard or listen for services using the socksify-style prelod wrapper (EXPERIMENTAL)
+- Using SOCKS/HTTP proxy to connect applications to Wireguard for both TCP/UDP.
+- Letting unmodified existing applications that do not support SOCKS/HTTP connect to Wireguard or listen for services using the preload wrapper (EXPERIMENTAL)
+- Embedding the Wireguard TCP/IP stack as library in your existing applications
+- Forwarding Wireguard traffic between multiple peers, allowing you to run a wireguard relay server for clients behind firewalls without root or messing with P2P
 
 ## Build
 
@@ -165,6 +167,8 @@ UWGS_FDPROXY=/run/uwgsocks/fdproxy.sock \
 ```
 Application -> uwgpreload.so overriding libc functions -> (local UNIX socket file) -> uwgfdproxy managing TCP/UDP sockets routing through Wireguard -> (HTTP/socks API + auth possible) -> uwgsocks daemon connecting to Wireguard -> userspace UDP connection -> Wireguard server
 ```
+
+Prerequisite is that your application is dynamically linked to libc (almost all applications are), statically linked applications cannot be connected rootless through Wireguard if they do not support SOCKS/HTTP proxy directly.
 
 The uwgfdproxy tracks/handles all socket connections that are routed through the userspace Wireguard, even across forks and executable transition boundaries.
 This setup allows you to seperate the process that connects to Wireguard to the process that manages sockets. For connecting several containers (each running uwgfdproxy daemon) to the ugwsocks you run rootless on a host or a central container (running the ugwsocks). 
