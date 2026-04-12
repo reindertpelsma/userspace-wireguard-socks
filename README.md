@@ -37,7 +37,6 @@ Install Go 1.24 or newer, then:
 ```bash
 go test ./...
 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o uwgsocks ./cmd/uwgsocks
-CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o uwgfdproxy ./cmd/uwgfdproxy
 ```
 
 If you want also to build the experimental sockisfy wrapper so you can tunnel abritary applications over Wireguard without SOCKS or root
