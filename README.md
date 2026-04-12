@@ -8,7 +8,7 @@
 The goal is to make WireGuard usable in environments where a kernel tunnel is unavailable or undesirable: rootless processes, restricted containers, CI workers, locked-down servers, or applications that should use WireGuard as a transport without changing the host routing table.
 
 Examples of the vast amount of supported use cases:
-- Connecting to or hosting Wireguard server on Docker containers
+- Connecting to or hosting Wireguard server on rootless / Docker containers (even in the most restrictive settings, without root)
 - Connecting your web browser for certain sites to Wireguard using a SOCKS proxy without root or managling your network interfaces
 - Connecting remotely to machines network where you do not have root access, using this application as exit proxy for regular internet traffic
 - Connecting your personal runs on a HPC cluster or rented GPUs to your secure network where you do not have root or are in a restricted docker container
@@ -38,6 +38,13 @@ Install Go 1.24 or newer, then:
 go test ./...
 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o uwgsocks ./cmd/uwgsocks
 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o uwgfdproxy ./cmd/uwgfdproxy
+```
+
+If you want also to build the experimental sockisfy wrapper so you can tunnel abritary applications over Wireguard without SOCKS or root
+
+```bash
+CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o uwgfdproxy ./cmd/uwgfdproxy
+gcc -shared -fPIC -O2 -Wall -Wextra -o ./uwgpreload.so tests/preload/testdata/uwgpreload.c -ldl
 ```
 
 The resulting `uwgsocks` and `uwgfdproxy` binaries are static executables.
@@ -138,18 +145,6 @@ Transparent egress example:
 curl -x socks5h://127.0.0.1:1080 https://www.google.com/
 ```
 
-Throughput smoke test with a real WireGuard config:
-
-```bash
-./uwgsocks --wg-config ./my-provider.conf \
-  --api-listen unix:/run/uwgsocks/api.sock \
-  --api-allow-unauthenticated-unix
-./uwgfdproxy --listen /run/uwgsocks/fdproxy.sock \
-  --api unix:/run/uwgsocks/api.sock
-LD_PRELOAD=./uwgpreload.so UWGS_FDPROXY=/run/uwgsocks/fdproxy.sock \
-  speedtest-cli --secure --simple
-```
-
 
 Let existing applications without SOCKS support connect to Wireguard rootless (EXPERIMENTAL):
 
@@ -162,6 +157,18 @@ Let existing applications without SOCKS support connect to Wireguard rootless (E
 LD_PRELOAD=./uwgpreload.so \
 UWGS_FDPROXY=/run/uwgsocks/fdproxy.sock \
   wget https://www.google.com
+```
+
+Throughput smoke test with a real WireGuard config (e.g [Nordvpn Wireguard](https://github.com/sfiorini/NordVPN-Wireguard)):
+
+```bash
+./uwgsocks --wg-config ./my-provider-like-nordvpn.conf \
+  --api-listen unix:/run/uwgsocks/api.sock \
+  --api-allow-unauthenticated-unix
+./uwgfdproxy --listen /run/uwgsocks/fdproxy.sock \
+  --api unix:/run/uwgsocks/api.sock
+LD_PRELOAD=./uwgpreload.so UWGS_FDPROXY=/run/uwgsocks/fdproxy.sock \
+  speedtest-cli --secure --simple
 ```
 
 ```
