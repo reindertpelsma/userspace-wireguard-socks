@@ -3,6 +3,7 @@
 
 /uwgsocks
 /uwgfdproxy
+/uwgwrapper
 /dist/
 /build/
 /tmp/
@@ -11,9 +12,10 @@
 *.pprof
 *.out
 *.log
+*.o
+*.so
 
 # Local, real VPN configs used during manual testing. The repository examples
 # use demonstration-only keys instead.
-/nordvpn.conf
 /*.local.conf
 /*.local.yaml

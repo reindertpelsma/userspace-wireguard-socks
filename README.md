@@ -8,7 +8,7 @@
 The goal is to make WireGuard usable in environments where a kernel tunnel is unavailable or undesirable: rootless processes, restricted containers, CI workers, locked-down servers, or applications that should use WireGuard as a transport without changing the host routing table.
 
 Examples of the vast amount of supported use cases:
-- Connecting to or hosting Wireguard server on Docker containers
+- Connecting to or hosting Wireguard server on rootless / Docker containers (even in the most restrictive settings, without root)
 - Connecting your web browser for certain sites to Wireguard using a SOCKS proxy without root or managling your network interfaces
 - Connecting remotely to machines network where you do not have root access, using this application as exit proxy for regular internet traffic
 - Connecting your personal runs on a HPC cluster or rented GPUs to your secure network where you do not have root or are in a restricted docker container
@@ -35,12 +35,10 @@ Since it does not use your regular network routing, applications connect through
 Install Go 1.24 or newer, then:
 
 ```bash
-go test ./...
-CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o uwgsocks ./cmd/uwgsocks
-CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o uwgfdproxy ./cmd/uwgfdproxy
+bash compile.sh
 ```
 
-The resulting `uwgsocks` and `uwgfdproxy` binaries are static executables.
+The resulting `uwgsocks`, `uwgwrapper` binaries are static executables.
 
 ## Quick Start
 
@@ -107,10 +105,9 @@ Use it from another Go program:
 
 Use it as a socksify-style local transport:
 
-- run `uwgsocks` with a Unix HTTP listener that exposes `/uwg/socket`
-- run `uwgfdproxy` against that listener
-- use the experimental LD_PRELOAD wrapper from `tests/preload/testdata` to
-  route selected libc TCP/UDP sockets through the WireGuard netstack
+- run `uwgsocks` with a HTTP proxy listener that exposes `/uwg/socket`
+- either run `uwgwrapper --mode=fdproxy` as the daemon, or let launch mode spawn it automatically
+- use the wrapper to route applications through the WireGuard netstack that do not support SOCKS by mangling libc socket API
 
 Example files:
 
@@ -138,42 +135,58 @@ Transparent egress example:
 curl -x socks5h://127.0.0.1:1080 https://www.google.com/
 ```
 
-Throughput smoke test with a real WireGuard config:
-
-```bash
-./uwgsocks --wg-config ./my-provider.conf \
-  --api-listen unix:/run/uwgsocks/api.sock \
-  --api-allow-unauthenticated-unix
-./uwgfdproxy --listen /run/uwgsocks/fdproxy.sock \
-  --api unix:/run/uwgsocks/api.sock
-LD_PRELOAD=./uwgpreload.so UWGS_FDPROXY=/run/uwgsocks/fdproxy.sock \
-  speedtest-cli --secure --simple
-```
-
 
 Let existing applications without SOCKS support connect to Wireguard rootless (EXPERIMENTAL):
 
 ```bash
-./uwgsocks --config ./examples/socksify.yaml
-./uwgfdproxy --listen /run/uwgsocks/fdproxy.sock \
-  --api unix:/run/uwgsocks/http.sock \
-  --socket-path /uwg/socket
+./uwgsocks --config ./examples/exit-client.yaml
 
-LD_PRELOAD=./uwgpreload.so \
-UWGS_FDPROXY=/run/uwgsocks/fdproxy.sock \
-  wget https://www.google.com
+# Single-binary wrapper flow: extracts the embedded preload library to /tmp and
+# starts a built-in fdproxy daemon automatically.
+./uwgwrapper --api http://127.0.0.1:8080 -- curl -v https://www.google.com
 ```
+
+Throughput smoke test with a real WireGuard config (e.g [Nordvpn Wireguard](https://github.com/sfiorini/NordVPN-Wireguard)):
+
+```bash
+./uwgsocks --wg-config ./my-provider-like-nordvpn.conf --http unix:/tmp/http.sock & 
+./uwgwrapper --api unix:/tmp/http.sock -- speedtest-cli 
+```
+
 
 ```
 Application -> uwgpreload.so overriding libc functions -> (local UNIX socket file) -> uwgfdproxy managing TCP/UDP sockets routing through Wireguard -> (HTTP/socks API + auth possible) -> uwgsocks daemon connecting to Wireguard -> userspace UDP connection -> Wireguard server
 ```
 
-Prerequisite is that your application is dynamically linked to libc (almost all applications are), statically linked applications cannot be connected rootless through Wireguard if they do not support SOCKS/HTTP proxy directly.
+Limitations of the wrapper:
+- the wrapper cannot intercept connections of static binaries/libraries not linked to libc.
+- the wrapper does not work across user boundaries, that is the application cannot switch user like apt, sudo etc, if it does the connection either fails or bypasses Wireguard. Every user needs its own wrapper 
+- the wrapper does not inferere with loopback connections
+- partial bind(2) support. bind is only supported for TCP listeners and unconnected UDP sockets. binding is ignored for connected TCP/UDP sockets.
+- not all applications are supported, support is experimental
 
-The uwgfdproxy tracks/handles all socket connections that are routed through the userspace Wireguard, even across forks and executable transition boundaries.
-This setup allows you to seperate the process that connects to Wireguard to the process that manages sockets. For connecting several containers (each running uwgfdproxy daemon) to the ugwsocks you run rootless on a host or a central container (running the ugwsocks). 
+DNS is also routed through. The library overrides the libc resolution API to prevent any DNS resolution against `/etc/hosts` or `/etc/resolv.conf`. However since many applications use their own DNS libraries, and directly make outbound DNS connections, by default the wrapper rewrites any connected UDP/TCP socket to port 53 to the Wireguard DNS, including DNS to loopback where a potential stub resolver might be. 
 
-You can run the --api as HTTP endpoint instead of unix socket file descriptor, `fdproxy.sock` must be a unix socket file in the same environment (e.g container / vm / computer) for the preload wrapper to connect to. Control access using regular unix permissions on the socket files.
+You can run the --api as HTTP endpoint instead of unix socket file descriptor. It must point to the HTTP proxy endpoint (this endpoint is shared for HTTP proxy clients)
+
+Starting applications without having a 'wrapper' in front of them.
+
+```bash
+# Explicit daemon mode, still using the same uwgwrapper executable. This daemon manages the socket connections from applications
+./uwgwrapper --mode=fdproxy --listen /tmp/fdproxy.sock \
+  --api unix:/tmp/http.sock --socket-path /uwg/socket
+
+# Set the LD_PRELOAD environment variable and UWGS_FDPROXY to the correct socks file
+LD_PRELOAD=/tmp/uwgwrapper-$(id -u)/uwgpreload-*.so UWGS_FDPROXY=/tmp/fdproxy.sock \
+  wget https://www.google.com
+
+# Launch mode connected to an already-running daemon.
+./uwgwrapper --spawn-fdproxy=false --listen /tmp/fdproxy.sock \
+  --api unix:/tmp/http.sock --socket-path /uwg/socket -- \
+  wget https://www.google.com
+```
+
+ `fdproxy.sock` must be a unix socket file in the same environment (e.g container / vm / computer) for the preload wrapper to connect to. Control access using regular unix permissions on the socket files.
 
 ## Configuration Sources
 
@@ -372,7 +385,7 @@ listener for containers and a Unix socket for local fd-bridge tools:
 proxy:
   http: 127.0.0.1:8080
   http_listeners:
-    - unix:/run/uwgsocks/http.sock
+    - unix:/tmp/http.sock
 ```
 
 `BIND` is intentionally off by default because it lets proxy clients request
@@ -577,7 +590,7 @@ For a Unix socket, omit the token only when explicitly enabled:
 
 ```yaml
 api:
-  listen: unix:/run/uwgsocks/api.sock
+  listen: unix:/tmp/api.sock
   allow_unauthenticated_unix: true
 ```
 
@@ -697,30 +710,6 @@ socket can also be reconnected by sending a `connect` frame with
 `listener_connection_id` set to the existing UDP socket ID; an all-zero
 destination disconnects it again.
 
-For Linux preload experiments, `uwgfdproxy` is a local Unix socket manager for
-a socksify-like layer. The preload wrapper creates a normal dummy socket, and
-when the app targets the tunnel it replaces that fd with a manager fd backed by
-the raw socket API. Connected TCP remains a byte stream, UDP is length-framed so
-datagram boundaries survive, and TCP listener accepts use a manager
-`ACCEPT`/`ATTACH` handshake. That lets many applications keep using normal
-`read(2)`, `write(2)`, `send(2)`, `recv(2)`, `sendto(2)`, `recvfrom(2)`,
-`dup(2)`, and polling calls:
-
-```bash
-go build -o uwgfdproxy ./cmd/uwgfdproxy
-./uwgfdproxy --listen /tmp/uwgfdproxy.sock --api unix:/run/uwgsocks/api.sock
-./uwgfdproxy --listen /tmp/uwgfdproxy.sock --api unix:/run/uwgsocks/http.sock --socket-path /uwg/socket
-```
-
-The preload wrapper lives under `tests/preload/testdata` for now and is tested
-as an integration proof, not shipped as a production compatibility layer. It
-currently covers connected TCP, connected UDP, unconnected UDP
-`sendto`/`recvfrom`, TCP listener `accept`, duplicated fds, fork inheritance,
-selected exec inheritance, malicious manager-input rejection, and loopback
-connect passthrough. Remaining production socksify work includes
-`sendmsg`/`recvmsg`, libc resolver interposition, more `select`/`epoll`
-coverage, UDP exec re-identification, and true dual host-loopback plus
-tunnel-side `0.0.0.0` listener behavior.
 
 ## Local Demo Troubleshooting
 

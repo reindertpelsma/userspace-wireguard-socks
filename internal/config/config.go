@@ -252,6 +252,9 @@ func Default() Config {
 			OutboundDefault: acl.Allow,
 			RelayDefault:    acl.Deny,
 		},
+		API: API{
+                        AllowUnauthenticatedUnix:  true,
+		},
 		DNSServer: DNSServer{MaxInflight: 1024},
 	}
 }

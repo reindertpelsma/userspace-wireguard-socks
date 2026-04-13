@@ -112,9 +112,11 @@ func (s *Server) handle(c *net.UnixConn) {
 		s.handleListen(c, fd, fields)
 	case "ATTACH":
 		s.handleAttach(c, fd, fields)
+	case "DNS":
+		s.handleDNS(c, fd, fields)
 	default:
 		_ = c.Close()
-		s.logger.Printf("bad request %q", line)
+		s.logger.Printf("unsupported request %q", line)
 	}
 }
 
@@ -136,13 +138,11 @@ func (s *Server) handleConnect(c *net.UnixConn, fd int, fields []string) {
 	proto := fields[1]
 	ip, err := netip.ParseAddr(fields[2])
 	if err != nil {
-		_ = c.Close()
 		s.logger.Printf("bad IP %q: %v", fields[2], err)
 		return
 	}
 	port64, err := strconv.ParseUint(fields[3], 10, 16)
 	if err != nil {
-		_ = c.Close()
 		s.logger.Printf("bad port %q: %v", fields[3], err)
 		return
 	}
@@ -427,6 +427,90 @@ func bridgeUDPConnected(local net.Conn, up net.Conn, id uint64) {
 	<-errc
 }
 
+func (s *Server) handleDNS(c *net.UnixConn, fd int, fields []string) {
+	if len(fields) != 2 {
+		_ = c.Close()
+		s.logger.Printf("bad DNS request %q", strings.Join(fields, " "))
+		return
+	}
+	size_mode := fields[1]
+	if size_mode != "16" && size_mode != "32" {
+		_ = c.Close()
+		s.logger.Printf("bad DNS size mode %q: only 16/32 bits is supported", fields[0])
+		return
+	}
+	is_large_prefix := size_mode == "32"
+
+	local, closeControl, ok := s.localConn(c, fd)
+	if !ok {
+		return
+	}
+	defer closeControl()
+	defer local.Close()
+
+	up, err := s.dialUp()
+	if err != nil {
+		s.logger.Printf("api socket: %v", err)
+		return
+	}
+	defer up.Close()
+
+	if _, err := c.Write([]byte("OK\n")); err != nil {
+                return
+        }
+
+	errc := make(chan struct{}, 2)
+	go func() {
+		for {
+			var payload []byte
+			var err error
+			if is_large_prefix {
+				payload, err = readLocalPacket(local)
+			} else {
+				payload, err = readUInt16LocalPacket(local)
+			}
+
+			if err != nil {
+				break
+			}
+			if err := socketproto.WriteFrame(up, socketproto.Frame{ID: socketproto.ClientIDBase + 2, Action: socketproto.ActionDNS, Payload: payload}); err != nil {
+				break
+			}
+		}
+		_ = up.Close()
+		errc <- struct{}{}
+	}()
+	go func() {
+		defer func() {
+			_ = local.Close()
+			errc <- struct{}{}
+		}()
+		for {
+			frame, err := socketproto.ReadFrame(up, socketproto.DefaultMaxPayload)
+			if err != nil {
+				return
+			}
+			if frame.Action != socketproto.ActionDNS || frame.ID != socketproto.ClientIDBase+2 {
+				continue
+			}
+			payload := frame.Payload
+			if len(payload) > 65535 {
+				payload = payload[:65535]
+			}
+			if is_large_prefix {
+				if err := writeLocalPacket(local, frame.Payload); err != nil {
+					return
+				}
+			} else {
+				if err := writeUint16LocalPacket(local, frame.Payload); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	<-errc
+}
+
 func bridgeUDPListener(local net.Conn, up net.Conn, id uint64) {
 	errc := make(chan struct{}, 2)
 	go func() {
@@ -486,6 +570,30 @@ func writeLocalPacket(w io.Writer, p []byte) error {
 	}
 	var h [4]byte
 	binary.BigEndian.PutUint32(h[:], uint32(len(p)))
+	if _, err := w.Write(h[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(p)
+	return err
+}
+
+func readUInt16LocalPacket(r io.Reader) ([]byte, error) {
+	var h [2]byte
+	if _, err := io.ReadFull(r, h[:]); err != nil {
+		return nil, err
+	}
+	n := binary.BigEndian.Uint16(h[:])
+	p := make([]byte, n)
+	_, err := io.ReadFull(r, p)
+	return p, err
+}
+
+func writeUint16LocalPacket(w io.Writer, p []byte) error {
+	if len(p) > 65535 {
+		return socketproto.ErrFrameTooLarge
+	}
+	var h [2]byte
+	binary.BigEndian.PutUint16(h[:], uint16(len(p)))
 	if _, err := w.Write(h[:]); err != nil {
 		return err
 	}
