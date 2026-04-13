@@ -9,9 +9,10 @@ wget https://github.com/reindertpelsma/userspace-wireguard-socks/releases/downlo
 chmod +x uwgsocks
 ./uwgsocks --wg-config ./my-wireguard-vpn.conf --http 127.0.0.1:8080 --socks5 127.0.0.1:1080 &
 curl -x http://127.0.0.1:8080 https://example.com
+curl -x socks5h://127.0.0.1:1080 https://example.com
 ```
 
-Or routing applications without SOCKS/HTTP
+Or routing libc-based applications without SOCKS/HTTP
 ``` bash
 wget https://github.com/reindertpelsma/userspace-wireguard-socks/releases/download/0.1/uwgwrapper
 chmod +x uwgwrapper
@@ -67,7 +68,7 @@ Just run the binary.
 
 Works in environments such as:
 
--   Docker containers
+-   Locked down Docker/K8S containers
 -   CI/CD runners
 -   HPC clusters
 -   restricted servers
@@ -97,7 +98,7 @@ or run one program through the tunnel:
 `uwgsocks` can host a complete WireGuard peer that can:
 
 -   accept other peers
--   route internet traffic
+-   route internet traffic, inbound and outbound
 -   forward ports
 -   relay traffic between peers
 
@@ -112,13 +113,15 @@ All without requiring root privileges.
 -   HTTP and SOCKS proxy interfaces
 -   reverse port forwards from the tunnel
 -   multi-peer relay support
+-   connect directly to local subnets of machines running uwgsocks through transperant inbound
 -   transparent wrapper for applications without proxy support
 -   PROXY protocol support to preserve source IP
--   firewall ACL rules
+-   built-in firewall ACL rules to filter traffic without root
 -   runtime API to manage peers and configuration
 -   embeddable Go networking library
+-   connect your Wireguard to an existing SOCKS/HTTP proxy to access the internet
 
-Everything runs **100% in userspace**.
+Everything runs **100% in userspace**, your own SD-WAN.
 
 ------------------------------------------------------------------------
 
@@ -126,9 +129,17 @@ Everything runs **100% in userspace**.
 
 Run a WireGuard client exposing proxies:
 
+Start a dummy wireguard server in Terminal 1
+
+``` bash
+./uwgsocks --config examples/exit-server.yaml
+```
+
+Connect with a Wireguard client in Terminal 2
+
 ``` bash
 ./uwgsocks \
-  --wg-config ./provider.conf \
+  --config examples/exit-client.yaml \
   --http 127.0.0.1:8080 \
   --socks5 127.0.0.1:1080
 ```
@@ -198,7 +209,7 @@ Expose or forward services through WireGuard peers.
 Most setups only require:
 
 ``` bash
-./uwgsocks --wg-config ./vpn.conf --http 127.0.0.1:8080
+./uwgsocks --config ./my-ugwsocks-config.yaml
 ```
 
 No system setup required.
