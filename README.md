@@ -47,7 +47,7 @@ This makes WireGuard simple to use when you:
 
 ------------------------------------------------------------------------
 
-# Why Developers Use This
+# Why you might want to use this
 
 ### No system networking changes
 
