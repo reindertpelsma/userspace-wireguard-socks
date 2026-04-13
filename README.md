@@ -160,6 +160,13 @@ Throughput smoke test with a real WireGuard config (e.g [Nordvpn Wireguard](http
 Application -> uwgpreload.so overriding libc functions -> (local UNIX socket file) -> uwgfdproxy managing TCP/UDP sockets routing through Wireguard -> (HTTP/socks API + auth possible) -> uwgsocks daemon connecting to Wireguard -> userspace UDP connection -> Wireguard server
 ```
 
+Supported by the wrapper
+- UDP/TCP sockets. ICMP ping sockets not supported
+- Binding TCP listeners sockets to the Wireguard. Binding is disabled by default, enable with `proxy.bind` in the config in `ugwsocks`
+- Unconnected UDP sockets. if binding is not enabled, unconnected UDP sockets cannot receive inbound connections.
+- Works across forks, multi process, multiple threads and executable boundaries
+- Full support for DNS tunneling to through Wireguard
+
 Limitations of the wrapper:
 - the wrapper cannot intercept connections of static binaries/libraries not linked to libc.
 - the wrapper does not work across user boundaries, that is the application cannot switch user like apt, sudo etc, if it does the connection either fails or bypasses Wireguard. Every user needs its own wrapper 
