@@ -1,39 +1,33 @@
 # Userspace WireGuard Gateway
 
-Run WireGuard networking **without root**, **without `/dev/net/tun`**,
-and **without touching system routing**.
+Run WireGuard networking **without root**, **without `/dev/net/tun`**,\
+**without routing changes**, and **without system VPN setup**.
 
 ``` bash
-# See building below to build your own executables
+# download binaries
 wget https://github.com/reindertpelsma/userspace-wireguard-socks/releases/download/0.1/uwgsocks
-chmod +x uwgsocks
-./uwgsocks --wg-config ./my-wireguard-vpn.conf --http 127.0.0.1:8080 --socks5 127.0.0.1:1080 &
-curl -x http://127.0.0.1:8080 https://example.com
-curl -x socks5h://127.0.0.1:1080 https://example.com
-```
-
-Or routing libc-based applications without SOCKS/HTTP
-``` bash
 wget https://github.com/reindertpelsma/userspace-wireguard-socks/releases/download/0.1/uwgwrapper
-chmod +x uwgwrapper
+chmod +x uwgsocks uwgwrapper
+
+# start a WireGuard tunnel with HTTP and SOCKS proxy
+./uwgsocks --wg-config ./vpn.conf --http 127.0.0.1:8080 --socks5 127.0.0.1:1080
+
+# use it
+curl -x http://127.0.0.1:8080 https://example.com
+
+# run any application through it
 ./uwgwrapper --api http://127.0.0.1:8080 -- curl https://example.com
 ```
 
-One executable. One WireGuard config. No system VPN setup required.
+One executable. One WireGuard config. No system networking setup
+required.
 
 ------------------------------------------------------------------------
 
-# Building
-
-Ensure `golang` is installing alongside `gcc`
-
-```bash
-bash compile.sh
-```
-
 # What This Project Is
 
-`uwgsocks` runs a **complete WireGuard + TCP/IP stack in userspace**.
+`uwgsocks` runs a **complete WireGuard + TCP/IP stack entirely in
+userspace**.
 
 Instead of creating a system VPN interface, applications connect
 through:
@@ -42,9 +36,9 @@ through:
 -   SOCKS proxy
 -   port forwards
 -   a transparent wrapper
--   or an embedded library
+-   or an embedded Go library
 
-This makes WireGuard easy to use when you:
+This makes WireGuard simple to use when you:
 
 -   cannot run as root
 -   do not want to modify system routing
@@ -53,7 +47,7 @@ This makes WireGuard easy to use when you:
 
 ------------------------------------------------------------------------
 
-# Why you maybe want this
+# Why Developers Use This
 
 ### No system networking changes
 
@@ -68,7 +62,7 @@ Just run the binary.
 
 Works in environments such as:
 
--   Locked down Docker/K8S containers
+-   locked‑down Docker or Kubernetes containers
 -   CI/CD runners
 -   HPC clusters
 -   restricted servers
@@ -78,14 +72,16 @@ Works in environments such as:
 
 ### Proxy only the applications you want
 
-Instead of routing an entire machine through a VPN, you can route only a
-few tools:
+Instead of routing an entire machine through a VPN, you can route only
+specific tools.
+
+Example:
 
 ``` bash
 curl -x http://127.0.0.1:8080 https://example.com
 ```
 
-or run one program through the tunnel:
+Or transparently run an application through the tunnel:
 
 ``` bash
 ./uwgwrapper --api http://127.0.0.1:8080 -- git clone https://example.com/repo
@@ -97,45 +93,42 @@ or run one program through the tunnel:
 
 `uwgsocks` can host a complete WireGuard peer that can:
 
--   accept other peers
--   route internet traffic, inbound and outbound
+-   accept peers
+-   route internet traffic inbound and outbound
 -   forward ports
 -   relay traffic between peers
 
-All without requiring root privileges.
+All **without requiring root privileges**.
 
 ------------------------------------------------------------------------
 
 # Core Capabilities
 
 -   rootless WireGuard **client and server**
--   userspace TCP, UDP and IPv6 networking
+-   userspace TCP, UDP, and IPv6 networking
 -   HTTP and SOCKS proxy interfaces
 -   reverse port forwards from the tunnel
--   multi-peer relay support
--   connect directly to local subnets of machines running uwgsocks through transperant inbound
+-   multi‑peer relay support
 -   transparent wrapper for applications without proxy support
 -   PROXY protocol support to preserve source IP
--   built-in firewall ACL rules to filter traffic without root
+-   built‑in firewall ACL rules
 -   runtime API to manage peers and configuration
 -   embeddable Go networking library
--   connect your Wireguard to an existing SOCKS/HTTP proxy to access the internet
+-   ability to route traffic through existing SOCKS/HTTP proxies
 
-Everything runs **100% in userspace**, your own SD-WAN.
+Everything runs **100% in userspace**.
 
 ------------------------------------------------------------------------
 
 # Quick Example
 
-Run a WireGuard client exposing proxies:
-
-Start a dummy wireguard server in Terminal 1
+Start a demo WireGuard server (Terminal 1):
 
 ``` bash
 ./uwgsocks --config examples/exit-server.yaml
 ```
 
-Connect with a Wireguard client in Terminal 2
+Connect with a client exposing proxies (Terminal 2):
 
 ``` bash
 ./uwgsocks \
@@ -187,12 +180,9 @@ Expose or forward services through WireGuard peers.
 
     Application
          │
-         │ (optional)
-         ▼
-    LD_PRELOAD wrapper
          │
          ▼
-    fdproxy
+    uwgwrapper (optional)
          │
          ▼
     uwgsocks
@@ -204,15 +194,25 @@ Expose or forward services through WireGuard peers.
 
 ------------------------------------------------------------------------
 
-# One Binary. One Config.
+# Building
 
-Most setups only require:
+If you prefer to build the binaries yourself:
+
+Requirements:
+
+-   Go
+-   gcc
 
 ``` bash
-./uwgsocks --config ./my-ugwsocks-config.yaml
+bash compile.sh
 ```
 
-No system setup required.
+This produces:
+
+    uwgsocks
+    uwgwrapper
+
+Both are static executables.
 
 ------------------------------------------------------------------------
 
