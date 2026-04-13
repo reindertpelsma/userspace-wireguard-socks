@@ -32,6 +32,8 @@ Since it does not use your regular network routing, applications connect through
 
 ## Build
 
+You can download the latest binaries from [https://github.com/reindertpelsma/userspace-wireguard-socks/releases/tag/0.1](https://github.com/reindertpelsma/userspace-wireguard-socks/releases/tag/0.1), these two binaries are the only things you need to setup a userspace wireguard connection and route your existing applications.
+
 Install Go 1.24 or newer, then:
 
 ```bash
