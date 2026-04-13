@@ -162,10 +162,11 @@ Application -> uwgpreload.so overriding libc functions -> (local UNIX socket fil
 
 Supported by the wrapper
 - UDP/TCP sockets. ICMP ping sockets not supported
-- Binding TCP listeners sockets to the Wireguard. Binding is disabled by default, enable with `proxy.bind` in the config in `ugwsocks`
+- Binding TCP listeners sockets to the Wireguard tunnel. Binding is disabled by default, enable with `proxy.bind` in the config in `ugwsocks`
 - Unconnected UDP sockets. if binding is not enabled, unconnected UDP sockets cannot receive inbound connections.
 - Works across forks, multi process, multiple threads and executable boundaries
 - Full support for DNS tunneling to through Wireguard
+- Bypass for loopback connections. currently binding to 0.0.0.0 does not bind to loopback, will be fixed asap
 
 Limitations of the wrapper:
 - the wrapper cannot intercept connections of static binaries/libraries not linked to libc.
@@ -173,6 +174,8 @@ Limitations of the wrapper:
 - the wrapper does not inferere with loopback connections
 - partial bind(2) support. bind is only supported for TCP listeners and unconnected UDP sockets. binding is ignored for connected TCP/UDP sockets.
 - not all applications are supported, support is experimental
+
+*NOTE*: Its highly recommended to use SOCKS or HTTP proxy for applications supporting it instead of the wrapper. Use the wrapper only to tunnel applications that do not support SOCKS/HTTP proxies. For applications requiring inbound connections, prefer using the [proxy protocol](https://www.haproxy.com/blog/use-the-proxy-protocol-to-preserve-a-clients-ip-address). If you bind SOCKS5 to loopback, you can combine it with the launcher wrapper since loopback is bypassed
 
 DNS is also routed through. The library overrides the libc resolution API to prevent any DNS resolution against `/etc/hosts` or `/etc/resolv.conf`. However since many applications use their own DNS libraries, and directly make outbound DNS connections, by default the wrapper rewrites any connected UDP/TCP socket to port 53 to the Wireguard DNS, including DNS to loopback where a potential stub resolver might be. 
 
