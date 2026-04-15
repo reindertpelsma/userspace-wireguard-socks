@@ -12,7 +12,7 @@ import (
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
-	"root/userspace-wireguard-socks/internal/wgbind"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/wgbind"
 )
 
 func generateKeyPair() (priv, pub [32]byte) {

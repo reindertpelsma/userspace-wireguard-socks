@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	turn "github.com/pion/turn/v4"
 	yaml "gopkg.in/yaml.v3"
@@ -30,7 +31,7 @@ type Config struct {
 	Listen             ListenConfig  `yaml:"listen"`
 	Users              []UserConfig  `yaml:"users"`
 	PortRanges         []RangeConfig `yaml:"port_ranges"`
-	GlobalMaxSessions  int           `yaml:"global_max_sessions"`
+	MaxSessions        int           `yaml:"max_sessions"`
 }
 
 type RangeConfig struct {
@@ -99,14 +100,13 @@ const (
 )
 
 type relayReservation struct {
-	Username    string
-	ClientIP    string
-	Port        int
-	MappedAddr  *net.UDPAddr
-	Behavior    Behavior
-	Sources     []*net.IPNet
-	WGGuard     *WireguardGuard
-	MaxSessions int
+	Username   string
+	ClientIP   string
+	Port       int
+	MappedAddr *net.UDPAddr
+	Behavior   Behavior
+	Sources    []*net.IPNet
+	WGGuard    *WireguardGuard
 }
 
 type openRelayPion struct {
@@ -117,6 +117,8 @@ type openRelayPion struct {
 	mu           sync.RWMutex
 	reservations map[string]*relayReservation
 	servers      []*turn.Server
+
+	globalSessions int64
 }
 
 func loadConfig(path string) (Config, error) {
@@ -146,9 +148,6 @@ func loadConfig(path string) (Config, error) {
 	if cfg.NonceTTL == "" {
 		cfg.NonceTTL = "10m"
 	}
-	if cfg.GlobalMaxSessions <= 0 {
-		cfg.GlobalMaxSessions = DefaultGlobalMaxSessions
-	}
 	return cfg, nil
 }
 
@@ -174,6 +173,7 @@ func newOpenRelayPion(cfg Config) (*openRelayPion, error) {
 				return nil, fmt.Errorf("user %q wireguard_public_key: %w", u.Username, err)
 			}
 			guard = NewWireguardGuard(pk)
+			guard.MaxSessions = u.MaxSessions
 		}
 		o.userRules[u.Username] = &turnAuthRule{
 			Username:       u.Username,
@@ -203,6 +203,7 @@ func newOpenRelayPion(cfg Config) (*openRelayPion, error) {
 				return nil, fmt.Errorf("range %d-%d wireguard_public_key: %w", r.Start, r.End, err)
 			}
 			guard = NewWireguardGuard(pk)
+			guard.MaxSessions = r.MaxSessions
 		}
 		o.rangeRules = append(o.rangeRules, turnRangeRule{
 			Start:          r.Start,
@@ -226,7 +227,8 @@ func (o *openRelayPion) authHandler(username, realm string, srcAddr net.Addr) ([
 	if !ok {
 		return nil, false
 	}
-
+	
+	// Split dynamic username: ORIGINAL_USERNAME---BASE64_ENCRYPTED_PK
 	baseUsername := username
 	var encryptedPK string
 	if idx := strings.LastIndex(username, "---"); idx != -1 {
@@ -249,6 +251,7 @@ func (o *openRelayPion) authHandler(username, realm string, srcAddr net.Addr) ([
 			pk, err := decryptPublicKey(encryptedPK, password)
 			if err == nil {
 				finalGuard = NewWireguardGuard(pk)
+				finalGuard.MaxSessions = maxSess
 			} else if wgMode == "required-in-username" {
 				return nil, false
 			}
@@ -259,21 +262,14 @@ func (o *openRelayPion) authHandler(username, realm string, srcAddr net.Addr) ([
 		finalGuard = nil
 	}
 
-	if finalGuard != nil {
-		finalGuard.mu.Lock()
-		finalGuard.GlobalMaxSessions = o.cfg.GlobalMaxSessions
-		finalGuard.mu.Unlock()
-	}
-
 	res := &relayReservation{
-		Username:    baseUsername,
-		ClientIP:    udpSrc.IP.String(),
-		Port:        port,
-		MappedAddr:  mapped,
-		Behavior:    behavior,
-		Sources:     srcNets,
-		WGGuard:     finalGuard,
-		MaxSessions: maxSess,
+		Username:   baseUsername,
+		ClientIP:   udpSrc.IP.String(),
+		Port:       port,
+		MappedAddr: mapped,
+		Behavior:   behavior,
+		Sources:    srcNets,
+		WGGuard:    finalGuard,
 	}
 	o.mu.Lock()
 	o.reservations[username+"|"+udpSrc.IP.String()] = res
@@ -332,39 +328,70 @@ func (o *openRelayPion) allowPeer(clientAddr net.Addr, peerIP net.IP) bool {
 	return false
 }
 
+type globalLimitedPacketConn struct {
+	net.PacketConn
+	wrapper *openRelayPion
+}
+
+func (c *globalLimitedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	n, addr, err = c.PacketConn.ReadFrom(p)
+	return n, addr, err
+}
+
+func (c *globalLimitedPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	return c.PacketConn.WriteTo(p, addr)
+}
+
 type guardedRelayAddressGenerator struct {
 	turn.RelayAddressGenerator
 	wrapper *openRelayPion
 }
 
 func (g *guardedRelayAddressGenerator) AllocatePacketConn(network string, requestedPort int) (net.PacketConn, net.Addr, error) {
+	if g.wrapper.cfg.MaxSessions > 0 {
+		if atomic.LoadInt64(&g.wrapper.globalSessions) >= int64(g.wrapper.cfg.MaxSessions) {
+			return nil, nil, errors.New("global session limit reached")
+		}
+	}
+
 	conn, addr, err := g.RelayAddressGenerator.AllocatePacketConn(network, requestedPort)
 	if err != nil {
 		return nil, nil, err
 	}
 	udpAddr := addr.(*net.UDPAddr)
 
+	atomic.AddInt64(&g.wrapper.globalSessions, 1)
+
 	g.wrapper.mu.RLock()
 	var guard *WireguardGuard
-	var maxSess int
 	for _, res := range g.wrapper.reservations {
 		if res.Port == udpAddr.Port {
 			guard = res.WGGuard
-			maxSess = res.MaxSessions
 			break
 		}
 	}
 	g.wrapper.mu.RUnlock()
 
+	wrapped := &sessionCountingPacketConn{PacketConn: conn, wrapper: g.wrapper}
+
 	if guard != nil {
-		if maxSess > 0 {
-			guard.mu.Lock()
-			guard.PerRelayMaxSessions[udpAddr.Port] = maxSess
-			guard.mu.Unlock()
-		}
-		return &GuardPacketConn{PacketConn: conn, Guard: guard, RelayPort: udpAddr.Port}, addr, nil
+		return &GuardPacketConn{PacketConn: wrapped, Guard: guard, RelayPort: udpAddr.Port}, addr, nil
 	}
-	return conn, addr, nil
+	return wrapped, addr, nil
+}
+
+type sessionCountingPacketConn struct {
+	net.PacketConn
+	wrapper *openRelayPion
+	once    sync.Once
+}
+
+func (c *sessionCountingPacketConn) Close() error {
+	err := c.PacketConn.Close()
+	c.once.Do(func() {
+		atomic.AddInt64(&c.wrapper.globalSessions, -1)
+	})
+	return err
 }
 
 func (g *guardedRelayAddressGenerator) AllocateConn(network string, requestedPort int) (net.Conn, net.Addr, error) {
