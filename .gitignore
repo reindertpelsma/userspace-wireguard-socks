@@ -7,6 +7,9 @@
 /dist/
 /build/
 /tmp/
+# Nested UI repo lives here but is committed separately.
+/uwgsocks-ui/
+*.swp
 *.test
 *.prof
 *.pprof
