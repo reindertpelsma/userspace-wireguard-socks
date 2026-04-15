@@ -192,7 +192,7 @@ func TestWireguardGuard_SessionOverflow(t *testing.T) {
 	relayPort := 3478
 
 	// Fill session table with unverified sessions
-	for i := 0; i < MaxSessions; i++ {
+	for i := 0; i < guard.MaxSessions; i++ {
 		addr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1000 + i}
 		guard.mu.Lock()
 		guard.Sessions = append(guard.Sessions, &WireguardSession{
