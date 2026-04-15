@@ -1,0 +1,37 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+# Demonstrates selected local forwards and tunnel-side reverse forwards.
+# Replace the WireGuard keys and target addresses before using it for anything
+# outside a local lab.
+wireguard:
+  config_file: ./client.conf
+
+proxy:
+  socks5: 127.0.0.1:1080
+  fallback_direct: true
+
+forwards:
+  # Host-side TCP listener. Connecting to 127.0.0.1:15432 dials the database
+  # over WireGuard.
+  - proto: tcp
+    listen: 127.0.0.1:15432
+    target: 10.10.0.20:5432
+
+  # Host-side UDP listener.
+  - proto: udp
+    listen: 127.0.0.1:15353
+    target: 100.64.90.1:53
+
+reverse_forwards:
+  # Tunnel-side listener. Peers that route 100.64.90.99 to this node can reach
+  # the host HTTPS service without enabling broad transparent inbound routing.
+  - proto: tcp
+    listen: 100.64.90.99:8443
+    target: 127.0.0.1:443
+    proxy_protocol: v1
+
+  - proto: udp
+    listen: 100.64.90.99:5353
+    target: 127.0.0.1:53
+    proxy_protocol: v2
