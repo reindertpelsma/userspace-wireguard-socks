@@ -32,7 +32,7 @@ type Config struct {
 	SocketAPI   SocketAPI   `yaml:"socket_api"`
 	ACL         ACL         `yaml:"acl"`
 	Forwards    []Forward   `yaml:"forwards"`
-	TURN        TURN     `yaml:"turn"`
+	TURN        TURN        `yaml:"turn"`
 	// ReverseForwards listen inside the userspace WireGuard netstack and dial
 	// out to the host network. They are narrower than transparent inbound
 	// forwarding because only explicitly configured tunnel IP:port pairs are
@@ -82,6 +82,9 @@ type TURN struct {
 	// through the TURN relay.
 	// It can be a list of specific CIDRs.
 	Permissions []string `yaml:"permissions"`
+	// Wheter to include the Wireguard public key in the username
+	// The wireguard public key is encrypted by the credential, so not exposed over the wire
+	IncludeWGPublicKey *bool `yaml:"include_wg_public_key"`
 }
 
 type Peer struct {
@@ -269,7 +272,7 @@ func Default() Config {
 			RelayDefault:    acl.Deny,
 		},
 		API: API{
-                        AllowUnauthenticatedUnix:  true,
+			AllowUnauthenticatedUnix: true,
 		},
 		DNSServer: DNSServer{MaxInflight: 1024},
 	}

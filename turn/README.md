@@ -75,6 +75,8 @@ users:
     source_networks:
       - "0.0.0.0/0"
     mapped_address: "203.0.113.10:40000"
+    wireguard_mode: server-only # Options: disabled (no UDP), server-only (force server public key), default-with-overwrite (public key can be chosen by client by embedding in username), required-in-username
+    wireguard_public_key: QyKFXQYSiIBEP//EMBNonpi2PwHtp2c4dPwRWZt5RFI=
 ```
 
 Meaning:
@@ -83,6 +85,10 @@ Meaning:
 - relay port = `40000`
 - client source must match `source_networks`
 - reported public relay address = `203.0.113.10:40000`
+- the UDP port may only be used for inbound/outbound Wireguard traffic
+- Only wireguard connections to the server's public key are allowed
+
+The wireguard public key is not sent over the wire, therefore its like a password the TURN server can use to verify inbound connections before even forwarding them to your server. its therefore crucial to keep your wireguard server public key secret outside of legitemate clients that need to connect to your server.
 
 ### Port ranges
 
@@ -101,6 +107,7 @@ port_ranges:
     mapped_range:
       ip: "203.0.113.10"
       start_port: 51000
+    wireguard_mode: required-in-username
 ```
 
 Meaning:
@@ -108,6 +115,7 @@ Meaning:
 - all use the same password
 - username `41005` maps to relay port `41005`
 - reported public relay address becomes `203.0.113.10:51005`
+- all these ports are Wireguard ports, the public key is provided by the TURN client inside the TURN username.
 
 ## Permission behavior
 

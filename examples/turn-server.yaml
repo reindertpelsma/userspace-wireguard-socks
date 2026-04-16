@@ -1,0 +1,35 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+# Rootless egress server. WireGuard peers can route Internet traffic here, and
+# uwgsocks terminates inbound TCP/UDP to normal host sockets.
+
+# See the turn folder for the TURN server.
+
+wireguard:
+  config_file: ./examples/server.conf
+
+turn:
+  server: 127.0.0.1:3478 #Put to your real turn server IP
+  username: wireguard
+  password: super-secret-turn-password
+
+  #Set to true to embed the wireguard public key in the TURN username as encrypted, only works if the TURN server understands this
+  #This allows the TURN server to filter inbound UDP packets using the server's public key
+  include_wg_public_key: false
+
+inbound:
+  transparent: true
+
+dns_server:
+  # Tunnel-side DNS listener. This is not a host port 53 bind.
+  listen: 100.64.90.1:53
+
+api:
+  listen: 127.0.0.1:9090
+  token: replace-with-a-long-random-token
+
+acl:
+  inbound_default: allow
+  outbound_default: allow
+  relay_default: deny

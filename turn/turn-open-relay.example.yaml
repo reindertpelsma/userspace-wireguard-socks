@@ -9,41 +9,23 @@ listen:
   relay_ip: "203.0.113.10"
 
 users:
-  - username: "alice"
-    password: "alice-pass"
-    port: 40000
+  - username: "wireguard" # NOTE: username is sent in clear over the wire
+    password: "super-secret-turn-password" #Change password
+    port: 51820
     permission_behavior: "allow"
     source_networks:
       - "0.0.0.0/0"
-    mapped_address: "203.0.113.10:40000"
+    mapped_address: "203.0.113.10:51820"
+    wireguard_mode: server-only # Options: disabled (no UDP), server-only (force server public key), default-with-overwrite (public key can be chosen by client by embedding in username), required-in-username
+    wireguard_public_key: QyKFXQYSiIBEP//EMBNonpi2PwHtp2c4dPwRWZt5RFI=
 
-  - username: "bob"
-    password: "bob-pass"
-    port: 40001
-    permission_behavior: "reject-unless-permitted"
-    source_networks:
-      - "192.168.0.0/16"
-      - "10.0.0.0/8"
-    mapped_address: "203.0.113.10:50001"
-
-port_ranges:
-  - start: 41000
-    end: 41099
-    password: "shared-range-secret"
-    permission_behavior: "allow-if-no-permissions"
-    source_networks:
-      - "0.0.0.0/0"
-    mapped_range:
-      ip: "203.0.113.10"
-      start_port: 51000
-
-  - start: 42000
-    end: 42031
-    password: "lab-secret"
-    permission_behavior: "allow"
-    source_networks:
-      - "127.0.0.0/8"
-      - "10.0.0.0/8"
-    mapped_range:
-      ip: "198.51.100.25"
-      start_port: 62000
+#port_ranges:
+#  - start: 41000
+#    end: 41099
+#    password: "shared-range-secret"
+#    permission_behavior: "allow-if-no-permissions"
+#    source_networks:
+#      - "0.0.0.0/0"
+#    mapped_range:
+#      ip: "203.0.113.10"
+#      start_port: 51000

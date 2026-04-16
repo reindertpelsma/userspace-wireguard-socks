@@ -208,12 +208,17 @@ func (e *Engine) Start() error {
 	// traffic to send.
 	var bind conn.Bind
 	if e.cfg.TURN.Server != "" {
+		include_wg_pub_key := false
+		if e.cfg.TURN.IncludeWGPublicKey != nil {
+			include_wg_pub_key = *e.cfg.TURN.IncludeWGPublicKey
+		}
 		turnBind := &wgbind.TURNBind{
-			Server:   e.cfg.TURN.Server,
-			Username: e.cfg.TURN.Username,
-			Password: e.cfg.TURN.Password,
-			Realm:    e.cfg.TURN.Realm,
-			AllowedPeers: e.cfg.TURN.Permissions,
+			Server:             e.cfg.TURN.Server,
+			Username:           e.cfg.TURN.Username,
+			Password:           e.cfg.TURN.Password,
+			Realm:              e.cfg.TURN.Realm,
+			AllowedPeers:       e.cfg.TURN.Permissions,
+			IncludeWGPublicKey: include_wg_pub_key,
 		}
 		e.turnBind = turnBind
 		e.updateTURNPermissions()
@@ -273,7 +278,7 @@ func (e *Engine) updateTURNPermissions() {
 	if e.turnBind == nil {
 		return
 	}
-	
+
 	e.cfgMu.RLock()
 	var ips []string = e.cfg.TURN.Permissions
 	for _, p := range e.cfg.WireGuard.Peers {
@@ -1930,9 +1935,9 @@ func (e *Engine) allowRelayPacket(packet []byte) bool {
 	}
 	network := ""
 	if proto == 6 {
-                network = "TCP"
+		network = "TCP"
 	} else if proto == 17 {
-                network = "UDP"
+		network = "UDP"
 	}
 	return e.relayAllowed(src, dst, network)
 }
