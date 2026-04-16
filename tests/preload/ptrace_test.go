@@ -189,7 +189,7 @@ func TestUWGWrapperCurlAcrossTransports(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, transport := range []string{"preload", "preload-and-ptrace"} {
+	for _, transport := range []string{"preload", "preload-and-ptrace", "ptrace", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			out := runWrappedTargetWithOptions(t, art, httpSock, transport, "curl",
 				[]string{"--max-time", "15", "-fsS", "http://100.64.94.1:18083/"},
@@ -203,6 +203,23 @@ func TestUWGWrapperCurlAcrossTransports(t *testing.T) {
 				wrapperRunOptions{timeout: 90 * time.Second})
 			if normalizedOutput(out) != "curl-direct-fallback" {
 				t.Fatalf("unexpected direct-fallback curl output %q", out)
+			}
+		})
+	}
+}
+
+func TestUWGWrapperUDPConnectProbeLazy(t *testing.T) {
+	requireWrapperToolchain(t)
+	art := buildWrapperArtifacts(t)
+	missingAPI := filepath.Join(t.TempDir(), "missing-http.sock")
+
+	for _, transport := range []string{"ptrace", "ptrace-seccomp", "ptrace-only"} {
+		t.Run(transport, func(t *testing.T) {
+			out := runWrappedTargetWithOptions(t, art, missingAPI, transport, art.stub,
+				[]string{"100.64.94.1", "18080", "udp-connect-probe", "udp-connect-probe"},
+				wrapperRunOptions{timeout: 15 * time.Second})
+			if normalizedOutput(out) != "udp-connect-probe" {
+				t.Fatalf("unexpected UDP connect probe output %q", out)
 			}
 		})
 	}
