@@ -550,6 +550,13 @@ When the connection table is full, new connections are rejected unless there is 
 
 ACL lists exist for inbound, outbound, and relay traffic. Rules are evaluated in order, first match wins, and omitted fields are wildcards.
 
+Relay forwarding is stateful by default. Relay ACLs decide only whether a new
+TCP SYN, UDP conversation, or ICMP echo request may be created; established
+reverse traffic and ICMP errors that quote an existing flow are allowed from the
+relay conntrack table. Use `relay.conntrack: false` or
+`--relay-conntrack=false` if you need the older stateless mode where both
+directions require explicit relay ACL rules.
+
 YAML:
 
 ```yaml

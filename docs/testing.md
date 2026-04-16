@@ -43,7 +43,8 @@ The main suite covers:
 - Host forwarding defaults and virtual `Address=` subnet rejection.
 - Reserved IPv4 and IPv6 tunnel-address filtering.
 - Source IP enforcement against malicious WireGuard peers.
-- Relay forwarding allow and deny ACL behavior.
+- Relay forwarding allow and deny ACL behavior, including stateful TCP, UDP,
+  ICMP echo, ICMP error, IPv6, expiry, and conntrack limit cases.
 - API peer, ACL, status, ping, and runtime forward operations.
 - API mutation while traffic is flowing with many ACL rules.
 - Raw socket API TCP, UDP, UDP reconnect/disconnect, TCP listener/accept, DNS frame, and malformed-frame behavior.
@@ -96,4 +97,4 @@ Before calling this production-safe, ask another engineer to review:
 - DNS fallback behavior and transaction caps.
 - WireGuard peer update and `AllowedIPs` cache update path.
 - Transparent TCP backpressure and global memory limits.
-- Relay ACL behavior and directional reply rules.
+- Relay ACL behavior, stateless directional mode, and stateful reply tracking.

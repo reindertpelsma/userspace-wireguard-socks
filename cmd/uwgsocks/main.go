@@ -120,9 +120,12 @@ func main() {
 		dropIPv4Invalid       optionalBool
 		dropIPv6LLMulticast   optionalBool
 		enforceAddressSubnets optionalBool
+		relayConntrack        optionalBool
 		proxyHostRedirect     string
 		inboundHostRedirect   string
 		hostDialBindAddress   string
+		relayConntrackMax     int
+		relayConntrackPeerMax int
 	)
 	flag.StringVar(&configPath, "config", "", "YAML config file")
 	flag.StringVar(&wgConfigPath, "wg-config", "", "WireGuard wg-quick config file")
@@ -166,6 +169,9 @@ func main() {
 	flag.StringVar(&relayDefault, "acl-relay-default", "", "allow or deny")
 	flag.Var(&transparent, "inbound-transparent", "enable transparent inbound TCP/UDP host proxying")
 	flag.Var(&relay, "relay", "enable WireGuard L3 relay forwarding")
+	flag.Var(&relayConntrack, "relay-conntrack", "enable stateful relay connection tracking")
+	flag.IntVar(&relayConntrackMax, "relay-conntrack-max-flows", 0, "maximum relay conntrack entries; default 65536")
+	flag.IntVar(&relayConntrackPeerMax, "relay-conntrack-max-per-peer", 0, "maximum relay conntrack entries one peer may initiate; default 4096")
 	flag.StringVar(&consistent, "consistent-port", "", "strict, loose, or disabled")
 	flag.Var(&disableLow, "disable-low-ports", "do not bind host source ports below 1024 for inbound proxying")
 	flag.IntVar(&maxConns, "max-connections", 0, "maximum inbound transparent connection table size; 0 is unlimited")
@@ -350,6 +356,16 @@ func main() {
 	if relay.set {
 		v := relay.value
 		cfg.Relay.Enabled = &v
+	}
+	if relayConntrack.set {
+		v := relayConntrack.value
+		cfg.Relay.Conntrack = &v
+	}
+	if relayConntrackMax != 0 {
+		cfg.Relay.ConntrackMaxFlows = relayConntrackMax
+	}
+	if relayConntrackPeerMax != 0 {
+		cfg.Relay.ConntrackMaxPerPeer = relayConntrackPeerMax
 	}
 	if disableLow.set {
 		v := disableLow.value

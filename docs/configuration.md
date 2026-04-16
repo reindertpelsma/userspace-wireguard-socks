@@ -203,6 +203,9 @@ CLI:
 ```yaml
 relay:
   enabled: false
+  conntrack: true
+  conntrack_max_flows: 65536
+  conntrack_max_per_peer: 4096
 
 acl:
   inbound_default: allow
@@ -221,12 +224,22 @@ CLI:
 
 ```bash
 --relay=true
+--relay-conntrack=true
+--relay-conntrack-max-flows 65536
+--relay-conntrack-max-per-peer 4096
 --acl-inbound-default deny
 --acl-outbound 'allow dst=100.64.90.0/24 dport=80-443'
 --acl-relay 'allow src=100.64.90.2/32 dst=100.64.90.3/32 dport=443'
 ```
 
-Relay ACLs are directional. For a TCP relay flow, allow both the client-to-server rule and the server-to-client reply rule when the default is deny.
+Relay forwarding uses stateful connection tracking by default. New TCP SYNs,
+new UDP conversations, and ICMP echo requests are checked against the relay
+ACL; established replies and matching ICMP error packets are then allowed from
+the conntrack table. UDP and ICMP echo entries idle out after 30 seconds by
+default, while TCP follows the configured TCP idle timeout with shorter
+handshake and close windows. Set `relay.conntrack: false` or
+`--relay-conntrack=false` to restore the older stateless behavior where relay
+ACLs are purely directional and reply rules must be configured explicitly.
 
 ## DNS And API
 

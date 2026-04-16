@@ -56,6 +56,10 @@ type Engine struct {
 	outACL    acl.List
 	relACL    acl.List
 
+	relayMu        sync.Mutex
+	relayFlows     map[relayFlowKey]*relayFlow
+	relayLastSweep time.Time
+
 	listenersMu sync.Mutex
 	listeners   []net.Listener
 	pconns      []net.PacketConn
@@ -122,6 +126,7 @@ func New(cfg config.Config, logger *log.Logger) (*Engine, error) {
 		inACL:          acl.List{Default: cfg.ACL.InboundDefault, Rules: cfg.ACL.Inbound},
 		outACL:         acl.List{Default: cfg.ACL.OutboundDefault, Rules: cfg.ACL.Outbound},
 		relACL:         acl.List{Default: cfg.ACL.RelayDefault, Rules: cfg.ACL.Relay},
+		relayFlows:     make(map[relayFlowKey]*relayFlow),
 		addrs:          make(map[string]string),
 		listenerMap:    make(map[string]net.Listener),
 		pconnMap:       make(map[string]net.PacketConn),
@@ -1921,56 +1926,28 @@ func ipv4InvalidTunnelAddr(ip netip.Addr) bool {
 }
 
 func (e *Engine) allowRelayPacket(packet []byte) bool {
-	proto, src, dst, ok := packetAddrPorts(packet)
-	if !ok || e.localAddrContains(src.Addr()) {
+	meta, ok := parseRelayPacket(packet)
+	if !ok || e.localAddrContains(meta.src.Addr()) {
 		return true
 	}
-	if e.localPrefixContainsUnrouted(dst.Addr()) {
+	if e.localPrefixContainsUnrouted(meta.dst.Addr()) {
 		return false
 	}
-	network := ""
-	if proto == 6 {
-		network = "TCP"
-	} else if proto == 17 {
-		network = "UDP"
+	if e.cfg.Relay.Conntrack == nil || *e.cfg.Relay.Conntrack {
+		return e.allowRelayTracked(meta, time.Now())
 	}
-	return e.relayAllowed(src, dst, network)
+	return e.relayAllowed(meta.src, meta.dst, meta.network)
 }
 
 // packetAddrPorts extracts enough L3/L4 metadata for relay ACLs. Unknown or
 // malformed packets are treated as non-relay so gVisor can continue applying
 // its own protocol validation.
 func packetAddrPorts(packet []byte) (byte, netip.AddrPort, netip.AddrPort, bool) {
-	if len(packet) == 0 {
+	meta, ok := parseRelayPacket(packet)
+	if !ok {
 		return 0, netip.AddrPort{}, netip.AddrPort{}, false
 	}
-	switch packet[0] >> 4 {
-	case 4:
-		if len(packet) < 20 {
-			return 0, netip.AddrPort{}, netip.AddrPort{}, false
-		}
-		ihl := int(packet[0]&0x0f) * 4
-		if ihl < 20 || len(packet) < ihl {
-			return 0, netip.AddrPort{}, netip.AddrPort{}, false
-		}
-		src := netip.AddrFrom4([4]byte{packet[12], packet[13], packet[14], packet[15]})
-		dst := netip.AddrFrom4([4]byte{packet[16], packet[17], packet[18], packet[19]})
-		sp, dp := packetPorts(packet[9], packet[ihl:])
-		return packet[9], netip.AddrPortFrom(src, sp), netip.AddrPortFrom(dst, dp), true
-	case 6:
-		if len(packet) < 40 {
-			return 0, netip.AddrPort{}, netip.AddrPort{}, false
-		}
-		var src16, dst16 [16]byte
-		copy(src16[:], packet[8:24])
-		copy(dst16[:], packet[24:40])
-		src := netip.AddrFrom16(src16)
-		dst := netip.AddrFrom16(dst16)
-		sp, dp := packetPorts(packet[6], packet[40:])
-		return packet[6], netip.AddrPortFrom(src, sp), netip.AddrPortFrom(dst, dp), true
-	default:
-		return 0, netip.AddrPort{}, netip.AddrPort{}, false
-	}
+	return meta.proto, meta.src, meta.dst, true
 }
 
 func packetPorts(proto byte, transport []byte) (uint16, uint16) {
