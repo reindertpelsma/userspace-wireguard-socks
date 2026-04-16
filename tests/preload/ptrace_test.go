@@ -85,10 +85,10 @@ func TestUWGWrapperBothMixedInterop(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
 
-	_, baseline := runWrappedTargetWithStats(t, art, httpSock, "both", art.rawmixClient,
+	_, baseline := runWrappedTargetWithStats(t, art, httpSock, "preload-and-ptrace", art.rawmixClient,
 		[]string{"print-only", "0.0.0.0", "0", "both-baseline"}, wrapperRunOptions{})
 
-	out, stats := runWrappedTargetWithStats(t, art, httpSock, "both", art.rawmixClient,
+	out, stats := runWrappedTargetWithStats(t, art, httpSock, "preload-and-ptrace", art.rawmixClient,
 		[]string{"raw-socket-libc-connect-dynamic-only", "100.64.94.1", "18080", "both-raw-open-dynamic"}, wrapperRunOptions{})
 	if normalizedOutput(out) != "both-raw-open-dynamic" {
 		t.Fatalf("unexpected both raw-open dynamic output %q", out)
@@ -98,7 +98,7 @@ func TestUWGWrapperBothMixedInterop(t *testing.T) {
 	assertSyscallDelta(t, baseline, stats, "write", 0)
 	assertSyscallDelta(t, baseline, stats, "read", 0)
 
-	out, stats = runWrappedTargetWithStats(t, art, httpSock, "both", art.rawmixClient,
+	out, stats = runWrappedTargetWithStats(t, art, httpSock, "preload-and-ptrace", art.rawmixClient,
 		[]string{"raw-socket-libc-connect-stdio-only", "100.64.94.1", "18080", "both-raw-open-stdio"}, wrapperRunOptions{})
 	if normalizedOutput(out) != "both-raw-open-stdio" {
 		t.Fatalf("unexpected both raw-open stdio output %q", out)
@@ -108,13 +108,13 @@ func TestUWGWrapperBothMixedInterop(t *testing.T) {
 	assertSyscallDelta(t, baseline, stats, "write", 0)
 	assertSyscallDelta(t, baseline, stats, "read", 0)
 
-	out = runWrappedTarget(t, art, httpSock, "both", art.rawmixClient,
+	out = runWrappedTarget(t, art, httpSock, "preload-and-ptrace", art.rawmixClient,
 		"raw-socket-libc-connect", "100.64.94.1", "18080", "both-raw-open")
 	if normalizedOutput(out) != "both-raw-open" {
 		t.Fatalf("unexpected both raw-open output %q", out)
 	}
 
-	out = runWrappedTarget(t, art, httpSock, "both", art.rawmixClient,
+	out = runWrappedTarget(t, art, httpSock, "preload-and-ptrace", art.rawmixClient,
 		"libc-socket-raw-connect", "100.64.94.1", "18080", "both-raw-connect")
 	if normalizedOutput(out) != "both-raw-connect" {
 		t.Fatalf("unexpected both raw-connect output %q", out)
@@ -126,7 +126,7 @@ func TestUWGWrapperBothStress(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
 
-	out := runWrappedTargetWithOptions(t, art, httpSock, "both", art.rawmixClient,
+	out := runWrappedTargetWithOptions(t, art, httpSock, "preload-and-ptrace", art.rawmixClient,
 		[]string{"stress", "100.64.94.1", "18080", "both-stress", "2", "2"},
 		wrapperRunOptions{timeout: 90 * time.Second})
 	if strings.TrimSpace(string(out)) != "rawmix-stress-ok" {
@@ -139,12 +139,12 @@ func TestUWGWrapperBothExecAndFork(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	serverEng, httpSock := setupWrapperNetwork(t)
 
-	out := runWrappedTarget(t, art, httpSock, "both", art.mixed, "100.64.94.1", "18080", "both-exec", "exec")
+	out := runWrappedTarget(t, art, httpSock, "preload-and-ptrace", art.mixed, "100.64.94.1", "18080", "both-exec", "exec")
 	if normalizedOutput(out) != "both-exec" {
 		t.Fatalf("unexpected both exec output %q", out)
 	}
 
-	out = runWrappedTargetWithOptions(t, art, httpSock, "both", art.stub,
+	out = runWrappedTargetWithOptions(t, art, httpSock, "preload-and-ptrace", art.stub,
 		[]string{"100.64.94.1", "18080", "both-fork", "tcp", "fork"},
 		wrapperRunOptions{timeout: 60 * time.Second})
 	if normalizedOutput(out) != "both-fork" {
@@ -162,7 +162,7 @@ func TestUWGWrapperBothExecAndFork(t *testing.T) {
 				_, _ = io.WriteString(w, "curl-over-wrapper")
 			}))
 		}()
-		out = runWrappedTargetWithOptions(t, art, httpSock, "both", "curl",
+		out = runWrappedTargetWithOptions(t, art, httpSock, "preload-and-ptrace", "curl",
 			[]string{"--max-time", "15", "-fsS", "http://100.64.94.1:18083/"},
 			wrapperRunOptions{timeout: 90 * time.Second})
 		if normalizedOutput(out) != "curl-over-wrapper" {
@@ -547,7 +547,7 @@ func runWrappedTargetWithStats(t *testing.T, art wrapperArtifacts, httpSock, tra
 
 func transportUsesPreload(transport string) bool {
 	switch transport {
-	case "both", "combo-only", "preload+seccomp", "preload-plus-seccomp", "preload", "preload-only":
+	case "preload-and-ptrace", "combo-only", "preload+seccomp", "preload-plus-seccomp", "preload", "preload-only":
 		return true
 	default:
 		return false

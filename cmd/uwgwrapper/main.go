@@ -50,7 +50,7 @@ func main() {
 	flag.StringVar(&preloadPath, "preload", os.Getenv("UWGS_PRELOAD"), "path to preload shared library; defaults to embedded copy extracted to /tmp")
 	flag.StringVar(&listenPath, "listen", getenv("UWGS_FDPROXY", ""), "Unix socket path exposed to the preload wrapper")
 	flag.StringVar(&dnsMode, "dns-mode", getenv("UWGS_DNS_MODE", "full"), "DNS handling mode: full, libc, none")
-	flag.StringVar(&transport, "transport", getenv("UWGS_WRAPPER_TRANSPORT", "both"), "transport mode: both, ptrace-seccomp, ptrace, preload")
+	flag.StringVar(&transport, "transport", getenv("UWGS_WRAPPER_TRANSPORT", "auto"), "transport mode: auto, preload-and-ptrace, preload, ptrace, ptrace-seccomp, ptrace-only, preload-with-optional-ptrace")
 	flag.BoolVar(&forceLoopbackDNS, "force-loopback-dns", getenv("UWGS_DISABLE_LOOPBACK_DNS53", "") == "", "force loopback TCP/UDP port 53 to DNS proxy (default true)")
 	flag.BoolVar(&spawnFDProxy, "spawn-fdproxy", getenv("UWGS_WRAPPER_SPAWN_FDPROXY", "") != "0", "launch built-in fdproxy daemon automatically in launch mode")
 	flag.BoolVar(&noNewPrivileges, "no-new-privileges", getenv("UWGS_WRAPPER_NO_NEW_PRIVILEGES", "1") != "0", "set PR_SET_NO_NEW_PRIVS before launching the wrapped program (default true)")
@@ -215,7 +215,7 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 
 	combo := func() error {
 		if preloadPath == "" {
-			return errors.New("combo transport requires preload")
+			return errors.New("preload-and-ptrace transport requires preload")
 		}
 		return traceRun(uwgtrace.SeccompSecret, true)
 	}
@@ -227,22 +227,45 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 	}
 
 	switch transport {
-	case "preload", "preload-only":
+	case "preload":
 		preloadRun()
-	case "both", "combo-only", "preload+seccomp", "preload-plus-seccomp":
+	case "preload-and-ptrace":
 		if err := combo(); err != nil {
 			log.Fatalf("both mode failed: %v", err)
 		}
-	case "ptrace-seccomp", "ptrace-only-with-seccomp", "trace-only-with-seccomp":
+	case "ptrace-seccomp":
 		if err := traceSimple(); err != nil {
 			log.Fatalf("ptrace+seccomp mode failed: %v", err)
 		}
-	case "ptrace", "ptrace-only", "trace-only", "ptrace-only-no-seccomp", "trace-only-no-seccomp":
+	case "ptrace-only":
 		if err := traceNoSeccomp(); err != nil {
 			log.Fatalf("ptrace mode failed: %v", err)
 		}
+	case "ptrace":
+		if err := traceSimple(); err == nil {
+			return
+		}
+		if err := traceNoSeccomp(); err != nil {
+			log.Fatalf("ptrace mode failed: %v", err)
+		}
+	case "preload-with-optional-ptrace":
+		if err := combo(); err == nil {
+			return
+		}
+		preloadRun()
+	case "auto":
+		if err := combo(); err == nil {
+			return
+		}
+		if err := traceSimple(); err == nil {
+			return
+		}
+		if err := traceNoSeccomp(); err == nil {
+			return
+		}
+		preloadRun()
 	default:
-		log.Fatalf("unsupported transport %q", transport)
+		log.Fatalf("unsupported transport %q, supported auto, preload, preload-and-ptrace, ptrace-seccomp, ptrace-only, ptrace, preload-with-optional-ptrace", transport)
 	}
 }
 

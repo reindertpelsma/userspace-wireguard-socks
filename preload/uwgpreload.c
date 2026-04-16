@@ -61,14 +61,16 @@ static int (*real_listen_fn)(int, int);
 static int (*real_accept_fn)(int, struct sockaddr *, socklen_t *);
 static int (*real_accept4_fn)(int, struct sockaddr *, socklen_t *, int);
 static int (*real_close_fn)(int);
-static ssize_t (*real_sendto_fn)(int, const void *, size_t, int,
+static ssize_t (*original_real_sendto_fn)(int, const void *, size_t, int,
                                  const struct sockaddr *, socklen_t);
-static ssize_t (*real_recvfrom_fn)(int, void *, size_t, int, struct sockaddr *,
+static ssize_t (*original_real_recvfrom_fn)(int, void *, size_t, int, struct sockaddr *,
                                    socklen_t *);
 static ssize_t (*real_send_fn)(int, const void *, size_t, int);
 static ssize_t (*real_recv_fn)(int, void *, size_t, int);
 static ssize_t (*real_read_fn)(int, void *, size_t);
 static ssize_t (*real_write_fn)(int, void *, size_t);
+static ssize_t (*real_sendmsg_fn)(int, const struct msghdr *, int) = NULL;
+static ssize_t (*real_recvmsg_fn)(int, struct msghdr *, int) = NULL;
 static int (*real_dup_fn)(int);
 static int (*real_dup2_fn)(int, int);
 static int (*real_dup3_fn)(int, int, int);
@@ -119,9 +121,11 @@ static void init_real(void) {
   real_accept_fn = dlsym(RTLD_NEXT, "accept");
   real_accept4_fn = dlsym(RTLD_NEXT, "accept4");
   real_close_fn = dlsym(RTLD_NEXT, "close");
-  real_sendto_fn = dlsym(RTLD_NEXT, "sendto");
-  real_recvfrom_fn = dlsym(RTLD_NEXT, "recvfrom");
+  original_real_sendto_fn = dlsym(RTLD_NEXT, "sendto");
+  original_real_recvfrom_fn = dlsym(RTLD_NEXT, "recvfrom");
   real_send_fn = dlsym(RTLD_NEXT, "send");
+  real_sendmsg_fn = dlsym(RTLD_NEXT, "sendmsg");
+  real_recvmsg_fn = dlsym(RTLD_NEXT, "recvmsg");
   real_recv_fn = dlsym(RTLD_NEXT, "recv");
   real_write_fn = dlsym(RTLD_NEXT, "write");
   real_read_fn = dlsym(RTLD_NEXT, "read");
@@ -196,18 +200,157 @@ static int real_close_call(int fd) {
   return (int)syscall(SYS_close, fd);
 }
 
-static ssize_t real_sendto_call(int fd, const void *buf, size_t len, int flags,
-                                const struct sockaddr *addr, socklen_t alen) {
-  if (real_sendto_fn)
-    return real_sendto_fn(fd, buf, len, flags, addr, alen);
-  return (ssize_t)syscall(SYS_sendto, fd, buf, len, flags, addr, alen);
+
+static ssize_t real_sendmsg_call(int sockfd, const struct msghdr *msg, int flags) {
+  if (use_passthrough_secret())
+    return passthrough_syscall(SYS_sendmsg, sockfd, (long)msg, flags, 0, 0);
+  return real_sendmsg_fn(sockfd, msg, flags);
 }
 
-static ssize_t real_recvfrom_call(int fd, void *buf, size_t len, int flags,
-                                  struct sockaddr *addr, socklen_t *alen) {
-  if (real_recvfrom_fn)
-    return real_recvfrom_fn(fd, buf, len, flags, addr, alen);
-  return (ssize_t)syscall(SYS_recvfrom, fd, buf, len, flags, addr, alen);
+static ssize_t real_recvmsg_call(int sockfd, struct msghdr *msg, int flags) {
+  if (use_passthrough_secret())
+    return passthrough_syscall(SYS_recvmsg, sockfd, (long)msg, flags, 0, 0);
+  return real_recvmsg_fn(sockfd, msg, flags);
+}
+
+
+
+/*
+ * real_sendto_call()
+ *
+ * since the sendto(2) and recvmsg(2) syscall takes 6 arguments means we can't put a passthrough secret in the sixth argument
+ * and therefore this syscall always goes through ptrace.
+ *
+ * To fix this, we implement sendto and recvmsg in libc using sendmsg(2)/recvmsg(2) which takes less arguments, so that the sixth argument
+ * can now be used to tell seccomp to not make an unnecessary round trip to ptrace
+ *
+ * Fast path:
+ *   sendto(...) -> sendmsg syscall with secret in arg6
+ *
+ * Fallback:
+ *   real sendto syscall when the call shape is awkward to map directly.
+ */
+ssize_t
+real_sendto_call(int fd,
+                   const void *buf,
+                   size_t len,
+                   int flags,
+                   const struct sockaddr *dest_addr,
+                   socklen_t addrlen)
+{
+    if (!use_passthrough_secret())
+      return original_real_sendto_fn(fd, buf, len, flags, dest_addr, addrlen);
+
+    /*
+     * Awkward case:
+     *   dest_addr == NULL with nonzero addrlen
+     *
+     * Native sendto() sees both values independently. The clean sendmsg
+     * mapping is msg_name=NULL, msg_namelen=0. If you want to avoid changing
+     * that edge case, fall back.
+     */
+    if (dest_addr == NULL && addrlen != 0) {
+        return original_real_sendto_fn(fd, buf, len, flags, dest_addr, addrlen);
+    }
+
+    struct iovec iov;
+    struct msghdr msg;
+
+    iov.iov_base = (void *)buf;
+    iov.iov_len  = len;
+
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_name       = (void *)dest_addr;
+    msg.msg_namelen    = dest_addr ? addrlen : 0;
+    msg.msg_iov        = &iov;
+    msg.msg_iovlen     = 1;
+    msg.msg_control    = NULL;
+    msg.msg_controllen = 0;
+
+    return real_sendmsg_call(fd, &msg, flags);
+}
+
+/*
+ * real_recvfrom_call()
+ *
+ * Fast path:
+ *   recvfrom(...) -> recvmsg syscall with secret in arg6
+ *
+ * Fallback:
+ *   real recvfrom syscall when the mapping is not clean enough.
+ */
+ssize_t
+real_recvfrom_call(int fd,
+                     void *buf,
+                     size_t len,
+                     int flags,
+                     struct sockaddr *src_addr,
+                     socklen_t *addrlen)
+{
+    if (!use_passthrough_secret())
+      return original_real_recvfrom_fn(fd, buf, len, flags, src_addr, addrlen);
+    /*
+     * recvfrom() does not have MSG_CMSG_CLOEXEC semantics as part of its API
+     * surface; recvmsg() does. If such a flag appears here, do not reinterpret
+     * the call through recvmsg.
+     */
+#ifdef MSG_CMSG_CLOEXEC
+    if (flags & MSG_CMSG_CLOEXEC) {
+        return original_real_recvfrom_fn(fd, buf, len, flags, src_addr, addrlen);
+    }
+#endif
+
+    /*
+     * Awkward case:
+     *   caller asks for source address storage but provides no addrlen pointer.
+     *
+     * Native recvfrom syscall can handle that directly. A recvmsg-based shim
+     * would have to invent behavior here or touch userspace state differently.
+     */
+    if (src_addr != NULL && addrlen == NULL) {
+        return original_real_recvfrom_fn(fd, buf, len, flags, src_addr, addrlen);
+    }
+
+    struct iovec iov;
+    struct msghdr msg;
+    ssize_t ret;
+
+    iov.iov_base = buf;
+    iov.iov_len  = len;
+
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov    = &iov;
+    msg.msg_iovlen = 1;
+
+    if (src_addr != NULL) {
+        /*
+         * This intentionally reads *addrlen in userspace on the fast path.
+         * That is required to populate msg_namelen.
+         */
+        msg.msg_name    = src_addr;
+        msg.msg_namelen = *addrlen;
+    } else {
+        /*
+         * If src_addr == NULL, ignore addrlen and do not expose a name buffer
+         * to recvmsg.
+         */
+        msg.msg_name    = NULL;
+        msg.msg_namelen = 0;
+    }
+
+    msg.msg_control    = NULL;
+    msg.msg_controllen = 0;
+
+    ret = real_recvmsg_call(fd, &msg, flags);
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (src_addr != NULL) {
+        *addrlen = msg.msg_namelen;
+    }
+
+    return ret;
 }
 
 static ssize_t real_send_call(int fd, const void *buf, size_t len, int flags) {
@@ -313,6 +456,7 @@ static int real_setsockopt_call(int fd, int level, int optname,
     return real_setsockopt_fn(fd, level, optname, optval, optlen);
   return (int)syscall(SYS_setsockopt, fd, level, optname, optval, optlen);
 }
+
 
 static int debug_enabled(void) {
   const char *v = getenv("UWGS_PRELOAD_DEBUG");
@@ -1591,7 +1735,7 @@ ssize_t recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *src,
     free(packet);
     return out;
   }
-  return real_recvfrom_fn(fd, buf, len, flags, src, srclen);
+  return real_recvfrom_call(fd, buf, len, flags, src, srclen);
 }
 
 int accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
@@ -2019,9 +2163,6 @@ ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
 }
 
 ssize_t recvmsg(int fd, struct msghdr *msg, int flags) {
-  static ssize_t (*real_recvmsg_fn)(int, struct msghdr *, int) = NULL;
-  if (!real_recvmsg_fn)
-    real_recvmsg_fn = dlsym(RTLD_NEXT, "recvmsg");
   init_real();
   struct tracked_fd state = tracked_snapshot(fd);
   if (fd_ok(fd) && state.proxied) {
