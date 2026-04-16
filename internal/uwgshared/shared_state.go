@@ -16,7 +16,7 @@ import (
 const (
 	MaxTrackedFD  = 65536
 	SharedMagic   = 0x55574753
-	SharedVersion = 3
+	SharedVersion = 4
 	MaxGuardSlots = 256
 
 	KindNone         = 0
@@ -46,9 +46,9 @@ type TrackedFD struct {
 }
 
 type rwLock struct {
-	Readers  uint32
-	Writer   uint32
-	Reserved uint32
+	Readers   uint32
+	Writer    uint32
+	WriterTID int32
 }
 
 type guardLock struct {
@@ -332,11 +332,13 @@ func (t *Table) wrlock() {
 	for !atomic.CompareAndSwapUint32(&lock.Writer, 0, 1) {
 		runtime.Gosched()
 	}
+	atomic.StoreInt32(&lock.WriterTID, int32(unix.Gettid()))
 	for atomic.LoadUint32(&lock.Readers) != 0 {
 		runtime.Gosched()
 	}
 }
 
 func (t *Table) wrunlock() {
+	atomic.StoreInt32(&t.state.Lock.WriterTID, 0)
 	atomic.StoreUint32(&t.state.Lock.Writer, 0)
 }

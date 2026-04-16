@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -129,6 +130,8 @@ func Run(opts Options) (int, error) {
 	if len(opts.Args) == 0 {
 		return 0, fmt.Errorf("missing target program")
 	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	self, err := os.Executable()
 	if err != nil {
 		return 0, err
