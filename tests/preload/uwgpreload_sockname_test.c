@@ -1,3 +1,6 @@
+//go:build ignore
+// +build ignore
+
 #define _GNU_SOURCE
 #include <assert.h>
 #include <errno.h>

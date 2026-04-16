@@ -1,3 +1,6 @@
+//go:build ignore
+// +build ignore
+
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>

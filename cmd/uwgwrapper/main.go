@@ -4,8 +4,10 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +20,8 @@ import (
 	"time"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/fdproxy"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/uwgshared"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/uwgtrace"
 )
 
 //go:embed assets/uwgpreload.so
@@ -31,6 +35,7 @@ func main() {
 	var preloadPath string
 	var listenPath string
 	var dnsMode string
+	var transport string
 	var forceLoopbackDNS bool
 	var spawnFDProxy bool
 	var verbose bool
@@ -42,6 +47,7 @@ func main() {
 	flag.StringVar(&preloadPath, "preload", os.Getenv("UWGS_PRELOAD"), "path to preload shared library; defaults to embedded copy extracted to /tmp")
 	flag.StringVar(&listenPath, "listen", getenv("UWGS_FDPROXY", ""), "Unix socket path exposed to the preload wrapper")
 	flag.StringVar(&dnsMode, "dns-mode", getenv("UWGS_DNS_MODE", "full"), "DNS handling mode: full, libc, none")
+	flag.StringVar(&transport, "transport", getenv("UWGS_WRAPPER_TRANSPORT", "auto"), "transport mode: auto, prefer-hot-path, preload+seccomp, preload-only, ptrace-only, combo-only")
 	flag.BoolVar(&forceLoopbackDNS, "force-loopback-dns", getenv("UWGS_DISABLE_LOOPBACK_DNS53", "") == "", "force loopback TCP/UDP port 53 to DNS proxy (default true)")
 	flag.BoolVar(&spawnFDProxy, "spawn-fdproxy", getenv("UWGS_WRAPPER_SPAWN_FDPROXY", "") != "0", "launch built-in fdproxy daemon automatically in launch mode")
 	flag.BoolVar(&verbose, "v", false, "enable wrapper diagnostics")
@@ -49,15 +55,19 @@ func main() {
 
 	switch mode {
 	case "launch":
-		runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, forceLoopbackDNS, spawnFDProxy, verbose)
+		runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, transport, forceLoopbackDNS, spawnFDProxy, verbose)
 	case "fdproxy":
 		runFDProxy(api, apiToken, socketPath, listenPath)
+	case "tracee-helper":
+		if err := uwgtrace.RunTraceeHelper(flag.Args()); err != nil {
+			log.Fatal(err)
+		}
 	default:
-		log.Fatalf("unsupported mode %q, expected launch or fdproxy", mode)
+		log.Fatalf("unsupported mode %q, expected launch, fdproxy, or tracee-helper", mode)
 	}
 }
 
-func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode string, forceLoopbackDNS, spawnFDProxy, verbose bool) {
+func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, transport string, forceLoopbackDNS, spawnFDProxy, verbose bool) {
 	if flag.NArg() == 0 {
 		fmt.Fprintf(os.Stderr, "usage: uwgwrapper [flags] -- program [args...]\n")
 		flag.PrintDefaults()
@@ -116,8 +126,8 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode strin
 	}
 
 	if verbose || os.Getenv("UWGS_WRAPPER_DEBUG") != "" {
-		log.Printf("mode=launch target=%s preload=%s listen=%s api=%s socketPath=%s spawnFDProxy=%t",
-			target, preloadPath, listenPath, api, socketPath, spawnFDProxy)
+		log.Printf("mode=launch target=%s transport=%s preload=%s listen=%s api=%s socketPath=%s spawnFDProxy=%t",
+			target, transport, preloadPath, listenPath, api, socketPath, spawnFDProxy)
 	}
 
 	env := os.Environ()
@@ -133,13 +143,123 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode strin
 	if apiToken != "" {
 		env = setEnv(env, "UWGS_API_TOKEN", apiToken)
 	}
-	env = prependEnvPath(env, "LD_PRELOAD", preloadPath)
+	shared, err := prepareSharedState()
+	if err != nil {
+		log.Fatalf("prepare shared state: %v", err)
+	}
+	env = setEnv(env, "UWGS_SHARED_STATE_PATH", shared.Path())
+	env = setEnv(env, "UWGS_TRACE_SECRET", fmt.Sprintf("%d", shared.Secret()))
 
-	if err := syscall.Exec(target, append([]string{target}, progArgs...), env); err != nil {
-		if fdproxyCmd != nil {
-			cleanupSpawnedFDProxy(fdproxyCmd, listenPath)
+	traceRun := func(useSeccomp, withPreload bool) error {
+		traceEnv := append([]string{}, env...)
+		if withPreload {
+			traceEnv = prependEnvPath(traceEnv, "LD_PRELOAD", preloadPath)
 		}
-		log.Fatalf("exec %s: %v", target, err)
+		code, err := uwgtrace.Run(uwgtrace.Options{
+			Args:       append([]string{target}, progArgs...),
+			Env:        traceEnv,
+			FDProxy:    listenPath,
+			UseSeccomp: useSeccomp,
+			Verbose:    verbose || os.Getenv("UWGS_WRAPPER_DEBUG") != "",
+			Shared:     shared,
+		})
+		if err != nil {
+			return err
+		}
+		_ = shared.Close(true)
+		os.Exit(code)
+		return nil
+	}
+
+	preloadRun := func() {
+		if preloadPath == "" {
+			log.Fatal("no preload library configured")
+		}
+		envPreload := prependEnvPath(append([]string{}, env...), "LD_PRELOAD", preloadPath)
+		_ = shared.Close(false)
+		if err := syscall.Exec(target, append([]string{target}, progArgs...), envPreload); err != nil {
+			if fdproxyCmd != nil {
+				cleanupSpawnedFDProxy(fdproxyCmd, listenPath)
+			}
+			log.Fatalf("exec %s: %v", target, err)
+		}
+	}
+
+	combo := func() error {
+		if preloadPath == "" {
+			return errors.New("combo transport requires preload")
+		}
+		return traceRun(true, true)
+	}
+	traceOnly := func() error {
+		return traceRun(true, false)
+	}
+	traceOnlyNoSeccomp := func() error {
+		return traceRun(false, false)
+	}
+	fallback := func(err error, allowed ...error) bool {
+		for _, candidate := range allowed {
+			if errors.Is(err, candidate) {
+				return true
+			}
+		}
+		return false
+	}
+
+	switch transport {
+	case "auto":
+		if preloadPath != "" {
+			if err := combo(); err == nil {
+				return
+			} else if !fallback(err, uwgtrace.ErrPtraceUnavailable, uwgtrace.ErrSeccompUnavailable) {
+				log.Fatalf("combined ptrace+preload mode failed: %v", err)
+			}
+		}
+		if err := traceOnly(); err == nil {
+			return
+		} else if !fallback(err, uwgtrace.ErrSeccompUnavailable) {
+			log.Fatalf("ptrace-only mode failed: %v", err)
+		}
+		if err := traceOnlyNoSeccomp(); err == nil {
+			return
+		} else if !fallback(err, uwgtrace.ErrPtraceUnavailable) {
+			log.Fatalf("ptrace-only-no-seccomp mode failed: %v", err)
+		}
+		preloadRun()
+	case "prefer-hot-path":
+		if preloadPath != "" {
+			if err := combo(); err == nil {
+				return
+			} else if !fallback(err, uwgtrace.ErrPtraceUnavailable, uwgtrace.ErrSeccompUnavailable) {
+				log.Fatalf("combined ptrace+preload mode failed: %v", err)
+			}
+		}
+		preloadRun()
+	case "preload-only":
+		preloadRun()
+	case "ptrace-only", "trace-only":
+		if err := traceOnly(); err == nil {
+			return
+		} else if !fallback(err, uwgtrace.ErrSeccompUnavailable) {
+			log.Fatalf("ptrace-only mode failed: %v", err)
+		}
+		if err := traceOnlyNoSeccomp(); err != nil {
+			log.Fatalf("ptrace-only mode failed: %v", err)
+		}
+	case "ptrace-only-with-seccomp", "trace-only-with-seccomp":
+		if err := traceOnly(); err != nil {
+			log.Fatalf("ptrace-only mode failed: %v", err)
+		}
+	case "ptrace-only-no-seccomp", "trace-only-no-seccomp":
+		if err := traceOnlyNoSeccomp(); err != nil {
+			log.Fatalf("ptrace-only-no-seccomp mode failed: %v", err)
+		}
+	case "combo-only", "preload+seccomp", "preload-plus-seccomp":
+		if err := combo(); err != nil {
+			log.Fatalf("combined ptrace+preload mode failed: %v", err)
+		}
+	default:
+		log.Fatalf("unsupported transport %q", transport)
 	}
 }
 
@@ -152,7 +272,6 @@ func runFDProxy(api, apiToken, socketPath, listenPath string) {
 		log.Fatal(err)
 	}
 	defer server.Close()
-	log.Printf("uwgfdproxy listening on %s, upstream %s path %s", listenPath, api, socketPath)
 	if err := server.Serve(); err != nil {
 		log.Fatal(err)
 	}
@@ -203,6 +322,27 @@ func ensureEmbeddedPreload() (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+func prepareSharedState() (*uwgshared.Table, error) {
+	var secret uint64
+	if err := binary.Read(rand.Reader, binary.LittleEndian, &secret); err != nil {
+		return nil, err
+	}
+	if secret == 0 {
+		secret = 1
+	}
+	dir := filepath.Join(os.TempDir(), fmt.Sprintf("uwgwrapper-%d", os.Getuid()))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	file, err := os.CreateTemp(dir, "shared-state-*.bin")
+	if err != nil {
+		return nil, err
+	}
+	path := file.Name()
+	_ = file.Close()
+	return uwgshared.Create(path, secret)
 }
 
 func setEnv(env []string, key, value string) []string {
