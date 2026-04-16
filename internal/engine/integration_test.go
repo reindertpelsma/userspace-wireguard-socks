@@ -1117,6 +1117,11 @@ func TestAPIServerPeerAndACL(t *testing.T) {
 	peerBody := map[string]any{
 		"public_key":  peerKey.PublicKey().String(),
 		"allowed_ips": []string{"100.64.45.2/32"},
+		"traffic_shaper": map[string]any{
+			"upload_bps":   1500000,
+			"download_bps": 2500000,
+			"latency_ms":   12,
+		},
 	}
 	resp, body = apiRequest(t, eng.Addr("api"), "secret", http.MethodPost, "/v1/peers", peerBody)
 	if resp.StatusCode != http.StatusNoContent {
@@ -1124,6 +1129,21 @@ func TestAPIServerPeerAndACL(t *testing.T) {
 	}
 	if len(eng.Peers()) != 1 {
 		t.Fatalf("expected one peer after API add, got %d", len(eng.Peers()))
+	}
+	if got := eng.Peers()[0].TrafficShaper; got.UploadBps != 1500000 || got.DownloadBps != 2500000 || got.LatencyMillis != 12 {
+		t.Fatalf("peer shaper was not applied through API add: %+v", got)
+	}
+	peerBody["traffic_shaper"] = map[string]any{
+		"upload_bps":   3500000,
+		"download_bps": 4500000,
+		"latency_ms":   30,
+	}
+	resp, body = apiRequest(t, eng.Addr("api"), "secret", http.MethodPut, "/v1/peers", peerBody)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("replace peer shaper status %d: %s", resp.StatusCode, body)
+	}
+	if got := eng.Peers()[0].TrafficShaper; got.UploadBps != 3500000 || got.DownloadBps != 4500000 || got.LatencyMillis != 30 {
+		t.Fatalf("peer shaper was not replaced live through API: %+v", got)
 	}
 	resp, body = apiRequest(t, eng.Addr("api"), "secret", http.MethodGet, "/v1/peers/"+url.PathEscape(peerKey.PublicKey().String()), nil)
 	if resp.StatusCode != http.StatusOK {

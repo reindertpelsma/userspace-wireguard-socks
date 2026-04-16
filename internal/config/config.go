@@ -175,9 +175,9 @@ type Filtering struct {
 }
 
 type TrafficShaper struct {
-	UploadBps     int64 `yaml:"upload_bps"`
-	DownloadBps   int64 `yaml:"download_bps"`
-	LatencyMillis int   `yaml:"latency_ms"`
+	UploadBps     int64 `yaml:"upload_bps" json:"upload_bps"`
+	DownloadBps   int64 `yaml:"download_bps" json:"download_bps"`
+	LatencyMillis int   `yaml:"latency_ms" json:"latency_ms"`
 }
 
 func (t TrafficShaper) IsZero() bool {
