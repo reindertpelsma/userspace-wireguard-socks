@@ -13,12 +13,22 @@ var (
 )
 
 type Options struct {
-	Args       []string
-	Env        []string
-	FDProxy    string
-	UseSeccomp bool
-	Verbose    bool
+	Args            []string
+	Env             []string
+	FDProxy         string
+	SeccompMode     SeccompMode
+	NoNewPrivileges bool
+	Verbose         bool
+	StatsPath       string
 }
+
+type SeccompMode int
+
+const (
+	SeccompNone SeccompMode = iota
+	SeccompSimple
+	SeccompSecret
+)
 
 func Run(opts Options) (int, error) {
 	_ = opts
@@ -27,5 +37,9 @@ func Run(opts Options) (int, error) {
 
 func RunTraceeHelper(args []string) error {
 	_ = args
+	return ErrPtraceUnavailable
+}
+
+func SetNoNewPrivileges() error {
 	return ErrPtraceUnavailable
 }

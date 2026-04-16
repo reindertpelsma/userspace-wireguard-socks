@@ -13,15 +13,22 @@ import (
 )
 
 const (
-	seccompOffsetNR   = 0
-	seccompOffsetArch = 4
+	seccompOffsetNR     = 0
+	seccompOffsetArch   = 4
+	seccompOffsetArg5Lo = 16 + 5*8
+	seccompOffsetArg5Hi = seccompOffsetArg5Lo + 4
 )
 
-func installSeccompFilter(secret uint64) error {
-	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+func installSeccompFilter(mode SeccompMode, secret uint64, setNoNewPrivs bool) error {
+	if setNoNewPrivs {
+		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+			return err
+		}
+	}
+	prog, err := buildSeccompProgram(mode, secret)
+	if err != nil {
 		return err
 	}
-	prog := buildSeccompProgram(secret)
 	fprog := unix.SockFprog{
 		Len:    uint16(len(prog)),
 		Filter: &prog[0],
@@ -33,8 +40,7 @@ func installSeccompFilter(secret uint64) error {
 	return nil
 }
 
-func buildSeccompProgram(secret uint64) []unix.SockFilter {
-	_ = secret
+func buildSeccompProgram(mode SeccompMode, secret uint64) ([]unix.SockFilter, error) {
 	var out []unix.SockFilter
 	ldAbs := func(offset uint32) unix.SockFilter {
 		return unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: offset}
@@ -54,7 +60,7 @@ func buildSeccompProgram(secret uint64) []unix.SockFilter {
 		ret(unix.SECCOMP_RET_TRACE),
 	)
 
-	relevantSyscalls := []uint32{
+	secretBypassSyscalls := []uint32{
 		unix.SYS_SOCKET,
 		unix.SYS_CONNECT,
 		unix.SYS_BIND,
@@ -73,18 +79,52 @@ func buildSeccompProgram(secret uint64) []unix.SockFilter {
 		unix.SYS_FCNTL,
 		unix.SYS_GETSOCKOPT,
 		unix.SYS_SETSOCKOPT,
+	}
+
+	alwaysTraceSyscalls := []uint32{
 		unix.SYS_SENDTO,
 		unix.SYS_RECVFROM,
 	}
 
 	out = append(out, ldAbs(seccompOffsetNR))
-	for _, nr := range relevantSyscalls {
-		out = append(out,
-			jeq(nr, 0, 1),
-			trace,
-		)
+
+	switch mode {
+	case SeccompSimple:
+		for _, nr := range append(append([]uint32{}, secretBypassSyscalls...), alwaysTraceSyscalls...) {
+			out = append(out,
+				jeq(nr, 0, 1),
+				trace,
+			)
+		}
+	case SeccompSecret:
+		if secret == 0 {
+			return nil, syscall.EINVAL
+		}
+		low := uint32(secret)
+		high := uint32(secret >> 32)
+		for _, nr := range secretBypassSyscalls {
+			out = append(out,
+				jeq(nr, 0, 6),
+				ldAbs(seccompOffsetArg5Lo),
+				jeq(low, 0, 2),
+				ldAbs(seccompOffsetArg5Hi),
+				jeq(high, 1, 0),
+				trace,
+				allow,
+			)
+		}
+		for _, nr := range alwaysTraceSyscalls {
+			out = append(out,
+				jeq(nr, 0, 1),
+				trace,
+			)
+		}
+	case SeccompNone:
+		// No filter should be installed in this mode.
+	default:
+		return nil, syscall.EINVAL
 	}
 	out = append(out, allow)
 
-	return out
+	return out, nil
 }
