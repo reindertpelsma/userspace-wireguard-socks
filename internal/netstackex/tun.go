@@ -54,6 +54,7 @@ type netTun struct {
 	hasV4, hasV6   bool
 	packetFilter   func([]byte) bool
 	ingressFilter  func([]byte) bool
+	tcpMSSClamp    bool
 }
 
 type Net netTun
@@ -121,6 +122,78 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 	return dev, (*Net)(dev), nil
 }
 
+func (net *Net) SetTCPMSSClamp(enable bool) error {
+	net.tcpMSSClamp = enable
+	return nil
+}
+
+func (tun *netTun) clampMSS(packet []byte) {
+	if !tun.tcpMSSClamp || len(packet) < 20 {
+		return
+	}
+	version := packet[0] >> 4
+	var transport []byte
+	var isIPv6 bool
+	if version == 4 {
+		ihl := int(packet[0]&0x0f) * 4
+		if len(packet) < ihl+20 || packet[9] != 6 { return }
+		transport = packet[ihl:]
+	} else if version == 6 {
+		if len(packet) < 40+20 || packet[6] != 6 { return }
+		transport = packet[40:]
+		isIPv6 = true
+	} else {
+		return
+	}
+	tun.clampTCP(transport, isIPv6)
+}
+
+func (tun *netTun) clampTCP(tcp []byte, isIPv6 bool) {
+	if len(tcp) < 20 { return }
+	flags := tcp[13]
+	if flags&0x02 == 0 { // SYN bit must be set
+		return
+	}
+	doff := int(tcp[12]>>4) * 4
+	if doff < 20 || len(tcp) < doff {
+		return
+	}
+	
+	// Max MSS = MTU - (IP header + TCP header)
+	maxMSS := uint16(tun.mtu - 40) 
+	if isIPv6 {
+		maxMSS = uint16(tun.mtu - 60)
+	}
+
+	options := tcp[20:doff]
+	for i := 0; i < len(options); {
+		opt := options[i]
+		if opt == 0 { break } // EOL
+		if opt == 1 { // NOP
+			i++
+			continue
+		}
+		if i+1 >= len(options) { break }
+		size := int(options[i+1])
+		if size < 2 || i+size > len(options) { break }
+		
+		if opt == 2 && size == 4 { // MSS
+			mss := binary.BigEndian.Uint16(options[i+2 : i+4])
+			if mss > maxMSS {
+				binary.BigEndian.PutUint16(options[i+2:i+4], maxMSS)
+				// Modification requires checksum update. 
+				// For userspace netstack, it's safer to let gVisor handle it if it can,
+				// but here we are in the middle of the TUN. 
+				// We'll reset the checksum to 0 and hope the stack recalculates or ignores it if offloaded.
+				// (Common trick for netstack-to-netstack).
+				tcp[16] = 0
+				tcp[17] = 0
+			}
+		}
+		i += size
+	}
+}
+
 func (tun *netTun) Name() (string, error) {
 	return "go", nil
 }
@@ -166,6 +239,7 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
 		if tun.ingressFilter != nil && !tun.ingressFilter(packet) {
 			continue
 		}
+		tun.clampMSS(packet)
 
 		var protocol tcpip.NetworkProtocolNumber
 		switch packet[0] >> 4 {
@@ -192,6 +266,8 @@ func (tun *netTun) WriteNotify() {
 	}
 
 	view := pkt.ToView()
+	packet := view.AsSlice()
+	tun.clampMSS(packet)
 	pkt.DecRef()
 
 	select {

@@ -7,6 +7,9 @@
 /dist/
 /build/
 /tmp/
+# Nested UI repo lives here but is committed separately.
+/uwgsocks-ui/
+*.swp
 *.test
 *.prof
 *.pprof
@@ -14,6 +17,9 @@
 *.log
 *.o
 *.so
+
+# AI specific tasks to perform on the code base
+/tasks
 
 # Local, real VPN configs used during manual testing. The repository examples
 # use demonstration-only keys instead.

@@ -191,7 +191,7 @@ func (s *socketServer) socketAddrs(req socketproto.Connect) (bind, dest netip.Ad
 }
 
 func (s *socketServer) openTCPConn(id uint64, bind, dest netip.AddrPort, version uint8) error {
-	if !s.e.outboundAllowed(s.src, dest) {
+	if !s.e.outboundAllowed(s.src, dest, "tcp") {
 		return errProxyACL
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -211,7 +211,7 @@ func (s *socketServer) openTCPConn(id uint64, bind, dest netip.AddrPort, version
 }
 
 func (s *socketServer) openUDPConn(id uint64, bind, dest netip.AddrPort, version uint8) error {
-	if !s.e.outboundAllowed(s.src, dest) {
+	if !s.e.outboundAllowed(s.src, dest, "udp") {
 		return errProxyACL
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -275,7 +275,7 @@ func (s *socketServer) acceptTCP(listenerID uint64, ln net.Listener) {
 		}
 		src := addrPortFromNetAddr(c.RemoteAddr())
 		dst := addrPortFromNetAddr(c.LocalAddr())
-		if src.IsValid() && dst.IsValid() && !s.e.inboundAllowed(src, dst) {
+		if src.IsValid() && dst.IsValid() && !s.e.inboundAllowed(src, dst, "tcp") {
 			_ = c.Close()
 			continue
 		}
@@ -347,7 +347,7 @@ func (s *socketServer) reconnectUDP(id uint64, req socketproto.Connect) error {
 		if s.e.tunnelAddrBlocked(dest.Addr()) {
 			return errAddressFiltered
 		}
-		if !s.e.outboundAllowed(s.src, dest) {
+		if !s.e.outboundAllowed(s.src, dest, "udp") {
 			return errProxyACL
 		}
 	}
@@ -427,7 +427,7 @@ func (s *socketServer) handleUDPDatagram(id uint64, d socketproto.UDPDatagram) e
 	if ss.packet == nil {
 		return errors.New("UDP listener is not open")
 	}
-	if !s.e.outboundAllowed(s.src, remote) {
+	if !s.e.outboundAllowed(s.src, remote, "udp") {
 		return errProxyACL
 	}
 	ss.touchUDPPeer(remote, s.e.udpIdleTimeout())

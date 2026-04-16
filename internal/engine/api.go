@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -73,6 +74,10 @@ func (e *Engine) startAPIServer() error {
 	mux.HandleFunc("/v1/socket", e.handleAPISocket)
 	mux.HandleFunc("/v1/status", e.handleAPIStatus)
 	mux.HandleFunc("/v1/ping", e.handleAPIPing)
+
+	if isUnixEndpoint(e.cfg.API.Listen) {
+		_ = os.Remove(unixEndpointPath(e.cfg.API.Listen))
+	}
 
 	ln, err := listenEndpoint(e.cfg.API.Listen)
 	if err != nil {
@@ -269,10 +274,19 @@ func apiListenRequiresToken(addr string, allowUnauthenticatedUnix bool) bool {
 
 func (e *Engine) apiAuth(next http.Handler) http.Handler {
 	token := e.cfg.API.Token
+	allowUnix := e.cfg.API.AllowUnauthenticatedUnix
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isUnix := r.RemoteAddr == "@" || r.RemoteAddr == "" || strings.HasPrefix(r.RemoteAddr, "/")
+		if isUnix && allowUnix {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if token != "" {
 			got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+			if got == "" {
+				got = r.Header.Get("Authorization") // Support raw token as well
+			}
+			if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
 				writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 				return
 			}
@@ -474,7 +488,6 @@ func (e *Engine) AddPeer(peer config.Peer) error {
 	}
 
 	e.cfgMu.Lock()
-	defer e.cfgMu.Unlock()
 	next := append([]config.Peer(nil), e.cfg.WireGuard.Peers...)
 	replaced := false
 	for i := range next {
@@ -489,14 +502,17 @@ func (e *Engine) AddPeer(peer config.Peer) error {
 	}
 	allowed, err := config.PeerAllowedPrefixes(next)
 	if err != nil {
+		e.cfgMu.Unlock()
 		return err
 	}
 	if e.dev != nil {
 		uapi, err := peerUAPI(peer, false)
 		if err != nil {
+			e.cfgMu.Unlock()
 			return err
 		}
 		if err := e.dev.IpcSet(uapi); err != nil {
+			e.cfgMu.Unlock()
 			return err
 		}
 	}
@@ -504,6 +520,8 @@ func (e *Engine) AddPeer(peer config.Peer) error {
 	e.allowedMu.Lock()
 	e.allowed = allowed
 	e.allowedMu.Unlock()
+	e.cfgMu.Unlock()
+	e.updateTURNPermissions()
 	return nil
 }
 
@@ -542,6 +560,7 @@ func (e *Engine) RemovePeer(publicKey string) error {
 	e.allowedMu.Lock()
 	e.allowed = allowed
 	e.allowedMu.Unlock()
+	e.updateTURNPermissions()
 	return nil
 }
 

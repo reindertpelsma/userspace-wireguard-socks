@@ -192,7 +192,7 @@ func (e *Engine) proxyHTTPAuthOK(r *http.Request) bool {
 }
 
 func (e *Engine) serveSOCKSConnect(client net.Conn, src netip.AddrPort, dst socksAddr) {
-	if ap, ok := dst.addrPort(); ok && !e.outboundAllowed(src, ap) {
+	if ap, ok := dst.addrPort(); ok && !e.outboundAllowed(src, ap, "tcp") {
 		_ = writeSOCKSReply(client, socksRepConnectionNotAllowed, netip.AddrPort{})
 		return
 	}
@@ -333,7 +333,7 @@ func (e *Engine) socksUDPSession(ctx context.Context, sessions map[string]*socks
 		return nil, netip.AddrPort{}, "", err
 	}
 	for _, target := range candidates {
-		if !e.outboundAllowed(src, target) {
+		if !e.outboundAllowed(src, target, "udp") {
 			continue
 		}
 		key := target.String()
@@ -451,7 +451,7 @@ func (e *Engine) serveSOCKSBind(control net.Conn, src netip.AddrPort, requested 
 		_ = writeSOCKSReply(control, socksRepConnectionNotAllowed, netip.AddrPort{})
 		return
 	}
-	if !e.inboundAllowed(remote, local) || !e.outboundAllowed(src, local) {
+	if !e.inboundAllowed(remote, local, "tcp") || !e.outboundAllowed(src, local, "tcp") {
 		_ = writeSOCKSReply(control, socksRepConnectionNotAllowed, netip.AddrPort{})
 		return
 	}
@@ -500,7 +500,7 @@ func (e *Engine) proxyDialWithSource(ctx context.Context, network, addr string, 
 	}
 	var last error
 	for _, dst := range candidates {
-		if !e.outboundAllowed(src, dst) {
+		if !e.outboundAllowed(src, dst, network) {
 			last = errProxyACL
 			continue
 		}

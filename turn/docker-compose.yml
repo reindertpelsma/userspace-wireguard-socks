@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  turn:
+    build: .
+    container_name: open-turn-relay
+    restart: unless-stopped
+    command: ["-config","/config/turn-open-relay.example.yaml"]
+    ports:
+      - "3478:3478/udp"
+      # Example relay range exposed for allocations
+      - "40000-40100:40000-40100/udp"
+      - "41000-41100:41000-41100/udp"
+    volumes:
+      - ./turn-open-relay.example.yaml:/config/turn-open-relay.example.yaml:ro

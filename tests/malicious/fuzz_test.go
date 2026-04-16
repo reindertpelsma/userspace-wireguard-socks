@@ -38,7 +38,7 @@ func FuzzACLParseRule(f *testing.F) {
 		if err := list.Normalize(); err != nil {
 			return
 		}
-		_ = list.Allowed(netip.MustParseAddrPort("100.64.0.1:12345"), netip.MustParseAddrPort("100.64.0.2:443"))
+		_ = list.Allowed(netip.MustParseAddrPort("100.64.0.1:12345"), netip.MustParseAddrPort("100.64.0.2:443"), "tcp")
 	})
 }
 

@@ -81,6 +81,7 @@ type Engine struct {
 	localAddrs     []netip.Addr
 	localPrefixes  []netip.Prefix
 	dnsSem         chan struct{}
+	turnBind       *wgbind.TURNBind
 }
 
 type trackedConn struct {
@@ -170,6 +171,11 @@ func (e *Engine) Start() error {
 	if err := e.net.SetTCPReceiveBufferLimit(e.cfg.Inbound.TCPReceiveWindowBytes); err != nil {
 		return fmt.Errorf("set TCP receive buffer limit: %w", err)
 	}
+	if e.cfg.Inbound.TCPMSSClamp != nil && *e.cfg.Inbound.TCPMSSClamp {
+		if err := e.net.SetTCPMSSClamp(true); err != nil {
+			return fmt.Errorf("set TCP MSS clamping: %w", err)
+		}
+	}
 	e.localAddrs = localAddrs
 	e.net.SetIngressPacketFilter(e.allowTunnelPacket)
 	e.net.SetPacketFilter(e.allowEgressPacket)
@@ -201,7 +207,18 @@ func (e *Engine) Start() error {
 	// opens one connected UDP socket per peer endpoint only when WireGuard has
 	// traffic to send.
 	var bind conn.Bind
-	if e.cfg.WireGuard.ListenPort == nil {
+	if e.cfg.TURN.Server != "" {
+		turnBind := &wgbind.TURNBind{
+			Server:   e.cfg.TURN.Server,
+			Username: e.cfg.TURN.Username,
+			Password: e.cfg.TURN.Password,
+			Realm:    e.cfg.TURN.Realm,
+			AllowedPeers: e.cfg.TURN.Permissions,
+		}
+		e.turnBind = turnBind
+		e.updateTURNPermissions()
+		bind = turnBind
+	} else if e.cfg.WireGuard.ListenPort == nil {
 		bind = wgbind.NewOutboundOnlyBind()
 	} else if len(e.cfg.WireGuard.ListenAddresses) > 0 {
 		bind = &wgbind.ResolverBind{Inner: &wgbind.ListenBind{Addresses: e.cfg.WireGuard.ListenAddresses}}
@@ -250,6 +267,22 @@ func (e *Engine) Start() error {
 		return err
 	}
 	return nil
+}
+
+func (e *Engine) updateTURNPermissions() {
+	if e.turnBind == nil {
+		return
+	}
+	
+	e.cfgMu.RLock()
+	var ips []string = e.cfg.TURN.Permissions
+	for _, p := range e.cfg.WireGuard.Peers {
+		if p.Endpoint != "" {
+			ips = append(ips, p.Endpoint)
+		}
+	}
+	e.cfgMu.RUnlock()
+	e.turnBind.UpdatePermissions(ips)
 }
 
 func (e *Engine) Close() error {
@@ -587,7 +620,7 @@ func (e *Engine) httpProxyHandler() http.Handler {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		if !e.outboundAllowed(src, dst) {
+		if !e.outboundAllowed(src, dst, "tcp") {
 			http.Error(w, "blocked by outbound ACL", http.StatusForbidden)
 			return
 		}
@@ -612,7 +645,7 @@ func (e *Engine) handleHTTPConnect(w http.ResponseWriter, r *http.Request, src n
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	if !e.outboundAllowed(src, dst) {
+	if !e.outboundAllowed(src, dst, "tcp") {
 		http.Error(w, "blocked by outbound ACL", http.StatusForbidden)
 		return
 	}
@@ -654,7 +687,7 @@ func (e *Engine) dialTunnelOnlyWithBind(ctx context.Context, network, addr strin
 	}
 	var last error
 	for _, dst := range candidates {
-		if !e.outboundAllowed(aclSrc, dst) {
+		if !e.outboundAllowed(aclSrc, dst, network) {
 			last = errProxyACL
 			continue
 		}
@@ -849,7 +882,7 @@ func exchangeConfiguredDNS(ctx context.Context, server netip.Addr, name string, 
 func (e *Engine) handleTCPForward(req *gtcp.ForwarderRequest) {
 	id := req.ID()
 	src, dst, ok := idAddrs(id)
-	if !ok || !e.inboundAllowed(src, dst) || e.rejectTransparentDestination(dst) {
+	if !ok || !e.inboundAllowed(src, dst, "tcp") || e.rejectTransparentDestination(dst) {
 		req.Complete(true)
 		return
 	}
@@ -887,7 +920,7 @@ func (e *Engine) handleTCPForward(req *gtcp.ForwarderRequest) {
 func (e *Engine) handleUDPForward(req *gudp.ForwarderRequest) {
 	id := req.ID()
 	src, dst, ok := idAddrs(id)
-	if !ok || !e.inboundAllowed(src, dst) || e.rejectTransparentDestination(dst) {
+	if !ok || !e.inboundAllowed(src, dst, "udp") || e.rejectTransparentDestination(dst) {
 		if ok {
 			e.sendUDPUnreachable(src, dst)
 		}
@@ -1371,7 +1404,7 @@ func (e *Engine) handleTCPReverseForwardConn(tunnel net.Conn, f config.Forward) 
 	defer tunnel.Close()
 	src := addrPortFromNetAddr(tunnel.RemoteAddr())
 	dst := addrPortFromNetAddr(tunnel.LocalAddr())
-	if src.IsValid() && dst.IsValid() && !e.inboundAllowed(src, dst) {
+	if src.IsValid() && dst.IsValid() && !e.inboundAllowed(src, dst, "tcp") {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1445,7 +1478,7 @@ func (e *Engine) serveUDPReverseForward(pc net.PacketConn, f config.Forward) {
 		}
 		src := addrPortFromNetAddr(addr)
 		dst := addrPortFromNetAddr(pc.LocalAddr())
-		if src.IsValid() && dst.IsValid() && !e.inboundAllowed(src, dst) {
+		if src.IsValid() && dst.IsValid() && !e.inboundAllowed(src, dst, "udp") {
 			continue
 		}
 		key := src.String()
@@ -1740,22 +1773,22 @@ func (e *Engine) allowedBestPrefix(ip netip.Addr) (netip.Prefix, bool) {
 	return best, ok
 }
 
-func (e *Engine) inboundAllowed(src, dst netip.AddrPort) bool {
+func (e *Engine) inboundAllowed(src, dst netip.AddrPort, network string) bool {
 	e.aclMu.RLock()
 	defer e.aclMu.RUnlock()
-	return e.inACL.Allowed(src, dst)
+	return e.inACL.Allowed(src, dst, network)
 }
 
-func (e *Engine) outboundAllowed(src, dst netip.AddrPort) bool {
+func (e *Engine) outboundAllowed(src, dst netip.AddrPort, network string) bool {
 	e.aclMu.RLock()
 	defer e.aclMu.RUnlock()
-	return e.outACL.Allowed(src, dst)
+	return e.outACL.Allowed(src, dst, network)
 }
 
-func (e *Engine) relayAllowed(src, dst netip.AddrPort) bool {
+func (e *Engine) relayAllowed(src, dst netip.AddrPort, network string) bool {
 	e.aclMu.RLock()
 	defer e.aclMu.RUnlock()
-	return e.relACL.Allowed(src, dst)
+	return e.relACL.Allowed(src, dst, network)
 }
 
 func (e *Engine) localAddrContains(ip netip.Addr) bool {
@@ -1802,7 +1835,7 @@ func (e *Engine) allowEgressPacket(packet []byte) bool {
 }
 
 func (e *Engine) allowTunnelPacket(packet []byte) bool {
-	src, dst, ok := packetAddrPorts(packet)
+	_, src, dst, ok := packetAddrPorts(packet)
 	if !ok {
 		return true
 	}
@@ -1888,39 +1921,45 @@ func ipv4InvalidTunnelAddr(ip netip.Addr) bool {
 }
 
 func (e *Engine) allowRelayPacket(packet []byte) bool {
-	src, dst, ok := packetAddrPorts(packet)
+	proto, src, dst, ok := packetAddrPorts(packet)
 	if !ok || e.localAddrContains(src.Addr()) {
 		return true
 	}
 	if e.localPrefixContainsUnrouted(dst.Addr()) {
 		return false
 	}
-	return e.relayAllowed(src, dst)
+	network := ""
+	if proto == 6 {
+                network = "TCP"
+	} else if proto == 17 {
+                network = "UDP"
+	}
+	return e.relayAllowed(src, dst, network)
 }
 
 // packetAddrPorts extracts enough L3/L4 metadata for relay ACLs. Unknown or
 // malformed packets are treated as non-relay so gVisor can continue applying
 // its own protocol validation.
-func packetAddrPorts(packet []byte) (netip.AddrPort, netip.AddrPort, bool) {
+func packetAddrPorts(packet []byte) (byte, netip.AddrPort, netip.AddrPort, bool) {
 	if len(packet) == 0 {
-		return netip.AddrPort{}, netip.AddrPort{}, false
+		return 0, netip.AddrPort{}, netip.AddrPort{}, false
 	}
 	switch packet[0] >> 4 {
 	case 4:
 		if len(packet) < 20 {
-			return netip.AddrPort{}, netip.AddrPort{}, false
+			return 0, netip.AddrPort{}, netip.AddrPort{}, false
 		}
 		ihl := int(packet[0]&0x0f) * 4
 		if ihl < 20 || len(packet) < ihl {
-			return netip.AddrPort{}, netip.AddrPort{}, false
+			return 0, netip.AddrPort{}, netip.AddrPort{}, false
 		}
 		src := netip.AddrFrom4([4]byte{packet[12], packet[13], packet[14], packet[15]})
 		dst := netip.AddrFrom4([4]byte{packet[16], packet[17], packet[18], packet[19]})
 		sp, dp := packetPorts(packet[9], packet[ihl:])
-		return netip.AddrPortFrom(src, sp), netip.AddrPortFrom(dst, dp), true
+		return packet[9], netip.AddrPortFrom(src, sp), netip.AddrPortFrom(dst, dp), true
 	case 6:
 		if len(packet) < 40 {
-			return netip.AddrPort{}, netip.AddrPort{}, false
+			return 0, netip.AddrPort{}, netip.AddrPort{}, false
 		}
 		var src16, dst16 [16]byte
 		copy(src16[:], packet[8:24])
@@ -1928,9 +1967,9 @@ func packetAddrPorts(packet []byte) (netip.AddrPort, netip.AddrPort, bool) {
 		src := netip.AddrFrom16(src16)
 		dst := netip.AddrFrom16(dst16)
 		sp, dp := packetPorts(packet[6], packet[40:])
-		return netip.AddrPortFrom(src, sp), netip.AddrPortFrom(dst, dp), true
+		return packet[6], netip.AddrPortFrom(src, sp), netip.AddrPortFrom(dst, dp), true
 	default:
-		return netip.AddrPort{}, netip.AddrPort{}, false
+		return 0, netip.AddrPort{}, netip.AddrPort{}, false
 	}
 }
 
@@ -2216,7 +2255,7 @@ func listenEndpoint(addr string) (net.Listener, error) {
 }
 
 func isUnixEndpoint(addr string) bool {
-	return strings.HasPrefix(addr, "unix:")
+	return strings.HasPrefix(addr, "unix:") || strings.HasPrefix(addr, "unix://")
 }
 
 func unixEndpointPath(addr string) string {

@@ -1,0 +1,14 @@
+
+wireguard:
+  private_key: QKRYi60WzLEZ9DtG+3E0XrGJD+zRuIVNNWRy563nBlY=
+  addresses: ["100.64.0.2/32", "fd00:64::894c:7b6b:dbec:87d0/128"]
+  mtu: 1420
+  peers:
+    - public_key: c8nnoybt3kekR9rdwxRPhVFuGpDZkbhv6IAsuSPqAl8=
+      endpoint: 127.0.0.1:51820
+      allowed_ips: ["0.0.0.0/0", "::/0"]
+      persistent_keepalive: 25
+      preshared_key: QqRPQj5fj2Znv2gKzFOmn0B3v9kqHX+IeCPikukOx3c=
+
+proxy:
+  socks5: 127.0.0.1:1081

@@ -1,3 +1,6 @@
+//go:build ignore
+// +build ignore
+
 #define _GNU_SOURCE
 #include <assert.h>
 #include <errno.h>
@@ -55,8 +58,8 @@ static int stub_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen) {
 static int stub_shutdown(int fd, int how) { fallback_shutdown_called++; assert(fd == 43); assert(how == SHUT_RDWR); return 0; }
 static void install_stubs(void) {
     real_socket_fn = stub_socket; real_connect_fn = stub_connect; real_bind_fn = stub_bind; real_listen_fn = stub_listen;
-    real_accept_fn = stub_accept; real_accept4_fn = stub_accept4; real_close_fn = stub_close; real_sendto_fn = stub_sendto;
-    real_recvfrom_fn = stub_recvfrom; real_send_fn = stub_send; real_recv_fn = stub_recv; real_read_fn = stub_read;
+    real_accept_fn = stub_accept; real_accept4_fn = stub_accept4; real_close_fn = stub_close; original_real_sendto_fn = stub_sendto;
+    original_real_recvfrom_fn = stub_recvfrom; real_send_fn = stub_send; real_recv_fn = stub_recv; real_read_fn = stub_read;
     real_write_fn = stub_write; real_dup_fn = stub_dup; real_dup2_fn = stub_dup2; real_dup3_fn = stub_dup3;
     real_getsockname_fn = stub_getsockname; real_getpeername_fn = stub_getpeername; real_shutdown_fn = stub_shutdown;
 }

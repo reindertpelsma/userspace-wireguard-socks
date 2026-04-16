@@ -32,6 +32,7 @@ type Config struct {
 	SocketAPI   SocketAPI   `yaml:"socket_api"`
 	ACL         ACL         `yaml:"acl"`
 	Forwards    []Forward   `yaml:"forwards"`
+	TURN        TURN     `yaml:"turn"`
 	// ReverseForwards listen inside the userspace WireGuard netstack and dial
 	// out to the host network. They are narrower than transparent inbound
 	// forwarding because only explicitly configured tunnel IP:port pairs are
@@ -66,6 +67,21 @@ type WireGuard struct {
 	PostUp              []string `yaml:"post_up"`
 	PostDown            []string `yaml:"post_down"`
 	Peers               []Peer   `yaml:"peers"`
+}
+
+type TURN struct {
+	// Server is the TURN server address (host:port).
+	Server string `yaml:"server"`
+	// Username for TURN authentication.
+	Username string `yaml:"username"`
+	// Password for TURN authentication.
+	Password string `yaml:"password"`
+	// Realm for TURN authentication (optional).
+	Realm string `yaml:"realm"`
+	// Permissions determines which peer endpoints are allowed to send traffic
+	// through the TURN relay.
+	// It can be a list of specific CIDRs.
+	Permissions []string `yaml:"permissions"`
 }
 
 type Peer struct {

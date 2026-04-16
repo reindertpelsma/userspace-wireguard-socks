@@ -38,6 +38,7 @@ type Rule struct {
 	Destination string `yaml:"destination" json:"destination"`
 	SourcePort  string `yaml:"source_port" json:"source_port"`
 	DestPort    string `yaml:"destination_port" json:"destination_port"`
+	Protocol    string `yaml:"protocol" json:"protocol"`
 
 	sourcePrefix *netip.Prefix
 	destPrefix   *netip.Prefix
@@ -158,16 +159,19 @@ func ParsePortRange(s string) (PortRange, error) {
 
 // Allowed evaluates rules in order. The first match wins; if nothing matches
 // the list-level default is used.
-func (l List) Allowed(src, dst netip.AddrPort) bool {
+func (l List) Allowed(src, dst netip.AddrPort, network string) bool {
 	for _, rule := range l.Rules {
-		if rule.matches(src, dst) {
+		if rule.matches(src, dst, network) {
 			return rule.Action == Allow
 		}
 	}
 	return l.Default != Deny
 }
 
-func (r Rule) matches(src, dst netip.AddrPort) bool {
+func (r Rule) matches(src, dst netip.AddrPort, network string) bool {
+	if network != "" && r.Protocol != "" && r.Protocol != network {
+                return false
+	}
 	if r.sourcePrefix != nil && !r.sourcePrefix.Contains(src.Addr()) {
 		return false
 	}
@@ -205,6 +209,16 @@ func ParseRule(s string) (Rule, error) {
 			r.SourcePort = v
 		case "dport", "dest_port", "destination_port":
 			r.DestPort = v
+		case "protocol":
+			if v == "TCP" {
+                            r.Protocol = "TCP"
+			} else if v == "UDP" {
+                            r.Protocol = "UDP"
+			} else if v == "" {
+                            r.Protocol = "" 
+			} else {
+                            return Rule{}, fmt.Errorf("unknown ACL rule protocol %v", v)
+			}
 		default:
 			return Rule{}, fmt.Errorf("unknown ACL field %q", k)
 		}

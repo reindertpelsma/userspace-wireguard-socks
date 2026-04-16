@@ -118,7 +118,7 @@ Let existing applications without SOCKS support connect to Wireguard rootless (E
 # starts a built-in fdproxy daemon automatically.
 ./uwgwrapper --api http://127.0.0.1:8080 -- curl -v https://www.google.com
 ```
-
+(
 Throughput smoke test with a real WireGuard config (e.g [Nordvpn Wireguard](https://github.com/sfiorini/NordVPN-Wireguard)):
 
 ```bash
@@ -126,6 +126,13 @@ Throughput smoke test with a real WireGuard config (e.g [Nordvpn Wireguard](http
 ./uwgwrapper --api unix:/tmp/http.sock -- speedtest-cli 
 ```
 
+The uwgwrapper makes uses of both preload.so like socksify, to intercept direct userspace calls to the libc API for socket operations and ptrace like [graftcp](https://github.com/hmgle/graftcp) so that also statically compiled binaries and libraries can be intercepted. Plus it also supports UDP and binding sockets.
+
+To use the performance of both preload.so and ptrace fallback your environment must support seccomp and ptrace. Some docker containers have either or both of those two blocked. The uwgwrapper automatically detects the environment to ensure the best performance while still being correct.
+
+1. It first tries the combo seccomp + preload + ptrace
+2. It then fallbacks to a ptrace-only without seccomp
+3. 
 
 ```
 Application -> uwgpreload.so overriding libc functions -> (local UNIX socket file) -> uwgfdproxy managing TCP/UDP sockets routing through Wireguard -> (HTTP/socks API + auth possible) -> uwgsocks daemon connecting to Wireguard -> userspace UDP connection -> Wireguard server
