@@ -18,9 +18,6 @@
 *.o
 *.so
 
-# AI specific tasks to perform on the code base
-/tasks
-
 # Local, real VPN configs used during manual testing. The repository examples
 # use demonstration-only keys instead.
 /*.local.conf

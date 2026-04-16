@@ -9,14 +9,6 @@ wireguard:
 inbound:
   transparent: true
 
-host_forward:
-  proxy:
-    enabled: true
-    redirect_ip: 127.0.0.1
-  inbound:
-    enabled: true
-    redirect_ip: ""
-
 dns_server:
   # Tunnel-side DNS listener. This is not a host port 53 bind.
   listen: 100.64.90.1:53

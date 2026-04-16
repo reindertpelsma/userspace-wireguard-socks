@@ -36,6 +36,7 @@ type wrapperArtifacts struct {
 	rawmixLib    string
 	rawmixClient string
 	nnpProbe     string
+	reentrant    string
 }
 
 type traceStats struct {
@@ -64,19 +65,19 @@ func TestUWGWrapperPtraceSeccompRawGoTCPUDP(t *testing.T) {
 	}
 }
 
-func TestUWGWrapperPtraceRawGoTCPUDP(t *testing.T) {
+func TestUWGWrapperPtraceOnlyRawGoTCPUDP(t *testing.T) {
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
 
-	out := runWrappedTarget(t, art, httpSock, "ptrace", art.raw, "tcp", "100.64.94.1", "18080", "ptrace-tcp")
-	if normalizedOutput(out) != "ptrace-tcp" {
-		t.Fatalf("unexpected ptrace tcp output %q", out)
+	out := runWrappedTarget(t, art, httpSock, "ptrace-only", art.raw, "tcp", "100.64.94.1", "18080", "ptrace-only-tcp")
+	if normalizedOutput(out) != "ptrace-only-tcp" {
+		t.Fatalf("unexpected ptrace-only tcp output %q", out)
 	}
 
-	out = runWrappedTarget(t, art, httpSock, "ptrace", art.raw, "udp", "100.64.94.1", "18081", "ptrace-udp")
-	if normalizedOutput(out) != "ptrace-udp" {
-		t.Fatalf("unexpected ptrace udp output %q", out)
+	out = runWrappedTarget(t, art, httpSock, "ptrace-only", art.raw, "udp", "100.64.94.1", "18081", "ptrace-only-udp")
+	if normalizedOutput(out) != "ptrace-only-udp" {
+		t.Fatalf("unexpected ptrace-only udp output %q", out)
 	}
 }
 
@@ -271,6 +272,48 @@ func TestUWGWrapperPreloadOnlyTCPUDPAndListener(t *testing.T) {
 	t.Fatal(lastErr)
 }
 
+func TestUWGWrapperPtraceLifecycleLoop(t *testing.T) {
+	requireWrapperToolchain(t)
+	art := buildWrapperArtifacts(t)
+	_, httpSock := setupWrapperNetwork(t)
+
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Skip("true binary not available")
+	}
+
+	for _, transport := range []string{"ptrace", "ptrace-only", "ptrace-seccomp"} {
+		t.Run(transport, func(t *testing.T) {
+			for i := 0; i < 15; i++ {
+				out := runWrappedTargetWithOptions(t, art, httpSock, transport, truePath, nil, wrapperRunOptions{
+					timeout: 15 * time.Second,
+				})
+				if got := strings.TrimSpace(string(out)); got != "" {
+					t.Fatalf("unexpected %s output on iteration %d: %q", transport, i, out)
+				}
+			}
+		})
+	}
+}
+
+func TestUWGWrapperReentrantTrackedLockFailsFast(t *testing.T) {
+	requireWrapperToolchain(t)
+	art := buildWrapperArtifacts(t)
+	httpSock := filepath.Join(t.TempDir(), "unused-api.sock")
+
+	out := runWrappedTargetWithOptions(t, art, httpSock, "preload-and-ptrace", art.reentrant,
+		[]string{"100.64.94.2", "19197"},
+		wrapperRunOptions{
+			timeout: 30 * time.Second,
+			env: map[string]string{
+				"UWGS_TEST_TRACKED_WRLOCK_DELAY_US": "50000",
+			},
+		})
+	if normalizedOutput(out) != "reentrant-ok" {
+		t.Fatalf("unexpected reentrant output %q", out)
+	}
+}
+
 func TestUWGWrapperNoNewPrivilegesDefaultAndOverride(t *testing.T) {
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)
@@ -324,6 +367,7 @@ func buildWrapperArtifacts(t *testing.T) wrapperArtifacts {
 		rawmixLib:    filepath.Join(tmp, "librawmix_helpers.so"),
 		rawmixClient: filepath.Join(tmp, "rawmix_client"),
 		nnpProbe:     filepath.Join(tmp, "nnp_probe"),
+		reentrant:    filepath.Join(tmp, "reentrant_client"),
 	}
 	run(t, repo, "gcc", "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-o", art.preload, "preload/uwgpreload.c", "-ldl", "-pthread")
 	run(t, repo, "gcc", "-O2", "-Wall", "-Wextra", "-o", art.stub, "tests/preload/testdata/stub_client.c")
@@ -331,6 +375,7 @@ func buildWrapperArtifacts(t *testing.T) wrapperArtifacts {
 	run(t, repo, "gcc", "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-o", art.rawmixLib, "tests/preload/testdata/rawmix_helpers.c")
 	run(t, repo, "gcc", "-O2", "-Wall", "-Wextra", "-pthread", "-I", "tests/preload/testdata", "-L", tmp, "-Wl,-rpath,$ORIGIN", "-o", art.rawmixClient, "tests/preload/testdata/rawmix_client.c", "-lrawmix_helpers")
 	run(t, repo, "gcc", "-O2", "-Wall", "-Wextra", "-o", art.nnpProbe, "tests/preload/testdata/nnp_probe.c")
+	run(t, repo, "gcc", "-O2", "-Wall", "-Wextra", "-o", art.reentrant, "tests/preload/testdata/reentrant_client.c")
 	buildWithEnv(t, repo, map[string]string{"CGO_ENABLED": "0"}, "go", "build", "-o", art.raw, "tests/preload/testdata/raw_client.go")
 	buildWithEnv(t, repo, map[string]string{"CGO_ENABLED": "0"}, "go", "build", "-o", art.wrapper, "./cmd/uwgwrapper")
 	return art
@@ -608,6 +653,9 @@ func retryableWrappedFailure(out []byte, err error) bool {
 		return true
 	}
 	if bytes.Contains(out, []byte("ptrace mode failed: no such process")) {
+		return true
+	}
+	if bytes.Contains(out, []byte("worker ")) && bytes.Contains(out, []byte(" failed: ")) {
 		return true
 	}
 	var exitErr *exec.ExitError

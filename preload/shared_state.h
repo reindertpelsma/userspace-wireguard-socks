@@ -49,7 +49,7 @@ struct tracked_fd {
 struct uwg_rwlock {
   _Atomic uint32_t readers;
   _Atomic uint32_t writer;
-  uint32_t reserved;
+  _Atomic int32_t writer_tid;
 };
 
 struct uwg_guardlock {
@@ -60,14 +60,24 @@ struct uwg_guardlock {
   _Atomic int32_t reader_tids[UWG_GUARD_SLOTS];
 };
 
-static inline void uwg_rwlock_rdlock(struct uwg_rwlock *lock) {
+static inline int uwg_rwlock_writer_owned_by(struct uwg_rwlock *lock,
+                                             int32_t tid) {
+  return atomic_load_explicit(&lock->writer, memory_order_acquire) != 0 &&
+         atomic_load_explicit(&lock->writer_tid, memory_order_acquire) == tid;
+}
+
+static inline int uwg_rwlock_rdlock(struct uwg_rwlock *lock, int32_t tid) {
   for (;;) {
+    if (uwg_rwlock_writer_owned_by(lock, tid))
+      return -1;
     while (atomic_load_explicit(&lock->writer, memory_order_acquire) != 0)
       sched_yield();
     atomic_fetch_add_explicit(&lock->readers, 1, memory_order_acquire);
     if (atomic_load_explicit(&lock->writer, memory_order_acquire) == 0)
-      return;
+      return 0;
     atomic_fetch_sub_explicit(&lock->readers, 1, memory_order_release);
+    if (uwg_rwlock_writer_owned_by(lock, tid))
+      return -1;
   }
 }
 
@@ -75,26 +85,30 @@ static inline void uwg_rwlock_rdunlock(struct uwg_rwlock *lock) {
   atomic_fetch_sub_explicit(&lock->readers, 1, memory_order_release);
 }
 
-static inline void uwg_rwlock_wrlock(struct uwg_rwlock *lock) {
+static inline int uwg_rwlock_wrlock(struct uwg_rwlock *lock, int32_t tid) {
   for (;;) {
+    if (uwg_rwlock_writer_owned_by(lock, tid))
+      return -1;
     uint32_t expected = 0;
     if (atomic_compare_exchange_weak_explicit(
             &lock->writer, &expected, 1, memory_order_acq_rel,
             memory_order_acquire)) {
+      atomic_store_explicit(&lock->writer_tid, tid, memory_order_release);
       while (atomic_load_explicit(&lock->readers, memory_order_acquire) != 0)
         sched_yield();
-      return;
+      return 0;
     }
     sched_yield();
   }
 }
 
 static inline void uwg_rwlock_wrunlock(struct uwg_rwlock *lock) {
+  atomic_store_explicit(&lock->writer_tid, 0, memory_order_release);
   atomic_store_explicit(&lock->writer, 0, memory_order_release);
 }
 
 #define UWG_SHARED_MAGIC 0x55574753u
-#define UWG_SHARED_VERSION 3u
+#define UWG_SHARED_VERSION 4u
 
 static inline int uwg_guard_hold_slot(struct uwg_guardlock *lock, int32_t tid) {
   for (size_t i = 0; i < UWG_GUARD_SLOTS; i++) {

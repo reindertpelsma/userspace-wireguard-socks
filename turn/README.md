@@ -1,21 +1,22 @@
 # Open TURN Relay
 
-This project hosts a TURN server for Wireguard servers/clients and can also be used as a general UDP relay proxy.
+This project is mainly for running a TURN server as a **UDP relay proxy with stable, predictable ports**.
 
-Unlike normal WebRTC TURN, this TURN server allocates a static port and allows abritary connections from the internet to reach the proxyy
+The main point is not typical WebRTC TURN usage.
+The main point is to **open UDP ports to the internet through a TURN server**, while keeping relay ports consistent and easy to map.
 
-Features:
-- TURN server allowing both inbound and outbound UDP connections
-- Open UDP relay support allowing applications behind firewalls to use a TURN server to open a UDP port to the internet
-- Wireguard support allowing the TURN server to filter Wireguard packets before arriving the target wireguard server/client, be able to validate on the server's public key
-- Full DoS firewall for Wireguard servers, with automatic mitigation if an attack is detected.
-- Supporting username and password authentication and source network filtering, plus port range method
+In other words:
+- most WebRTC TURN servers allocate random-looking relay ports for media sessions, behind a restrictive permission firewall
+- this server is meant for **UDP relay/proxy use**, where **fixed or predictable relay ports matter**
+- that makes it useful when you want to expose UDP endpoints to the internet in a controlled way
+
+It is built on Pion TURN and adds:
+- username/password auth
+- fixed relay port per user
+- port-range mode where the username is the relay port number
 - optional public mapped address override for NAT/port-forwarded setups
+- source network filtering
 - selectable permission behavior
-
-When used with Wireguard, the TURN server will not be able to decrypt or MITM the connection, allowing the TURN server be able to hosted on a untrusted provider for cheap bandwidth, while keeping your personal traffic secure.
-
-Even if you have the ability to expose a port, when you want to protect your IP or your Wireguard server you can still run the TURN server as a firewall and let your wireguard server connect through TURN.
 
 ## Start in 20 seconds
 

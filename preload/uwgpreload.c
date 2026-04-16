@@ -52,6 +52,8 @@ static struct uwg_guardlock local_hot_path_guard;
 static struct uwg_shared_state *shared_state;
 static uint64_t syscall_passthrough_secret;
 static pthread_once_t shared_state_once = PTHREAD_ONCE_INIT;
+static __thread int tracked_read_depth;
+static __thread int tracked_write_depth;
 static __thread int hot_path_read_depth;
 static __thread int hot_path_write_depth;
 static int (*real_socket_fn)(int, int, int);
@@ -84,8 +86,8 @@ static FILE *(*real_fdopen_fn)(int, const char *);
 
 static int fill_sockaddr_from_text(int family, const char *ip, uint16_t port,
                                    struct sockaddr *addr, socklen_t *addrlen);
-static void tracked_rdlock(void);
-static void tracked_wrlock(void);
+static int tracked_rdlock(void);
+static int tracked_wrlock(void);
 static void tracked_rdunlock(void);
 static void tracked_wrunlock(void);
 static struct tracked_fd *tracked_table(void);
@@ -95,6 +97,10 @@ static void tracked_clear_fd(int fd);
 static void tracked_map_if_needed(void);
 static void tracked_map_once(void);
 static int current_tid(void);
+static int tracked_lock_reentrant(void);
+static int tracked_reentrant_socket_fd(int fd);
+static int tracked_reentrant_socket_create(int domain, int type);
+static void tracked_test_delay(void);
 static void hot_path_rdlock(void);
 static void hot_path_rdunlock(void);
 static void hot_path_wrlock(void);
@@ -554,34 +560,91 @@ static void hot_path_wrunlock(void) {
     uwg_guard_wrunlock(hot_path_guard());
 }
 
-static void tracked_rdlock(void) {
+static struct uwg_rwlock *tracked_lock(void) {
   tracked_map_if_needed();
   if (shared_state)
-    uwg_rwlock_rdlock(&shared_state->lock);
-  else
-    uwg_rwlock_rdlock(&local_tracked_lock);
+    return &shared_state->lock;
+  return &local_tracked_lock;
 }
 
-static void tracked_wrlock(void) {
+static int tracked_lock_reentrant(void) {
+  struct uwg_rwlock *lock = tracked_lock();
+  int tid = current_tid();
+  return tracked_read_depth > 0 || tracked_write_depth > 0 ||
+         uwg_rwlock_writer_owned_by(lock, tid);
+}
+
+static int tracked_reentrant_socket_fd(int fd) {
+  if (!tracked_lock_reentrant() || !fd_ok(fd))
+    return 0;
+  struct tracked_fd state = tracked_table()[fd];
+  if (!state.active && !state.proxied)
+    return 0;
+  errno = EDEADLK;
+  return 1;
+}
+
+static int tracked_reentrant_socket_create(int domain, int type) {
+  if (!tracked_lock_reentrant())
+    return 0;
+  if ((domain != AF_INET && domain != AF_INET6) ||
+      (((type & SOCK_TYPE_MASK) != SOCK_STREAM) &&
+       ((type & SOCK_TYPE_MASK) != SOCK_DGRAM))) {
+    return 0;
+  }
+  errno = EDEADLK;
+  return 1;
+}
+
+static void tracked_test_delay(void) {
+  const char *value = getenv("UWGS_TEST_TRACKED_WRLOCK_DELAY_US");
+  if (!value || !*value)
+    return;
+  char *end = NULL;
+  unsigned long usec = strtoul(value, &end, 10);
+  if (!end || *end != '\0' || usec == 0)
+    return;
+  usleep(usec);
+}
+
+static int tracked_rdlock(void) {
   tracked_map_if_needed();
-  if (shared_state)
-    uwg_rwlock_wrlock(&shared_state->lock);
-  else
-    uwg_rwlock_wrlock(&local_tracked_lock);
+  if (tracked_write_depth > 0)
+    return -1;
+  if (tracked_read_depth++ > 0)
+    return 0;
+  if (uwg_rwlock_rdlock(tracked_lock(), current_tid()) == 0)
+    return 0;
+  tracked_read_depth--;
+  return -1;
+}
+
+static int tracked_wrlock(void) {
+  tracked_map_if_needed();
+  if (tracked_read_depth > 0 || tracked_write_depth > 0) {
+    errno = EDEADLK;
+    return -1;
+  }
+  if (uwg_rwlock_wrlock(tracked_lock(), current_tid()) != 0) {
+    errno = EDEADLK;
+    return -1;
+  }
+  tracked_write_depth = 1;
+  return 0;
 }
 
 static void tracked_rdunlock(void) {
-  if (shared_state)
-    uwg_rwlock_rdunlock(&shared_state->lock);
-  else
-    uwg_rwlock_rdunlock(&local_tracked_lock);
+  if (tracked_read_depth <= 0)
+    return;
+  if (--tracked_read_depth == 0)
+    uwg_rwlock_rdunlock(tracked_lock());
 }
 
 static void tracked_wrunlock(void) {
-  if (shared_state)
-    uwg_rwlock_wrunlock(&shared_state->lock);
-  else
-    uwg_rwlock_wrunlock(&local_tracked_lock);
+  if (tracked_write_depth <= 0)
+    return;
+  tracked_write_depth = 0;
+  uwg_rwlock_wrunlock(tracked_lock());
 }
 
 static struct tracked_fd tracked_snapshot(int fd) {
@@ -589,7 +652,8 @@ static struct tracked_fd tracked_snapshot(int fd) {
   memset(&out, 0, sizeof(out));
   if (!fd_ok(fd))
     return out;
-  tracked_rdlock();
+  if (tracked_rdlock() != 0)
+    return out;
   out = tracked_table()[fd];
   tracked_rdunlock();
   return out;
@@ -598,7 +662,9 @@ static struct tracked_fd tracked_snapshot(int fd) {
 static void tracked_store(int fd, const struct tracked_fd *state) {
   if (!fd_ok(fd) || !state)
     return;
-  tracked_wrlock();
+  if (tracked_wrlock() != 0)
+    return;
+  tracked_test_delay();
   tracked_table()[fd] = *state;
   tracked_wrunlock();
 }
@@ -606,7 +672,9 @@ static void tracked_store(int fd, const struct tracked_fd *state) {
 static void tracked_clear_fd(int fd) {
   if (!fd_ok(fd))
     return;
-  tracked_wrlock();
+  if (tracked_wrlock() != 0)
+    return;
+  tracked_test_delay();
   memset(&tracked_table()[fd], 0, sizeof(tracked_table()[fd]));
   tracked_wrunlock();
 }
@@ -1353,6 +1421,8 @@ static int managed_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
 
 int socket(int domain, int type, int protocol) {
   init_real();
+  if (tracked_reentrant_socket_create(domain, type))
+    return -1;
   int fd = real_socket_call(domain, type, protocol);
   if (fd_ok(fd) && (domain == AF_INET || domain == AF_INET6)) {
     int base = type & SOCK_TYPE_MASK;
@@ -1377,6 +1447,8 @@ int __socket(int domain, int type, int protocol) {
 
 int bind(int fd, const struct sockaddr *addr, socklen_t len) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   hot_path_rdunlock();
@@ -1410,6 +1482,8 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len) {
 
 int listen(int fd, int backlog) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   (void)backlog;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
@@ -1422,6 +1496,8 @@ int listen(int fd, int backlog) {
 
 int connect(int fd, const struct sockaddr *addr, socklen_t len) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   hot_path_rdunlock();
@@ -1453,6 +1529,8 @@ int __connect(int fd, const struct sockaddr *addr, socklen_t len) {
 
 FILE *fdopen(int fd, const char *mode) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return NULL;
   struct tracked_fd state = tracked_snapshot(fd);
   if (!fd_ok(fd) || !state.proxied) {
     if (!real_fdopen_fn) {
@@ -1486,6 +1564,8 @@ FILE *fdopen64(int fd, const char *mode) { return fdopen(fd, mode); }
 
 ssize_t send(int fd, const void *buf, size_t len, int flags) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   if (debug_enabled() && fd_ok(fd) && (state.active || state.proxied))
@@ -1512,6 +1592,8 @@ ssize_t __send(int fd, const void *buf, size_t len, int flags) {
 
 ssize_t write(int fd, const void *buf, size_t len) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   if (debug_enabled() && fd_ok(fd) && (state.active || state.proxied))
@@ -1541,6 +1623,8 @@ ssize_t __write_nocancel(int fd, const void *buf, size_t len) {
 
 ssize_t recv(int fd, void *buf, size_t len, int flags) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   if (debug_enabled() && fd_ok(fd) && (state.active || state.proxied))
@@ -1574,6 +1658,8 @@ ssize_t __recv(int fd, void *buf, size_t len, int flags) {
 
 ssize_t read(int fd, void *buf, size_t len) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   if (debug_enabled() && fd_ok(fd) && (state.active || state.proxied))
@@ -1611,6 +1697,8 @@ ssize_t __read_nocancel(int fd, void *buf, size_t len) {
 ssize_t sendto(int fd, const void *buf, size_t len, int flags,
                const struct sockaddr *dest, socklen_t destlen) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   int family = dest ? dest->sa_family : 0;
@@ -1668,6 +1756,8 @@ ssize_t sendto(int fd, const void *buf, size_t len, int flags,
 ssize_t recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *src,
                  socklen_t *srclen) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   int cold = fd_ok(fd) && should_cold_path(&state);
@@ -1740,6 +1830,8 @@ ssize_t recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *src,
 
 int accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   int cold = fd_ok(fd) && should_cold_path(&state);
@@ -1760,6 +1852,8 @@ int accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
 
 int accept4(int fd, struct sockaddr *addr, socklen_t *addrlen, int flags) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   int cold = fd_ok(fd) && should_cold_path(&state);
@@ -1781,6 +1875,8 @@ int accept4(int fd, struct sockaddr *addr, socklen_t *addrlen, int flags) {
 
 int close(int fd) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   int cold = fd_ok(fd) && should_cold_path(&state);
@@ -1798,6 +1894,8 @@ int __close_nocancel(int fd) { return close(fd); }
 
 int dup(int oldfd) {
   init_real();
+  if (tracked_reentrant_socket_fd(oldfd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(oldfd);
   int cold = fd_ok(oldfd) && should_cold_path(&state);
@@ -1812,6 +1910,8 @@ int dup(int oldfd) {
 
 int dup2(int oldfd, int newfd) {
   init_real();
+  if (tracked_reentrant_socket_fd(oldfd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(oldfd);
   int cold = fd_ok(oldfd) && should_cold_path(&state);
@@ -1826,6 +1926,8 @@ int dup2(int oldfd, int newfd) {
 
 int dup3(int oldfd, int newfd, int flags) {
   init_real();
+  if (tracked_reentrant_socket_fd(oldfd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(oldfd);
   int cold = fd_ok(oldfd) && should_cold_path(&state);
@@ -1929,6 +2031,8 @@ static int managed_getpeername(int fd, struct sockaddr *addr,
 
 int getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   int proxied = fd_ok(fd) && state.proxied;
@@ -1941,6 +2045,8 @@ int getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen) {
 
 int getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   int proxied = fd_ok(fd) && state.proxied;
@@ -1953,6 +2059,8 @@ int getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen) {
 
 int shutdown(int fd, int how) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   int cold = fd_ok(fd) && should_cold_path(&state);
@@ -1982,6 +2090,8 @@ int __shutdown(int fd, int how) { return shutdown(fd, how); }
 
 int fcntl(int fd, int cmd, ...) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   va_list ap;
   void *argp = NULL;
   long arg = 0;
@@ -2047,6 +2157,8 @@ int __libc_fcntl64(int fd, int cmd, ...) {
 int getsockopt(int fd, int level, int optname, void *optval,
                socklen_t *optlen) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   int proxied = fd_ok(fd) && state.proxied && optval && optlen;
@@ -2102,6 +2214,8 @@ int getsockopt(int fd, int level, int optname, void *optval,
 int setsockopt(int fd, int level, int optname, const void *optval,
                socklen_t optlen) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   int proxied = fd_ok(fd) && state.proxied;
@@ -2134,6 +2248,8 @@ ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
   if (!real_sendmsg_fn)
     real_sendmsg_fn = dlsym(RTLD_NEXT, "sendmsg");
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   struct tracked_fd state = tracked_snapshot(fd);
   if (fd_ok(fd) && state.proxied) {
     size_t len = 0, off = 0;
@@ -2164,6 +2280,8 @@ ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
 
 ssize_t recvmsg(int fd, struct msghdr *msg, int flags) {
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   struct tracked_fd state = tracked_snapshot(fd);
   if (fd_ok(fd) && state.proxied) {
     char buf[65536];
@@ -2200,6 +2318,8 @@ int sendmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags) {
   if (!real_sendmmsg_fn)
     real_sendmmsg_fn = dlsym(RTLD_NEXT, "sendmmsg");
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   struct tracked_fd state = tracked_snapshot(fd);
   if (fd_ok(fd) && state.proxied) {
     unsigned int i;
@@ -2221,6 +2341,8 @@ int recvmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags,
   if (!real_recvmmsg_fn)
     real_recvmmsg_fn = dlsym(RTLD_NEXT, "recvmmsg");
   init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
   (void)timeout;
   struct tracked_fd state = tracked_snapshot(fd);
   if (fd_ok(fd) && state.proxied) {
