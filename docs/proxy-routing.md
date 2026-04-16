@@ -3,8 +3,9 @@
 
 # Proxy Routing
 
-`uwgsocks` makes a routing decision for every SOCKS5/HTTP request and every
-transparent inbound WireGuard TCP/UDP flow. The short version is:
+`uwgsocks` makes a routing decision for every SOCKS5/HTTP request, every
+connected raw socket API/fdproxy TCP/UDP/ICMP request, and every transparent
+inbound WireGuard TCP/UDP flow. The short version is:
 
 1. Local tunnel addresses are handled first.
 2. Explicit reverse forwards win before peer routing.
@@ -38,6 +39,14 @@ For SOCKS5/HTTP outbound connections:
 
 Transparent inbound WireGuard TCP/UDP termination uses the same ordered model,
 except it uses the `inbound` outbound-proxy role and `host_forward.inbound`.
+
+Connected raw socket API and fdproxy TCP/UDP requests use the same ordered
+model as SOCKS5/HTTP. Connected ICMP ping sockets follow the same ACL and
+AllowedIPs checks, but direct fallback is opportunistic host ping-socket
+support only: there is no outbound proxy equivalent for ICMP. When the runtime
+does not have tunnel IPv6 configured, raw socket API/fdproxy IPv6 connects are
+rejected immediately so applications can fall back to IPv4 instead of waiting
+for a host-level timeout.
 
 Outbound proxy fallback rules are useful when the process running `uwgsocks`
 must itself reach the Internet through another proxy:

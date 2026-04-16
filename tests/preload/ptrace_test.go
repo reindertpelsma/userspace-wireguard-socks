@@ -138,7 +138,7 @@ func TestUWGWrapperBothStress(t *testing.T) {
 func TestUWGWrapperBothExecAndFork(t *testing.T) {
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)
-	serverEng, httpSock := setupWrapperNetwork(t)
+	_, httpSock := setupWrapperNetwork(t)
 
 	out := runWrappedTarget(t, art, httpSock, "preload-and-ptrace", art.mixed, "100.64.94.1", "18080", "both-exec", "exec")
 	if normalizedOutput(out) != "both-exec" {
@@ -152,23 +152,59 @@ func TestUWGWrapperBothExecAndFork(t *testing.T) {
 		t.Fatalf("unexpected both fork output %q", out)
 	}
 
-	if _, err := exec.LookPath("curl"); err == nil {
-		ln, err := serverEng.ListenTCP(netip.MustParseAddrPort("100.64.94.1:18083"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer ln.Close()
-		go func() {
-			_ = http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = io.WriteString(w, "curl-over-wrapper")
-			}))
-		}()
-		out = runWrappedTargetWithOptions(t, art, httpSock, "preload-and-ptrace", "curl",
-			[]string{"--max-time", "15", "-fsS", "http://100.64.94.1:18083/"},
-			wrapperRunOptions{timeout: 90 * time.Second})
-		if normalizedOutput(out) != "curl-over-wrapper" {
-			t.Fatalf("unexpected curl output %q", out)
-		}
+}
+
+func TestUWGWrapperCurlAcrossTransports(t *testing.T) {
+	requireWrapperToolchain(t)
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl is required for the practical wrapper coverage test")
+	}
+	art := buildWrapperArtifacts(t)
+	serverEng, httpSock := setupWrapperNetwork(t)
+	hostIP := nonLoopbackIPv4(t)
+
+	ln, err := serverEng.ListenTCP(netip.MustParseAddrPort("100.64.94.1:18083"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		_ = http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, "curl-over-wrapper")
+		}))
+	}()
+
+	directLn, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directLn.Close()
+	go func() {
+		_ = http.Serve(directLn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, "curl-direct-fallback")
+		}))
+	}()
+	_, directPort, err := net.SplitHostPort(directLn.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, transport := range []string{"preload", "preload-and-ptrace"} {
+		t.Run(transport, func(t *testing.T) {
+			out := runWrappedTargetWithOptions(t, art, httpSock, transport, "curl",
+				[]string{"--max-time", "15", "-fsS", "http://100.64.94.1:18083/"},
+				wrapperRunOptions{timeout: 90 * time.Second})
+			if normalizedOutput(out) != "curl-over-wrapper" {
+				t.Fatalf("unexpected curl output %q", out)
+			}
+
+			out = runWrappedTargetWithOptions(t, art, httpSock, transport, "curl",
+				[]string{"--max-time", "15", "-fsS", "http://" + net.JoinHostPort(hostIP.String(), directPort) + "/"},
+				wrapperRunOptions{timeout: 90 * time.Second})
+			if normalizedOutput(out) != "curl-direct-fallback" {
+				t.Fatalf("unexpected direct-fallback curl output %q", out)
+			}
+		})
 	}
 }
 
@@ -682,4 +718,29 @@ func buildWithEnv(t *testing.T, dir string, env map[string]string, name string, 
 	if err != nil {
 		t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
 	}
+}
+
+func nonLoopbackIPv4(t *testing.T) netip.Addr {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			prefix, err := netip.ParsePrefix(addr.String())
+			if err == nil && prefix.Addr().Is4() {
+				return prefix.Addr()
+			}
+		}
+	}
+	t.Skip("no non-loopback IPv4 address available for wrapper direct-fallback test")
+	return netip.Addr{}
 }

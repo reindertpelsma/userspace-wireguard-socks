@@ -45,6 +45,9 @@ Still intentionally limited:
 - ICMP support is for outbound unprivileged ping-style datagram sockets:
   `socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)` and the IPv6 equivalent. Raw
   ICMP sockets and listener-style ICMP sockets are intentionally not exposed.
+  Connected ICMP sockets follow the same outbound ACL and `fallback_direct`
+  routing policy as TCP/UDP, except direct fallback depends on the host kernel
+  supporting unprivileged ping sockets.
 - the preload wrapper is still a proof layer, not a production libc shim:
   `sendmsg`/`recvmsg`, libc resolver interposition, full `select`/`epoll`
   shimming, and some uncommon socket options are not implemented

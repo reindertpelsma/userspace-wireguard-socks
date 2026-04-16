@@ -194,6 +194,8 @@ func TestSocketAPIRejectsICMPByACLAndUnroutedIPv6(t *testing.T) {
 	cfg.API.Listen = "127.0.0.1:0"
 	cfg.API.Token = "secret"
 	cfg.ACL.Outbound = []acl.Rule{{Action: acl.Deny, Protocol: "icmp"}}
+	fallback := false
+	cfg.Proxy.FallbackDirect = &fallback
 	eng := mustStart(t, cfg)
 
 	conn := socketAPIConn(t, "http://"+eng.Addr("api"), "secret")
@@ -232,8 +234,45 @@ func TestSocketAPIRejectsICMPByACLAndUnroutedIPv6(t *testing.T) {
 		t.Fatal(err)
 	}
 	frame = readSocketFrame(t, conn)
-	if frame.Action != socketproto.ActionClose || !bytes.Contains(frame.Payload, []byte("AllowedIPs")) {
+	if frame.Action != socketproto.ActionClose || !bytes.Contains(frame.Payload, []byte("IPv6 is disabled")) {
 		t.Fatalf("IPv6 rejection frame = action %d payload %q", frame.Action, frame.Payload)
+	}
+}
+
+func TestSocketAPIFallbackDirectTCPUDPAndICMP(t *testing.T) {
+	hostIP := nonLoopbackIPv4(t)
+	echo := startEchoServer(t)
+	defer echo.Close()
+	udpPC, err := net.ListenPacket("udp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udpPC.Close()
+	go serveUDPEcho(udpPC)
+
+	key := mustKey(t)
+	cfg := config.Default()
+	cfg.WireGuard.PrivateKey = key.String()
+	cfg.WireGuard.Addresses = []string{"100.64.97.1/32"}
+	cfg.API.Listen = "127.0.0.1:0"
+	cfg.API.Token = "secret"
+	eng := mustStart(t, cfg)
+
+	socketAddr := "http://" + eng.Addr("api")
+	got := socketAPITCPEcho(t, socketAddr, "secret", netip.MustParseAddrPort(net.JoinHostPort(hostIP.String(), echo.Port)), []byte("raw socket direct tcp"))
+	if string(got) != "raw socket direct tcp" {
+		t.Fatalf("TCP direct fallback echo mismatch: %q", got)
+	}
+	udpPort := udpPC.LocalAddr().(*net.UDPAddr).Port
+	got = socketAPIUDPEcho(t, socketAddr, "secret", netip.MustParseAddrPort(net.JoinHostPort(hostIP.String(), fmt.Sprintf("%d", udpPort))), []byte("raw socket direct udp"))
+	if string(got) != "raw socket direct udp" {
+		t.Fatalf("UDP direct fallback echo mismatch: %q", got)
+	}
+	if hostPingSupported(hostIP) {
+		got = socketAPIICMPEcho(t, socketAddr, "secret", hostIP, []byte("raw socket direct icmp"))
+		if string(got) != "raw socket direct icmp" {
+			t.Fatalf("ICMP direct fallback echo mismatch: %q", got)
+		}
 	}
 }
 

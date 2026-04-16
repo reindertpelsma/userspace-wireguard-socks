@@ -12,6 +12,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/waiter"
@@ -117,6 +118,13 @@ func (net *Net) SetTCPForwarder(rcvWnd, maxInFlight int, handler func(*tcp.Forwa
 func (net *Net) SetUDPForwarder(handler func(*udp.ForwarderRequest)) {
 	forwarder := udp.NewForwarder(net.stack, handler)
 	net.stack.SetTransportProtocolHandler(udp.ProtocolNumber, forwarder.HandlePacket)
+}
+
+// SetICMPForwarder registers a fallback handler for ICMP echo traffic that
+// does not match a local ping endpoint.
+func (net *Net) SetICMPForwarder(handler func(stack.TransportEndpointID, *stack.PacketBuffer) bool) {
+	net.stack.SetTransportProtocolHandler(icmp.ProtocolNumber4, handler)
+	net.stack.SetTransportProtocolHandler(icmp.ProtocolNumber6, handler)
 }
 
 // NewTCPConnFromForwarder turns a gVisor forwarder request into a net.Conn.

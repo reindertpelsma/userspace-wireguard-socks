@@ -206,6 +206,7 @@ func (e *Engine) Start() error {
 	if *e.cfg.Inbound.Transparent {
 		e.net.SetTCPForwarder(e.cfg.Inbound.TCPReceiveWindowBytes, e.tcpForwarderMaxInFlight(), e.handleTCPForward)
 		e.net.SetUDPForwarder(e.handleUDPForward)
+		e.net.SetICMPForwarder(e.handleICMPForward)
 	}
 
 	// With no ListenPort we avoid binding a UDP port at all. OutboundOnlyBind

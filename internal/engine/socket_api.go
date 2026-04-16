@@ -237,18 +237,7 @@ func (s *socketServer) openICMPConn(id uint64, bind, dest netip.AddrPort, versio
 	if bind.Port() != 0 || dest.Port() != 0 {
 		return errors.New("socket API ICMP does not use ports")
 	}
-	aclDest := netip.AddrPortFrom(dest.Addr(), 0)
-	if !s.e.outboundAllowed(s.src, aclDest, "icmp") {
-		return errProxyACL
-	}
-	if !s.e.allowedContains(dest.Addr()) {
-		return fmt.Errorf("%s does not match any WireGuard AllowedIPs", dest.Addr())
-	}
-	var bindIP netip.Addr
-	if bind.IsValid() {
-		bindIP = bind.Addr()
-	}
-	c, err := s.e.net.DialPingAddr(bindIP, dest.Addr())
+	c, err := s.e.dialSocketICMP(s.src, bind, dest)
 	if err != nil {
 		return err
 	}
@@ -267,13 +256,7 @@ func (s *socketServer) dialSocket(ctx context.Context, network string, bind, des
 	if bind.Port() != 0 && bind.Port() < 1024 && !s.e.socketLowBindEnabled() {
 		return nil, errors.New("binding low ports is disabled")
 	}
-	if !s.e.allowedContains(dest.Addr()) {
-		return nil, fmt.Errorf("%s does not match any WireGuard AllowedIPs", dest.Addr())
-	}
-	if bind.IsValid() {
-		return s.e.dialNetstack(ctx, network, bind, dest)
-	}
-	return s.e.dialNetstack(ctx, network, netip.AddrPort{}, dest)
+	return s.e.dialSocketOutbound(ctx, network, s.src, bind, dest)
 }
 
 func (s *socketServer) openTCPListener(id uint64, bind netip.AddrPort, version uint8) error {

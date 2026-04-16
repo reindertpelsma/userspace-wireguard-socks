@@ -33,6 +33,8 @@ import (
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/engine"
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
 	"golang.org/x/net/proxy"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
@@ -114,6 +116,50 @@ func TestTwoInstancesSOCKSHTTP(t *testing.T) {
 	}
 	waitPeerStatus(t, clientEng, serverKey.PublicKey().String())
 	waitPeerStatus(t, serverEng, clientKey.PublicKey().String())
+}
+
+func TestTransparentInboundICMPToHost(t *testing.T) {
+	hostIP := nonLoopbackIPv4(t)
+	if !hostPingSupported(hostIP) {
+		t.Skip("host unprivileged ICMP sockets are unavailable or not replying")
+	}
+
+	serverKey, clientKey := mustKey(t), mustKey(t)
+	serverPort := freeUDPPort(t)
+
+	serverCfg := config.Default()
+	serverCfg.WireGuard.PrivateKey = serverKey.String()
+	transparent := true
+	serverCfg.Inbound.Transparent = &transparent
+	serverCfg.WireGuard.ListenPort = &serverPort
+	serverCfg.WireGuard.Addresses = []string{"100.64.20.11/32"}
+	serverCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:  clientKey.PublicKey().String(),
+		AllowedIPs: []string{"100.64.20.12/32"},
+	}}
+	serverEng := mustStart(t, serverCfg)
+	defer serverEng.Close()
+
+	clientCfg := config.Default()
+	clientCfg.WireGuard.PrivateKey = clientKey.String()
+	clientCfg.WireGuard.Addresses = []string{"100.64.20.12/32"}
+	clientCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:           serverKey.PublicKey().String(),
+		Endpoint:            fmt.Sprintf("127.0.0.1:%d", serverPort),
+		AllowedIPs:          []string{netip.PrefixFrom(hostIP, 32).String()},
+		PersistentKeepalive: 1,
+	}}
+	clientEng := mustStart(t, clientCfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ping, err := clientEng.Ping(ctx, hostIP.String(), 1, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ping.Received != 1 {
+		t.Fatalf("expected transparent ICMP reply, got %+v", ping)
+	}
 }
 
 func TestForwardsReverseForwardsAndProxyProtocol(t *testing.T) {
@@ -2097,6 +2143,41 @@ func nonLoopbackIPv4(t *testing.T) netip.Addr {
 	}
 	t.Skip("no non-loopback IPv4 address available for transparent host-dial test")
 	return netip.Addr{}
+}
+
+func hostPingSupported(dst netip.Addr) bool {
+	pc, err := icmp.ListenPacket("udp4", "0.0.0.0")
+	if err != nil {
+		return false
+	}
+	defer pc.Close()
+	payload := []byte("uwgsocks-host-ping-check")
+	packet, err := (&icmp.Message{
+		Type: ipv4.ICMPTypeEcho,
+		Body: &icmp.Echo{ID: 0x4321, Seq: 1, Data: payload},
+	}).Marshal(nil)
+	if err != nil {
+		return false
+	}
+	_ = pc.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := pc.WriteTo(packet, &net.IPAddr{IP: net.IP(dst.AsSlice())}); err != nil {
+		return false
+	}
+	buf := make([]byte, 1500)
+	for {
+		n, _, err := pc.ReadFrom(buf)
+		if err != nil {
+			return false
+		}
+		msg, err := icmp.ParseMessage(1, buf[:n])
+		if err != nil {
+			continue
+		}
+		echo, ok := msg.Body.(*icmp.Echo)
+		if ok && msg.Type == ipv4.ICMPTypeEchoReply && bytes.Equal(echo.Data, payload) {
+			return true
+		}
+	}
 }
 
 func serveEchoListener(ln net.Listener) {
