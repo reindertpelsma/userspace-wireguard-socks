@@ -126,13 +126,26 @@ Throughput smoke test with a real WireGuard config (e.g [Nordvpn Wireguard](http
 ./uwgwrapper --api unix:/tmp/http.sock -- speedtest-cli 
 ```
 
-The uwgwrapper makes uses of both preload.so like socksify, to intercept direct userspace calls to the libc API for socket operations and ptrace like [graftcp](https://github.com/hmgle/graftcp) so that also statically compiled binaries and libraries can be intercepted. Plus it also supports UDP and binding sockets.
+The `uwgwrapper` combines a preload fast path, seccomp filtering, and ptrace
+fallback. The preload path intercepts common libc socket calls with low
+overhead. The ptrace path catches static/inlined syscalls from static binaries
+or static libraries. The fdproxy bridge then maps those sockets onto the raw
+socket API exposed by `uwgsocks`.
 
-To use the performance of both preload.so and ptrace fallback your environment must support seccomp and ptrace. Some docker containers have either or both of those two blocked. The uwgwrapper automatically detects the environment to ensure the best performance while still being correct.
+To use the fastest combined mode, the environment must allow seccomp, ptrace,
+and preload. Some Docker/container profiles block one or more of those. The
+wrapper automatically picks the best available mode, or you can force one with
+`--transport`.
 
-1. It first tries the combo seccomp + preload + ptrace
-2. It then fallbacks to a ptrace-only without seccomp
-3. 
+Supported transport modes:
+
+- `auto`: choose the best available mode.
+- `preload-and-ptrace`: preload + complex seccomp + ptrace fallback. Seccomp
+  skips syscalls that preload already handled.
+- `ptrace`: ptrace + simple seccomp filter for only socket-related syscalls.
+- `ptrace-only`: ptrace without seccomp, useful in restricted environments.
+- `preload`: preload only. This is fast but cannot catch static/inlined
+  syscalls.
 
 ```
 Application -> uwgpreload.so overriding libc functions -> (local UNIX socket file) -> uwgfdproxy managing TCP/UDP sockets routing through Wireguard -> (HTTP/socks API + auth possible) -> uwgsocks daemon connecting to Wireguard -> userspace UDP connection -> Wireguard server
@@ -142,6 +155,9 @@ Supported by the wrapper
 - UDP/TCP sockets and outbound unprivileged ICMP ping sockets (`SOCK_DGRAM` + `IPPROTO_ICMP`)
 - Binding TCP listener sockets and unconnected UDP sockets to the WireGuard tunnel. Tunnel-side binding is disabled by default; enable it with `proxy.bind`/`socket_api.bind` in `uwgsocks`, and enable ports below 1024 with `proxy.lowbind`.
 - Connected TCP/UDP sockets preserve explicit `bind(2)` source IP/port when the destination is WireGuard-routed.
+- `SO_REUSEADDR` and `SO_REUSEPORT` within one fdproxy instance. TCP listener
+  accepts are distributed across matching listeners; UDP loopback datagrams are
+  distributed among local listeners.
 - IPv6 is supported when the WireGuard configuration has IPv6 AllowedIPs. If an application attempts IPv6 without tunnel IPv6, the wrapper receives an immediate rejection so normal Happy Eyeballs/fallback logic can try IPv4.
 - IPv6 link-local tunnel addresses work when `filtering.drop_ipv6_link_local_multicast` is disabled on the relevant uwgsocks instances.
 - Unconnected UDP sockets can send to many peers. If binding is not enabled, inbound UDP is established-only: replies are delivered only from remotes the socket recently sent to.
@@ -151,7 +167,8 @@ Supported by the wrapper
 - `SO_REUSEADDR`/`SO_REUSEPORT` works within a single fdproxy instance for TCP listener distribution and UDP loopback datagram distribution.
 
 Limitations of the wrapper:
-- the wrapper cannot intercept connections of static binaries/libraries not linked to libc.
+- `preload` mode cannot intercept static binaries/libraries that do not call
+  libc, but ptrace modes can catch those socket syscalls.
 - the wrapper does not work across user boundaries, that is the application cannot switch user like apt, sudo etc, if it does the connection either fails or bypasses Wireguard. Every user needs its own wrapper 
 - the wrapper does not inferere with loopback connections
 - `SO_REUSEPORT` is local to one fdproxy instance/wrapper and is not coordinated across multiple fdproxy processes.
@@ -244,6 +261,33 @@ wireguard:
 ```bash
 ./uwgsocks --listen-port 51820 --listen-address 203.0.113.10 --listen-address 2001:db8::10
 ```
+
+## TURN Bind Mode
+
+`uwgsocks` can use a TURN allocation as the WireGuard UDP bind. This is useful
+when the process can send UDP to a relay but cannot receive inbound UDP
+directly, for example behind CGNAT or in a locked-down container.
+
+```yaml
+turn:
+  server: turn.example.com:3478
+  username: wg-client
+  password: shared-secret
+  realm: example
+  permissions:
+    - 203.0.113.10:51820
+  include_wg_public_key: false
+```
+
+When `turn.server` is set, the engine constructs `wgbind.TURNBind` instead of
+the normal UDP bind. `permissions` seeds TURN permissions and configured static
+peer endpoints are added automatically. `include_wg_public_key` appends an
+encrypted copy of this instance's WireGuard public key to the TURN username as
+`username---ciphertext`; this is meant for the companion open TURN relay and
+should stay false for generic TURN servers unless they explicitly support it.
+
+`uwgsocks-ui` can generate this block with `-turn-server`, `-turn-user`,
+`-turn-pass`, `-turn-realm`, and `-turn-include-wg-public-key`.
 
 ## YAML Config
 

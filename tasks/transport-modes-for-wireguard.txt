@@ -27,6 +27,10 @@ uses a 2 byte prefix to indicate the packet length that follows.
 
 The idle timer for Wireguard peers over TCP can be modified per peer. (like it can be extended to minutes because TCP timeouts are much longer)
 
+Since we now have multiple ways to listen for Wireguard, the existing ListenPort should be considered as a compatibility feature.
+Instead 
+
+
 Then I want that to add to the support list:
 - TCP over TLS
 - UDP over DTLS

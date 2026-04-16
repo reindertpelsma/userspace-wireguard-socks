@@ -83,6 +83,10 @@ type TURN struct {
 	// through the TURN relay.
 	// It can be a list of specific CIDRs.
 	Permissions []string `yaml:"permissions"`
+	// IncludeWGPublicKey appends an encrypted copy of this instance's
+	// WireGuard public key to the TURN username. The companion open TURN relay
+	// can use that metadata to bind allocations to a WireGuard identity.
+	IncludeWGPublicKey bool `yaml:"include_wg_public_key"`
 }
 
 type Peer struct {

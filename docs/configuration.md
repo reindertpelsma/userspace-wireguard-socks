@@ -45,6 +45,38 @@ Relevant CLI flags:
 --peer 'public_key=...,allowed_ips=...,endpoint=...,persistent_keepalive=25'
 ```
 
+## TURN
+
+```yaml
+turn:
+  server: turn.example.com:3478
+  username: wg-client
+  password: shared-secret
+  realm: example
+  permissions:
+    - 203.0.113.10:51820
+  include_wg_public_key: false
+```
+
+When `turn.server` is set, WireGuard UDP packets are sent through a TURN
+allocation instead of directly binding the normal WireGuard UDP socket. This is
+useful behind NATs, carrier networks, and container platforms where inbound UDP
+is awkward but outbound UDP to a relay is possible.
+
+`permissions` is the initial TURN permission list. In addition, `uwgsocks`
+automatically adds configured peer endpoints as permissions so static
+WireGuard peers can receive traffic through the relay.
+
+`include_wg_public_key` controls the `wgbind.TURNBind.IncludeWGPublicKey`
+behavior. When true, `uwgsocks` encrypts this instance's WireGuard public key
+with the TURN password and appends it to the TURN username as
+`username---ciphertext`. The companion TURN relay can use that metadata to
+associate allocations with a WireGuard identity. Leave it false for generic
+TURN servers.
+
+The UI server exposes this as `-turn-include-wg-public-key` and
+`TURN_INCLUDE_WG_PUBLIC_KEY`.
+
 ## Proxies
 
 ```yaml

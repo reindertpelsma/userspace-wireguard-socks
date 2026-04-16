@@ -25,7 +25,7 @@ type TURNBind struct {
 	Password string
 	Realm    string
 	// Permissions are updated dynamically
-	AllowedPeers []string
+	AllowedPeers   []string
 	AllocatedPeers []string
 
 	IncludeWGPublicKey bool
@@ -122,7 +122,7 @@ func (b *TURNBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 		return err
 	}
 	dest := net.UDPAddrFromAddrPort(ap)
-	
+
 	b.mu.Lock()
 	if !b.open {
 		b.mu.Unlock()
@@ -182,31 +182,31 @@ func (b *TURNBind) refreshPermissionsLocked() {
 	for _, ip := range b.AllowedPeers {
 		found := false
 		for _, ip2 := range b.AllocatedPeers {
-                    if ip == ip2 {
-                        found = true
-			break
-	            }
+			if ip == ip2 {
+				found = true
+				break
+			}
 		}
 		if found {
-		    continue // Changed to continue from break for clarity
+			continue // Changed to continue from break for clarity
 		}
 		b.AllocatedPeers = append(b.AllocatedPeers, ip)
 		addr, err := net.ResolveUDPAddr("udp", ip)
 		if err != nil {
-                        // TURN permissions do not need port, lets set port to 0 assuming the caller did only specify an IP
+			// TURN permissions do not need port, lets set port to 0 assuming the caller did only specify an IP
 			ip_parsed := net.ParseIP(ip)
 			if ip_parsed != nil {
-			        addr = &net.UDPAddr{
-                                        IP:  ip_parsed, 
-                                        Port: 5, // ignored by TURN CreatePermission
-                                }
+				addr = &net.UDPAddr{
+					IP:   ip_parsed,
+					Port: 5, // ignored by TURN CreatePermission
+				}
 				err = nil
-		        }
+			}
 		}
 		if err == nil {
 			_ = b.client.CreatePermission(addr)
 		} else {
-                       log.Printf("Failed to create permission on TURN for invalid address: %v\n", err)
+			log.Printf("Failed to create permission on TURN for invalid address: %v\n", err)
 		}
 	}
 }
