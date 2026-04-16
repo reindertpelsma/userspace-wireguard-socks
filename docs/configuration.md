@@ -139,6 +139,7 @@ inbound:
   consistent_port: loose
   disable_low_ports: true
   max_connections: 0
+  max_connections_per_peer: 0
   connection_table_grace_seconds: 30
   tcp_receive_window_bytes: 1048576
   tcp_max_buffered_bytes: 268435456
@@ -159,6 +160,7 @@ CLI:
 --consistent-port loose
 --disable-low-ports=true
 --max-connections 4096
+--max-connections-per-peer 512
 --connection-table-grace 30
 --tcp-receive-window 1048576
 --tcp-max-buffered 268435456
@@ -166,6 +168,42 @@ CLI:
 --udp-idle-timeout 30
 --host-dial-bind-address 192.0.2.10
 ```
+
+`max_connections` still caps the whole transparent inbound table. The new
+`max_connections_per_peer` limit keeps one WireGuard peer from monopolizing
+that table while leaving headroom for other peers.
+
+## Traffic Shaping
+
+```yaml
+traffic_shaper:
+  upload_bps: 0
+  download_bps: 0
+  latency_ms: 15
+
+wireguard:
+  peers:
+    - public_key: BASE64_PUBLIC_KEY
+      allowed_ips: [100.64.90.2/32]
+      traffic_shaper:
+        upload_bps: 1048576
+        download_bps: 2097152
+        latency_ms: 20
+```
+
+CLI:
+
+```bash
+--traffic-upload-bps 1048576
+--traffic-download-bps 2097152
+--traffic-latency-ms 20
+--peer 'public_key=...,allowed_ips=100.64.90.2/32,upload_bps=1048576,download_bps=2097152,latency_ms=20'
+```
+
+The top-level `traffic_shaper` block is a global per-peer default. A peer's own
+`traffic_shaper` overrides those values for that peer only. TCP uses
+backpressure on stream reads and writes, while UDP uses the packet shaper and
+drops bursts once the bounded queue budget is exceeded.
 
 ## Host Forwarding And Filters
 

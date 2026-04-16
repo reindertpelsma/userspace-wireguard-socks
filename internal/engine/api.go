@@ -29,11 +29,12 @@ var (
 )
 
 type apiPeer struct {
-	PublicKey           string   `json:"public_key"`
-	PresharedKey        string   `json:"preshared_key,omitempty"`
-	Endpoint            string   `json:"endpoint,omitempty"`
-	AllowedIPs          []string `json:"allowed_ips"`
-	PersistentKeepalive int      `json:"persistent_keepalive,omitempty"`
+	PublicKey           string               `json:"public_key"`
+	PresharedKey        string               `json:"preshared_key,omitempty"`
+	Endpoint            string               `json:"endpoint,omitempty"`
+	AllowedIPs          []string             `json:"allowed_ips"`
+	PersistentKeepalive int                  `json:"persistent_keepalive,omitempty"`
+	TrafficShaper       config.TrafficShaper `json:"traffic_shaper,omitempty"`
 }
 
 type apiACL struct {
@@ -483,7 +484,10 @@ func (e *Engine) AddPeer(peer config.Peer) error {
 	if _, err := peerUAPI(peer, false); err != nil {
 		return err
 	}
-	if _, err := config.PeerAllowedPrefixes([]config.Peer{peer}); err != nil {
+	e.cfgMu.RLock()
+	globalTraffic := e.cfg.TrafficShaper
+	e.cfgMu.RUnlock()
+	if _, _, _, err := buildPeerTrafficState([]config.Peer{peer}, globalTraffic); err != nil {
 		return err
 	}
 
@@ -500,11 +504,6 @@ func (e *Engine) AddPeer(peer config.Peer) error {
 	if !replaced {
 		next = append(next, peer)
 	}
-	allowed, err := config.PeerAllowedPrefixes(next)
-	if err != nil {
-		e.cfgMu.Unlock()
-		return err
-	}
 	if e.dev != nil {
 		uapi, err := peerUAPI(peer, false)
 		if err != nil {
@@ -517,10 +516,10 @@ func (e *Engine) AddPeer(peer config.Peer) error {
 		}
 	}
 	e.cfg.WireGuard.Peers = next
-	e.allowedMu.Lock()
-	e.allowed = allowed
-	e.allowedMu.Unlock()
 	e.cfgMu.Unlock()
+	if err := e.applyPeerTrafficState(next); err != nil {
+		return err
+	}
 	e.updateTURNPermissions()
 	return nil
 }
@@ -552,14 +551,10 @@ func (e *Engine) RemovePeer(publicKey string) error {
 			return err
 		}
 	}
-	allowed, err := config.PeerAllowedPrefixes(next)
-	if err != nil {
+	e.cfg.WireGuard.Peers = next
+	if err := e.applyPeerTrafficState(next); err != nil {
 		return err
 	}
-	e.cfg.WireGuard.Peers = next
-	e.allowedMu.Lock()
-	e.allowed = allowed
-	e.allowedMu.Unlock()
 	e.updateTURNPermissions()
 	return nil
 }
@@ -597,10 +592,6 @@ func (e *Engine) SetWireGuardConfig(wg config.WireGuard) error {
 	if err := validateWireGuardConfig(next); err != nil {
 		return err
 	}
-	allowed, err := config.PeerAllowedPrefixes(next.Peers)
-	if err != nil {
-		return err
-	}
 	uapi, err := wireGuardUAPI(next)
 	if err != nil {
 		return err
@@ -613,9 +604,10 @@ func (e *Engine) SetWireGuardConfig(wg config.WireGuard) error {
 	e.cfgMu.Lock()
 	e.cfg.WireGuard = next
 	e.cfgMu.Unlock()
-	e.allowedMu.Lock()
-	e.allowed = allowed
-	e.allowedMu.Unlock()
+	if err := e.applyPeerTrafficState(next.Peers); err != nil {
+		return err
+	}
+	e.updateTURNPermissions()
 	return nil
 }
 
@@ -821,6 +813,7 @@ func peerToAPI(p config.Peer) apiPeer {
 		Endpoint:            p.Endpoint,
 		AllowedIPs:          append([]string(nil), p.AllowedIPs...),
 		PersistentKeepalive: p.PersistentKeepalive,
+		TrafficShaper:       p.TrafficShaper,
 	}
 }
 
@@ -831,6 +824,7 @@ func peerFromAPI(p apiPeer) config.Peer {
 		Endpoint:            p.Endpoint,
 		AllowedIPs:          append([]string(nil), p.AllowedIPs...),
 		PersistentKeepalive: p.PersistentKeepalive,
+		TrafficShaper:       p.TrafficShaper,
 	}
 }
 

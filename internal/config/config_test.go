@@ -107,9 +107,14 @@ inbound:
   transparent: true
   host_dial_bind_address: 0.0.0.0
   max_connections: 64
+  max_connections_per_peer: 8
   tcp_max_buffered_bytes: 67108864
   tcp_idle_timeout_seconds: 900
   udp_idle_timeout_seconds: 30
+traffic_shaper:
+  upload_bps: 1000000
+  download_bps: 2000000
+  latency_ms: 25
 host_forward:
   proxy:
     enabled: true
@@ -161,8 +166,11 @@ dns_server:
 	if len(cfg.Proxy.OutboundProxies) != 1 || cfg.Proxy.OutboundProxies[0].Type != "http" || cfg.Proxy.OutboundProxies[0].Address != "127.0.0.1:3128" || len(cfg.Proxy.OutboundProxies[0].Subnets) != 1 {
 		t.Fatalf("outbound proxy options mismatch: %+v", cfg.Proxy.OutboundProxies)
 	}
-	if !*cfg.Inbound.Transparent || cfg.Inbound.HostDialBindAddress != "0.0.0.0" || cfg.Inbound.MaxConnections != 64 || cfg.Inbound.TCPMaxBufferedBytes != 67108864 || cfg.Inbound.TCPIdleTimeoutSeconds != 900 || cfg.Inbound.UDPIdleTimeoutSeconds != 30 {
+	if !*cfg.Inbound.Transparent || cfg.Inbound.HostDialBindAddress != "0.0.0.0" || cfg.Inbound.MaxConnections != 64 || cfg.Inbound.MaxConnectionsPerPeer != 8 || cfg.Inbound.TCPMaxBufferedBytes != 67108864 || cfg.Inbound.TCPIdleTimeoutSeconds != 900 || cfg.Inbound.UDPIdleTimeoutSeconds != 30 {
 		t.Fatalf("inbound options mismatch: %+v", cfg.Inbound)
+	}
+	if cfg.TrafficShaper.UploadBps != 1000000 || cfg.TrafficShaper.DownloadBps != 2000000 || cfg.TrafficShaper.LatencyMillis != 25 {
+		t.Fatalf("traffic shaper options mismatch: %+v", cfg.TrafficShaper)
 	}
 	if cfg.API.Listen != "127.0.0.1:9090" || cfg.API.Token != "test-token" {
 		t.Fatalf("API options mismatch: %+v", cfg.API)
@@ -217,6 +225,16 @@ func TestParseForwardArgProxyProtocolOption(t *testing.T) {
 	}
 	if f.Proto != "udp" || f.Listen != "127.0.0.1:5353" || f.Target != "100.64.71.10:53" || f.ProxyProtocol != "v2" {
 		t.Fatalf("parsed forward mismatch: %+v", f)
+	}
+}
+
+func TestParsePeerArgTrafficShaperOptions(t *testing.T) {
+	p, err := ParsePeerArg("public_key=peer,allowed_ips=100.64.90.1/32,upload_bps=4096,download_bps=8192,latency_ms=25")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.TrafficShaper.UploadBps != 4096 || p.TrafficShaper.DownloadBps != 8192 || p.TrafficShaper.LatencyMillis != 25 {
+		t.Fatalf("unexpected peer traffic shaper: %+v", p.TrafficShaper)
 	}
 }
 

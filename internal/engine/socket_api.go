@@ -273,10 +273,11 @@ func (s *socketServer) openTCPListener(id uint64, bind netip.AddrPort, version u
 		}
 		bind = netip.AddrPortFrom(ip, 0)
 	}
-	ln, err := s.e.net.ListenTCPAddrPort(bind)
+	baseLn, err := s.e.net.ListenTCPAddrPort(bind)
 	if err != nil {
 		return err
 	}
+	ln := s.e.wrapPeerListener(baseLn)
 	ss := &socketSession{id: id, proto: socketproto.ProtoTCP, listener: ln}
 	s.storeSession(ss)
 	if err := s.sendAccept(id, version, socketproto.ProtoTCP, addrPortFromNetAddr(ln.Addr())); err != nil {
@@ -341,10 +342,11 @@ func (s *socketServer) openUDPListener(id uint64, bind netip.AddrPort, version u
 		}
 		bind = netip.AddrPortFrom(ip, 0)
 	}
-	pc, err := s.e.net.ListenUDPAddrPort(bind)
+	basePC, err := s.e.net.ListenUDPAddrPort(bind)
 	if err != nil {
 		return err
 	}
+	pc := s.e.wrapPeerPacketConn(basePC)
 	ss := &socketSession{id: id, proto: socketproto.ProtoUDP, packet: pc, udpPeers: make(map[string]*udpPeerState)}
 	s.storeSession(ss)
 	if err := s.sendAccept(id, version, socketproto.ProtoUDP, addrPortFromNetAddr(pc.LocalAddr())); err != nil {

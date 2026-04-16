@@ -1380,6 +1380,70 @@ func TestWireGuardSourceIPEnforced(t *testing.T) {
 	}
 }
 
+func TestTrafficShaperAppliesToTunnelTCP(t *testing.T) {
+	serverKey, clientKey := mustKey(t), mustKey(t)
+	serverPort := freeUDPPort(t)
+
+	serverCfg := config.Default()
+	serverCfg.WireGuard.PrivateKey = serverKey.String()
+	serverCfg.WireGuard.ListenPort = &serverPort
+	serverCfg.WireGuard.Addresses = []string{"100.64.58.1/32"}
+	serverCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:  clientKey.PublicKey().String(),
+		AllowedIPs: []string{"100.64.58.2/32"},
+	}}
+	serverEng := mustStart(t, serverCfg)
+
+	tcpLn, err := serverEng.ListenTCP(netip.MustParseAddrPort("100.64.58.1:18091"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcpLn.Close()
+	go serveEchoListener(tcpLn)
+
+	clientCfg := config.Default()
+	clientCfg.WireGuard.PrivateKey = clientKey.String()
+	clientCfg.WireGuard.Addresses = []string{"100.64.58.2/32"}
+	clientCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:           serverKey.PublicKey().String(),
+		Endpoint:            fmt.Sprintf("127.0.0.1:%d", serverPort),
+		AllowedIPs:          []string{"100.64.58.1/32"},
+		PersistentKeepalive: 1,
+	}}
+	clientCfg.TrafficShaper = config.TrafficShaper{
+		UploadBps:     4096,
+		DownloadBps:   4096,
+		LatencyMillis: 15,
+	}
+	clientEng := mustStart(t, clientCfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := clientEng.DialContext(ctx, "tcp", "100.64.58.1:18091")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	payload := bytes.Repeat([]byte("x"), 4096)
+	reply := make([]byte, len(payload))
+	start := time.Now()
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(reply, payload) {
+		t.Fatal("TCP echo payload mismatch")
+	}
+	if elapsed := time.Since(start); elapsed < 350*time.Millisecond {
+		t.Fatalf("traffic shaper did not slow TCP enough: %v", elapsed)
+	}
+}
+
 func TestRelayForwardingMultiPeer(t *testing.T) {
 	serverKey, c1Key, c2Key := mustKey(t), mustKey(t), mustKey(t)
 	serverPort := freeUDPPort(t)

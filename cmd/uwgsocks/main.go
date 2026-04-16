@@ -96,11 +96,15 @@ func main() {
 		apiAllowUnixNoToken   bool
 		consistent            string
 		maxConns              int
+		maxConnsPerPeer       int
 		connGrace             int
 		tcpWindow             int
 		tcpMaxBuffered        int
 		tcpIdle               int
 		udpIdle               int
+		trafficUploadBps      int64
+		trafficDownloadBps    int64
+		trafficLatencyMs      int
 		dnsMaxInflight        int
 		roamFallback          int
 		checkOnly             bool
@@ -137,7 +141,7 @@ func main() {
 	flag.IntVar(&roamFallback, "roam-fallback", 0, "seconds before restoring a configured static peer endpoint after stale roaming; default 120")
 	flag.Var(&addresses, "address", "WireGuard interface address/prefix; repeatable")
 	flag.Var(&dnsServers, "dns", "WireGuard DNS server IP; repeatable")
-	flag.Var(&peers, "peer", "peer fields: public_key=...,allowed_ips=10.0.0.0/24,endpoint=host:51820,persistent_keepalive=25; repeatable")
+	flag.Var(&peers, "peer", "peer fields: public_key=...,allowed_ips=10.0.0.0/24,endpoint=host:51820,persistent_keepalive=25,upload_bps=...,download_bps=...,latency_ms=...; repeatable")
 	flag.StringVar(&socksAddr, "socks5", "", "host SOCKS5 listen address, for example 127.0.0.1:1080")
 	flag.StringVar(&httpAddr, "http", "", "host HTTP proxy listen address")
 	flag.StringVar(&mixedAddr, "mixed", "", "host mixed SOCKS5/HTTP proxy listen address")
@@ -175,11 +179,15 @@ func main() {
 	flag.StringVar(&consistent, "consistent-port", "", "strict, loose, or disabled")
 	flag.Var(&disableLow, "disable-low-ports", "do not bind host source ports below 1024 for inbound proxying")
 	flag.IntVar(&maxConns, "max-connections", 0, "maximum inbound transparent connection table size; 0 is unlimited")
+	flag.IntVar(&maxConnsPerPeer, "max-connections-per-peer", 0, "maximum inbound transparent connection table size one WireGuard peer may consume; 0 is unlimited")
 	flag.IntVar(&connGrace, "connection-table-grace", 0, "seconds to reject new connections after table overflow before reaping old TCP entries; default 30")
 	flag.IntVar(&tcpWindow, "tcp-receive-window", 0, "TCP forwarder receive window bytes; default 1048576")
 	flag.IntVar(&tcpMaxBuffered, "tcp-max-buffered", 0, "aggregate transparent TCP receive-buffer budget in bytes; default 268435456")
 	flag.IntVar(&tcpIdle, "tcp-idle-timeout", 0, "TCP idle timeout in seconds; default 900")
 	flag.IntVar(&udpIdle, "udp-idle-timeout", 0, "UDP idle timeout in seconds; default 30")
+	flag.Int64Var(&trafficUploadBps, "traffic-upload-bps", 0, "per-peer upload shaping rate in bytes per second; 0 disables the global upload shaper")
+	flag.Int64Var(&trafficDownloadBps, "traffic-download-bps", 0, "per-peer download shaping rate in bytes per second; 0 disables the global download shaper")
+	flag.IntVar(&trafficLatencyMs, "traffic-latency-ms", 0, "target buffering latency for the global traffic shaper in milliseconds; default 15 when shaping is enabled")
 	flag.StringVar(&dnsListen, "dns-listen", "", "serve DNS inside the tunnel at address:port, usually tunnel_ip:53")
 	flag.IntVar(&dnsMaxInflight, "dns-max-inflight", 0, "maximum tunnel-hosted DNS transactions in flight; default 1024")
 	flag.StringVar(&apiListen, "api-listen", "", "optional management API listen address, or unix:///path/to/socket")
@@ -377,6 +385,9 @@ func main() {
 	if maxConns != 0 {
 		cfg.Inbound.MaxConnections = maxConns
 	}
+	if maxConnsPerPeer != 0 {
+		cfg.Inbound.MaxConnectionsPerPeer = maxConnsPerPeer
+	}
 	if connGrace != 0 {
 		cfg.Inbound.ConnectionTableGraceSeconds = connGrace
 	}
@@ -391,6 +402,15 @@ func main() {
 	}
 	if udpIdle != 0 {
 		cfg.Inbound.UDPIdleTimeoutSeconds = udpIdle
+	}
+	if trafficUploadBps != 0 {
+		cfg.TrafficShaper.UploadBps = trafficUploadBps
+	}
+	if trafficDownloadBps != 0 {
+		cfg.TrafficShaper.DownloadBps = trafficDownloadBps
+	}
+	if trafficLatencyMs != 0 {
+		cfg.TrafficShaper.LatencyMillis = trafficLatencyMs
 	}
 	if dnsListen != "" {
 		cfg.DNSServer.Listen = dnsListen

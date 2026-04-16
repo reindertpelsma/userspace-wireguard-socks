@@ -227,10 +227,7 @@ func (e *Engine) relayCanAddFlowLocked(meta relayPacketMeta) bool {
 }
 
 func (e *Engine) relayPeerKey(ip netip.Addr) string {
-	if p, ok := e.allowedBestPrefix(ip); ok {
-		return p.String()
-	}
-	return ip.Unmap().String()
+	return e.peerKeyForIP(ip)
 }
 
 func (e *Engine) relaySweepLocked(now time.Time) {

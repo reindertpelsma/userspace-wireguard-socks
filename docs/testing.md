@@ -53,6 +53,7 @@ The main suite covers:
 - Malformed parser and packet fuzz seeds.
 - Packet loss, jitter, tail-drop-like queue overflow, and multi-stream transfer.
 - Connection table overflow grace and transparent TCP memory budget behavior.
+- Per-peer transparent connection-table isolation and traffic-shaper TCP pacing.
 
 `scripts/iperf_loopback.sh` builds `uwgsocks` when needed, writes temporary
 demo WireGuard configs, starts two binaries, exposes an iperf3 server through a

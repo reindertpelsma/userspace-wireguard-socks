@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	trafficshape "github.com/reindertpelsma/userspace-wireguard-socks/internal"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/netstackex"
@@ -48,13 +49,15 @@ type Engine struct {
 	// Runtime API updates mutate peers and ACLs while proxy goroutines are
 	// active, so config-derived hot paths use small dedicated locks instead of
 	// a single coarse engine lock.
-	cfgMu     sync.RWMutex
-	allowedMu sync.RWMutex
-	aclMu     sync.RWMutex
-	allowed   []netip.Prefix
-	inACL     acl.List
-	outACL    acl.List
-	relACL    acl.List
+	cfgMu       sync.RWMutex
+	allowedMu   sync.RWMutex
+	aclMu       sync.RWMutex
+	allowed     []netip.Prefix
+	peerRoutes  []peerRoute
+	peerTraffic map[string]*peerTraffic
+	inACL       acl.List
+	outACL      acl.List
+	relACL      acl.List
 
 	relayMu        sync.Mutex
 	relayFlows     map[relayFlowKey]*relayFlow
@@ -91,6 +94,7 @@ type Engine struct {
 type trackedConn struct {
 	id      int64
 	proto   string
+	peer    string
 	started time.Time
 	close   func()
 }
@@ -104,7 +108,7 @@ func New(cfg config.Config, logger *log.Logger) (*Engine, error) {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	allowed, err := config.PeerAllowedPrefixes(cfg.WireGuard.Peers)
+	allowed, peerRoutes, peerTraffic, err := buildPeerTrafficState(cfg.WireGuard.Peers, cfg.TrafficShaper)
 	if err != nil {
 		return nil, err
 	}
@@ -123,6 +127,8 @@ func New(cfg config.Config, logger *log.Logger) (*Engine, error) {
 		cfg:            cfg,
 		log:            logger,
 		allowed:        allowed,
+		peerRoutes:     peerRoutes,
+		peerTraffic:    peerTraffic,
 		inACL:          acl.List{Default: cfg.ACL.InboundDefault, Rules: cfg.ACL.Inbound},
 		outACL:         acl.List{Default: cfg.ACL.OutboundDefault, Rules: cfg.ACL.Outbound},
 		relACL:         acl.List{Default: cfg.ACL.RelayDefault, Rules: cfg.ACL.Relay},
@@ -714,18 +720,28 @@ func (e *Engine) dialTunnelOnlyWithBind(ctx context.Context, network, addr strin
 }
 
 func (e *Engine) dialNetstack(ctx context.Context, network string, bindSrc, dst netip.AddrPort) (net.Conn, error) {
+	var (
+		c   net.Conn
+		err error
+	)
 	switch networkBase(network) {
 	case "udp":
 		if bindSrc.IsValid() {
-			return e.net.DialUDPAddrPort(bindSrc, dst)
+			c, err = e.net.DialUDPAddrPort(bindSrc, dst)
+		} else {
+			c, err = e.net.DialUDPAddrPort(netip.AddrPort{}, dst)
 		}
-		return e.net.DialUDPAddrPort(netip.AddrPort{}, dst)
 	default:
 		if bindSrc.IsValid() {
-			return e.net.DialContextTCPAddrPortWithBind(ctx, bindSrc, dst)
+			c, err = e.net.DialContextTCPAddrPortWithBind(ctx, bindSrc, dst)
+		} else {
+			c, err = e.net.DialContext(ctx, network, dst.String())
 		}
-		return e.net.DialContext(ctx, network, dst.String())
 	}
+	if err != nil {
+		return nil, err
+	}
+	return e.wrapDialedPeerConn(network, c, dst), nil
 }
 
 func (e *Engine) resolveAddrPort(ctx context.Context, addr string) (netip.AddrPort, error) {
@@ -892,7 +908,7 @@ func (e *Engine) handleTCPForward(req *gtcp.ForwarderRequest) {
 		req.Complete(true)
 		return
 	}
-	connID, acquired := e.acquireConn("tcp")
+	connID, acquired := e.acquireConn("tcp", e.peerKeyForIP(src.Addr()))
 	if !acquired {
 		req.Complete(true)
 		return
@@ -905,12 +921,13 @@ func (e *Engine) handleTCPForward(req *gtcp.ForwarderRequest) {
 		return
 	}
 	defer host.Close()
-	tconn, err := netstackex.NewTCPConnFromForwarder(req)
+	tcpConn, err := netstackex.NewTCPConnFromForwarder(req)
 	if err != nil {
 		e.log.Printf("tcp forward endpoint failed: %v", err)
 		req.Complete(true)
 		return
 	}
+	var tconn net.Conn = e.wrapAcceptedPeerConn("tcp", tcpConn)
 	req.Complete(false)
 	defer tconn.Close()
 	e.setConnCloser(connID, func() {
@@ -932,17 +949,18 @@ func (e *Engine) handleUDPForward(req *gudp.ForwarderRequest) {
 		}
 		return
 	}
-	connID, acquired := e.acquireConn("udp")
+	connID, acquired := e.acquireConn("udp", e.peerKeyForIP(src.Addr()))
 	if !acquired {
 		e.sendUDPUnreachable(src, dst)
 		return
 	}
-	uconn, err := netstackex.NewUDPConnFromForwarder(req)
+	udpConn, err := netstackex.NewUDPConnFromForwarder(req)
 	if err != nil {
 		e.sendUDPUnreachable(src, dst)
 		e.releaseConn(connID)
 		return
 	}
+	var uconn net.Conn = e.wrapAcceptedPeerConn("udp", udpConn)
 	host, err := e.dialHostForInbound(context.Background(), "udp", dst, src.Port())
 	if err != nil {
 		e.sendUDPUnreachable(src, dst)
@@ -1069,12 +1087,31 @@ func (e *Engine) tcpMemoryConnectionLimit() int {
 // the table is full it reaps the oldest TCP connection older than the grace
 // window; UDP is intentionally never reaped here because UDP sessions already
 // expire after the much shorter UDP idle timeout.
-func (e *Engine) acquireConn(proto string) (int64, bool) {
+func (e *Engine) acquireConn(proto, peer string) (int64, bool) {
 	grace := time.Duration(e.cfg.Inbound.ConnectionTableGraceSeconds) * time.Second
 	now := time.Now()
 	var closeVictims []func()
 
 	e.connMu.Lock()
+	if peer != "" && e.cfg.Inbound.MaxConnectionsPerPeer > 0 && e.trackedPeerCountLocked(peer) >= e.cfg.Inbound.MaxConnectionsPerPeer {
+		var victim *trackedConn
+		for _, c := range e.connTable {
+			if c.peer != peer || c.proto != "tcp" || now.Sub(c.started) < grace {
+				continue
+			}
+			if victim == nil || c.started.Before(victim.started) {
+				victim = c
+			}
+		}
+		if victim == nil {
+			e.connMu.Unlock()
+			return 0, false
+		}
+		delete(e.connTable, victim.id)
+		if victim.close != nil {
+			closeVictims = append(closeVictims, victim.close)
+		}
+	}
 	if e.cfg.Inbound.MaxConnections > 0 && len(e.connTable) >= e.cfg.Inbound.MaxConnections {
 		var victim *trackedConn
 		for _, c := range e.connTable {
@@ -1127,6 +1164,7 @@ func (e *Engine) acquireConn(proto string) (int64, bool) {
 	e.connTable[id] = &trackedConn{
 		id:      id,
 		proto:   proto,
+		peer:    peer,
 		started: now,
 	}
 	e.connMu.Unlock()
@@ -1141,6 +1179,16 @@ func (e *Engine) trackedProtoCountLocked(proto string) int {
 	count := 0
 	for _, c := range e.connTable {
 		if c.proto == proto {
+			count++
+		}
+	}
+	return count
+}
+
+func (e *Engine) trackedPeerCountLocked(peer string) int {
+	count := 0
+	for _, c := range e.connTable {
+		if c.peer == peer {
 			count++
 		}
 	}
@@ -1386,10 +1434,11 @@ func (e *Engine) startTCPReverseForward(name string, f config.Forward) error {
 	if err != nil {
 		return fmt.Errorf("%s listen: %w", name, err)
 	}
-	ln, err := e.net.ListenTCPAddrPort(listen)
+	baseLn, err := e.net.ListenTCPAddrPort(listen)
 	if err != nil {
 		return err
 	}
+	ln := e.wrapPeerListener(baseLn)
 	e.addListener(name, ln)
 	go func() {
 		for {
@@ -1443,10 +1492,11 @@ func (e *Engine) startUDPReverseForward(name string, f config.Forward) error {
 	if err != nil {
 		return fmt.Errorf("%s listen: %w", name, err)
 	}
-	pc, err := e.net.ListenUDPAddrPort(listen)
+	basePC, err := e.net.ListenUDPAddrPort(listen)
 	if err != nil {
 		return err
 	}
+	pc := e.wrapPeerPacketConn(basePC)
 	e.addPacketConn(name, pc)
 	go e.serveUDPReverseForward(pc, f)
 	return nil
@@ -1560,15 +1610,17 @@ func (e *Engine) startDNSServer() error {
 	if err != nil {
 		return err
 	}
-	u, err := e.net.ListenUDPAddrPort(addr)
+	baseUDP, err := e.net.ListenUDPAddrPort(addr)
 	if err != nil {
 		return fmt.Errorf("dns udp listen: %w", err)
 	}
-	t, err := e.net.ListenTCPAddrPort(addr)
+	u := e.wrapPeerPacketConn(baseUDP)
+	baseTCP, err := e.net.ListenTCPAddrPort(addr)
 	if err != nil {
 		_ = u.Close()
 		return fmt.Errorf("dns tcp listen: %w", err)
 	}
+	t := e.wrapPeerListener(baseTCP)
 	go e.serveTunnelDNSUDP(u)
 	go e.serveTunnelDNSTCP(t)
 	return nil
@@ -1934,10 +1986,26 @@ func (e *Engine) allowRelayPacket(packet []byte) bool {
 	if e.localPrefixContainsUnrouted(meta.dst.Addr()) {
 		return false
 	}
+	allowed := false
 	if e.cfg.Relay.Conntrack == nil || *e.cfg.Relay.Conntrack {
-		return e.allowRelayTracked(meta, time.Now())
+		allowed = e.allowRelayTracked(meta, time.Now())
+	} else {
+		allowed = e.relayAllowed(meta.src, meta.dst, meta.network)
 	}
-	return e.relayAllowed(meta.src, meta.dst, meta.network)
+	if !allowed {
+		return false
+	}
+	if peer := e.peerTrafficForIP(meta.dst.Addr()); peer != nil && peer.shaper != nil {
+		hash := trafficshape.HashFlow(meta.src, meta.dst)
+		allowPacket, markECN := peer.shaper.ShapeUploadECN(packet, hash, packetECNCapable(packet))
+		if !allowPacket {
+			return false
+		}
+		if markECN {
+			_ = markPacketECN(packet)
+		}
+	}
+	return true
 }
 
 // packetAddrPorts extracts enough L3/L4 metadata for relay ACLs. Unknown or

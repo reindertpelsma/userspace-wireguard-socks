@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"container/list"
 	"context"
 	"hash/fnv"
 	"io"
@@ -13,51 +12,41 @@ import (
 type ShaperConfig struct {
 	UploadBps     int64
 	DownloadBps   int64
-	TargetLatency time.Duration // default 15ms
+	TargetLatency time.Duration
 }
 
 type Shaper struct {
-	mu sync.Mutex
-	cfg ShaperConfig
-
-	// Upload shaper (from client to tunnel)
-	upload *directionShaper
-	// Download shaper (from tunnel to client)
+	cfg      ShaperConfig
+	upload   *directionShaper
 	download *directionShaper
+}
+
+type StreamShaper struct {
+	Shaper *Shaper
 }
 
 type directionShaper struct {
 	mu sync.Mutex
-	bps int64
-	target time.Duration
 
-	// Token bucket
+	bps         int64
+	target      time.Duration
+	maxBurst    int64
+	queueBudget int64
+	hardDebt    int64
+	flowBudget  int64
+
 	tokens int64
-	lastUpdate time.Time
-	maxTokens int64
-
-	// FQ-CoDel / CAKE inspired mini-queues
-	queues [1024]*packetQueue
+	last   time.Time
+	flows  [1024]flowState
 }
 
-type packetQueue struct {
-	packets *list.List
-	// CoDel state
-	firstAboveTime time.Time
-	dropNext       time.Time
-	dropping       bool
-	count          int
-}
-
-type QueuedPacket struct {
-	Data []byte
-	Hash uint32
-	AddedAt time.Time
-	IsECN bool
+type flowState struct {
+	tokens int64
+	last   time.Time
 }
 
 func NewShaper(cfg ShaperConfig) *Shaper {
-	if cfg.TargetLatency == 0 {
+	if cfg.TargetLatency <= 0 {
 		cfg.TargetLatency = 15 * time.Millisecond
 	}
 	s := &Shaper{cfg: cfg}
@@ -70,70 +59,105 @@ func NewShaper(cfg ShaperConfig) *Shaper {
 	return s
 }
 
+func (s *Shaper) Config() ShaperConfig {
+	if s == nil {
+		return ShaperConfig{}
+	}
+	return s.cfg
+}
+
+func (s *Shaper) Enabled() bool {
+	return s != nil && (s.upload != nil || s.download != nil)
+}
+
+func (s *Shaper) Stream() *StreamShaper {
+	if s == nil || !s.Enabled() {
+		return nil
+	}
+	return &StreamShaper{Shaper: s}
+}
+
 func newDirectionShaper(bps int64, target time.Duration) *directionShaper {
-	ds := &directionShaper{
-		bps: bps,
-		target: target,
-		lastUpdate: time.Now(),
-		// Keep token bucket short: e.g. 100ms worth of traffic
-		maxTokens: bps / 10, 
+	if target <= 0 {
+		target = 15 * time.Millisecond
 	}
-	if ds.maxTokens < 1500 {
-		ds.maxTokens = 1500
+	queueBudget := maxInt64(1500, int64(float64(bps)*target.Seconds()))
+	maxBurst := maxInt64(1500, int64(float64(bps)*(50*time.Millisecond).Seconds()))
+	flowBudget := maxInt64(1500, queueBudget/8)
+	return &directionShaper{
+		bps:         bps,
+		target:      target,
+		maxBurst:    maxBurst,
+		queueBudget: queueBudget,
+		hardDebt:    queueBudget * 2,
+		flowBudget:  flowBudget,
+		tokens:      maxBurst,
+		last:        time.Now(),
 	}
-	for i := range ds.queues {
-		ds.queues[i] = &packetQueue{packets: list.New()}
-	}
-	return ds
 }
 
 func (s *Shaper) ShapeUpload(data []byte, hash uint32) (allowed bool, ecn bool) {
 	if s == nil || s.upload == nil {
 		return true, false
 	}
-	return s.upload.shape(data, hash)
+	return s.upload.shapePacket(int64(len(data)), hash, false)
 }
 
 func (s *Shaper) ShapeDownload(data []byte, hash uint32) (allowed bool, ecn bool) {
 	if s == nil || s.download == nil {
 		return true, false
 	}
-	return s.download.shape(data, hash)
+	return s.download.shapePacket(int64(len(data)), hash, false)
 }
 
-func (ds *directionShaper) shape(data []byte, hash uint32) (bool, bool) {
+func (s *Shaper) ShapeUploadECN(data []byte, hash uint32, ecnCapable bool) (allowed bool, ecn bool) {
+	if s == nil || s.upload == nil {
+		return true, false
+	}
+	return s.upload.shapePacket(int64(len(data)), hash, ecnCapable)
+}
+
+func (s *Shaper) ShapeDownloadECN(data []byte, hash uint32, ecnCapable bool) (allowed bool, ecn bool) {
+	if s == nil || s.download == nil {
+		return true, false
+	}
+	return s.download.shapePacket(int64(len(data)), hash, ecnCapable)
+}
+
+func (ds *directionShaper) shapePacket(size int64, hash uint32, ecnCapable bool) (bool, bool) {
+	if ds == nil || size <= 0 {
+		return true, false
+	}
+
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
 	now := time.Now()
-	elapsed := now.Sub(ds.lastUpdate)
-	ds.lastUpdate = now
+	ds.refillLocked(now)
+	flow := &ds.flows[hash%uint32(len(ds.flows))]
+	ds.refillFlowLocked(flow, now)
 
-	// Update tokens
-	ds.tokens += int64(float64(ds.bps) * elapsed.Seconds())
-	if ds.tokens > ds.maxTokens {
-		ds.tokens = ds.maxTokens
+	projectedGlobal := ds.tokens - size
+	projectedFlow := flow.tokens - size
+	if projectedFlow < -ds.flowBudget {
+		return false, false
 	}
-
-	size := int64(len(data))
-	if ds.tokens >= size {
-		ds.tokens -= size
-		return true, false
-	}
-
-	// Tail drop if tokens are very negative (burst protection)
-	if ds.tokens < -ds.maxTokens {
+	if projectedGlobal < -ds.hardDebt {
 		return false, false
 	}
 
-	// Simple ECN marking if tokens are low
-	ds.tokens -= size
-	return true, ds.tokens < 0
-}
+	markECN := false
+	if projectedGlobal < -ds.queueBudget/2 && ecnCapable {
+		markECN = true
+	}
+	if projectedGlobal < -ds.queueBudget && !markECN {
+		return false, false
+	}
 
-// StreamShaper for TCP backpressure
-type StreamShaper struct {
-	Shaper *Shaper
+	ds.tokens = projectedGlobal
+	flow.tokens = projectedFlow
+	flow.last = now
+	return true, markECN
 }
 
 func (ss *StreamShaper) WaitUpload(ctx context.Context, size int) error {
@@ -151,43 +175,70 @@ func (ss *StreamShaper) WaitDownload(ctx context.Context, size int) error {
 }
 
 func (ds *directionShaper) wait(ctx context.Context, size int64) error {
+	if ds == nil || size <= 0 {
+		return nil
+	}
 	for {
+		waitDur := time.Duration(0)
+
 		ds.mu.Lock()
 		now := time.Now()
-		elapsed := now.Sub(ds.lastUpdate)
-		ds.lastUpdate = now
-		ds.tokens += int64(float64(ds.bps) * elapsed.Seconds())
-		if ds.tokens > ds.maxTokens {
-			ds.tokens = ds.maxTokens
-		}
-
-		if ds.tokens >= size {
+		ds.refillLocked(now)
+		if ds.tokens-size >= -ds.queueBudget {
 			ds.tokens -= size
 			ds.mu.Unlock()
 			return nil
 		}
-		
-		// Need to wait
-		needed := size - ds.tokens
-		waitDur := time.Duration(float64(needed) / float64(ds.bps) * float64(time.Second))
+		needed := size - (ds.tokens + ds.queueBudget)
+		if needed < 1 {
+			needed = 1
+		}
+		waitDur = time.Duration(float64(needed) / float64(ds.bps) * float64(time.Second))
+		if waitDur < time.Millisecond {
+			waitDur = time.Millisecond
+		}
 		if waitDur > 100*time.Millisecond {
 			waitDur = 100 * time.Millisecond
 		}
 		ds.mu.Unlock()
 
+		timer := time.NewTimer(waitDur)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		case <-time.After(waitDur):
+		case <-timer.C:
 		}
 	}
+}
+
+func (ds *directionShaper) refillLocked(now time.Time) {
+	ds.tokens = refillTokenBucket(ds.tokens, ds.bps, ds.last, now, ds.maxBurst)
+	ds.last = now
+}
+
+func (ds *directionShaper) refillFlowLocked(flow *flowState, now time.Time) {
+	if flow.last.IsZero() && flow.tokens == 0 {
+		flow.tokens = ds.maxBurst
+	}
+	flow.tokens = refillTokenBucket(flow.tokens, ds.bps, flow.last, now, ds.maxBurst)
+	flow.last = now
+}
+
+func refillTokenBucket(tokens, bps int64, last, now time.Time, maxBurst int64) int64 {
+	if !last.IsZero() && now.After(last) {
+		tokens += int64(float64(bps) * now.Sub(last).Seconds())
+	}
+	if tokens > maxBurst {
+		tokens = maxBurst
+	}
+	return tokens
 }
 
 func HashFlow(src, dst netip.AddrPort) uint32 {
 	h := fnv.New32a()
 	b1 := src.Addr().AsSlice()
 	b2 := dst.Addr().AsSlice()
-	// Sort to make it bidirectional
 	if src.String() > dst.String() {
 		h.Write(b1)
 		writeUint16(h, src.Port())
@@ -207,4 +258,11 @@ func writeUint16(h io.Writer, v uint16) {
 	b[0] = byte(v >> 8)
 	b[1] = byte(v)
 	h.Write(b[:])
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }

@@ -21,18 +21,19 @@ import (
 )
 
 type Config struct {
-	WireGuard   WireGuard   `yaml:"wireguard"`
-	Proxy       Proxy       `yaml:"proxy"`
-	Inbound     Inbound     `yaml:"inbound"`
-	HostForward HostForward `yaml:"host_forward"`
-	Routing     Routing     `yaml:"routing"`
-	Filtering   Filtering   `yaml:"filtering"`
-	Relay       Relay       `yaml:"relay"`
-	API         API         `yaml:"api"`
-	SocketAPI   SocketAPI   `yaml:"socket_api"`
-	ACL         ACL         `yaml:"acl"`
-	Forwards    []Forward   `yaml:"forwards"`
-	TURN        TURN        `yaml:"turn"`
+	WireGuard     WireGuard     `yaml:"wireguard"`
+	Proxy         Proxy         `yaml:"proxy"`
+	Inbound       Inbound       `yaml:"inbound"`
+	HostForward   HostForward   `yaml:"host_forward"`
+	Routing       Routing       `yaml:"routing"`
+	Filtering     Filtering     `yaml:"filtering"`
+	TrafficShaper TrafficShaper `yaml:"traffic_shaper"`
+	Relay         Relay         `yaml:"relay"`
+	API           API           `yaml:"api"`
+	SocketAPI     SocketAPI     `yaml:"socket_api"`
+	ACL           ACL           `yaml:"acl"`
+	Forwards      []Forward     `yaml:"forwards"`
+	TURN          TURN          `yaml:"turn"`
 	// ReverseForwards listen inside the userspace WireGuard netstack and dial
 	// out to the host network. They are narrower than transparent inbound
 	// forwarding because only explicitly configured tunnel IP:port pairs are
@@ -85,11 +86,12 @@ type TURN struct {
 }
 
 type Peer struct {
-	PublicKey           string   `yaml:"public_key"`
-	PresharedKey        string   `yaml:"preshared_key"`
-	Endpoint            string   `yaml:"endpoint"`
-	AllowedIPs          []string `yaml:"allowed_ips"`
-	PersistentKeepalive int      `yaml:"persistent_keepalive"`
+	PublicKey           string        `yaml:"public_key"`
+	PresharedKey        string        `yaml:"preshared_key"`
+	Endpoint            string        `yaml:"endpoint"`
+	AllowedIPs          []string      `yaml:"allowed_ips"`
+	PersistentKeepalive int           `yaml:"persistent_keepalive"`
+	TrafficShaper       TrafficShaper `yaml:"traffic_shaper"`
 }
 
 type Proxy struct {
@@ -134,6 +136,7 @@ type Inbound struct {
 	ReplyICMP                   *bool  `yaml:"reply_icmp"`
 	ICMPRateLimitPerSec         int    `yaml:"icmp_rate_limit_per_sec"`
 	MaxConnections              int    `yaml:"max_connections"`
+	MaxConnectionsPerPeer       int    `yaml:"max_connections_per_peer"`
 	ConnectionTableGraceSeconds int    `yaml:"connection_table_grace_seconds"`
 	TCPReceiveWindowBytes       int    `yaml:"tcp_receive_window_bytes"`
 	TCPMaxBufferedBytes         int    `yaml:"tcp_max_buffered_bytes"`
@@ -169,6 +172,16 @@ type Routing struct {
 type Filtering struct {
 	DropIPv6LinkLocalMulticast *bool `yaml:"drop_ipv6_link_local_multicast"`
 	DropIPv4Invalid            *bool `yaml:"drop_ipv4_invalid"`
+}
+
+type TrafficShaper struct {
+	UploadBps     int64 `yaml:"upload_bps"`
+	DownloadBps   int64 `yaml:"download_bps"`
+	LatencyMillis int   `yaml:"latency_ms"`
+}
+
+func (t TrafficShaper) IsZero() bool {
+	return t.UploadBps == 0 && t.DownloadBps == 0 && t.LatencyMillis == 0
 }
 
 type Relay struct {
@@ -329,6 +342,14 @@ func (c *Config) Normalize() error {
 	if c.WireGuard.RoamFallbackSeconds < 0 {
 		return fmt.Errorf("wireguard.roam_fallback_seconds must be >= 0")
 	}
+	if err := normalizeTrafficShaper("traffic_shaper", &c.TrafficShaper); err != nil {
+		return err
+	}
+	for i := range c.WireGuard.Peers {
+		if err := normalizeTrafficShaper(fmt.Sprintf("wireguard.peers[%d].traffic_shaper", i), &c.WireGuard.Peers[i].TrafficShaper); err != nil {
+			return err
+		}
+	}
 	if c.Proxy.FallbackDirect == nil {
 		t := true
 		c.Proxy.FallbackDirect = &t
@@ -446,6 +467,9 @@ func (c *Config) Normalize() error {
 	if c.Inbound.ConnectionTableGraceSeconds < 0 {
 		return fmt.Errorf("inbound.connection_table_grace_seconds must be >= 0")
 	}
+	if c.Inbound.MaxConnectionsPerPeer < 0 {
+		return fmt.Errorf("inbound.max_connections_per_peer must be >= 0")
+	}
 	if c.Inbound.TCPReceiveWindowBytes == 0 {
 		c.Inbound.TCPReceiveWindowBytes = 1 << 20
 	}
@@ -516,6 +540,25 @@ func (c *Config) Normalize() error {
 	}
 	if err := normalizeForwards("reverse_forward", c.ReverseForwards); err != nil {
 		return err
+	}
+	return nil
+}
+
+func normalizeTrafficShaper(name string, cfg *TrafficShaper) error {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.UploadBps < 0 {
+		return fmt.Errorf("%s.upload_bps must be >= 0", name)
+	}
+	if cfg.DownloadBps < 0 {
+		return fmt.Errorf("%s.download_bps must be >= 0", name)
+	}
+	if cfg.LatencyMillis < 0 {
+		return fmt.Errorf("%s.latency_ms must be >= 0", name)
+	}
+	if (cfg.UploadBps > 0 || cfg.DownloadBps > 0) && cfg.LatencyMillis == 0 {
+		cfg.LatencyMillis = 15
 	}
 	return nil
 }
@@ -830,6 +873,24 @@ func ParsePeerArg(s string) (Peer, error) {
 				return Peer{}, fmt.Errorf("invalid keepalive %q", v)
 			}
 			p.PersistentKeepalive = n
+		case "uploadbps", "upload_bps":
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n < 0 {
+				return Peer{}, fmt.Errorf("invalid upload_bps %q", v)
+			}
+			p.TrafficShaper.UploadBps = n
+		case "downloadbps", "download_bps":
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n < 0 {
+				return Peer{}, fmt.Errorf("invalid download_bps %q", v)
+			}
+			p.TrafficShaper.DownloadBps = n
+		case "latencyms", "latency_ms", "traffic_latency_ms":
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 {
+				return Peer{}, fmt.Errorf("invalid latency_ms %q", v)
+			}
+			p.TrafficShaper.LatencyMillis = n
 		default:
 			return Peer{}, fmt.Errorf("unknown peer field %q", k)
 		}

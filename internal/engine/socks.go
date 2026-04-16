@@ -410,11 +410,12 @@ func (e *Engine) serveSOCKSBind(control net.Conn, src netip.AddrPort, requested 
 		_ = writeSOCKSReply(control, socksRepAddressNotSupported, netip.AddrPort{})
 		return
 	}
-	ln, err := e.net.ListenTCPAddrPort(bindAddr)
+	baseLn, err := e.net.ListenTCPAddrPort(bindAddr)
 	if err != nil {
 		_ = writeSOCKSReply(control, socksRepGeneralFailure, netip.AddrPort{})
 		return
 	}
+	ln := e.wrapPeerListener(baseLn)
 	defer ln.Close()
 	if err := writeSOCKSReply(control, socksRepSuccess, addrPortFromNetAddr(ln.Addr())); err != nil {
 		return
@@ -530,7 +531,7 @@ func (e *Engine) dialProxyCandidate(ctx context.Context, network string, dst, sr
 		return nil, errAddressFiltered
 	}
 	if e.allowedContains(dst.Addr()) {
-		return e.net.DialContext(ctx, network, dst.String())
+		return e.dialNetstack(ctx, network, netip.AddrPort{}, dst)
 	}
 	if e.localPrefixContainsUnrouted(dst.Addr()) {
 		return nil, errVirtualSubnetUnrouted

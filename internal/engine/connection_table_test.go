@@ -38,14 +38,14 @@ func TestConnectionTableGraceReapsOldTCP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, ok := e.acquireConn("tcp")
+	first, ok := e.acquireConn("tcp", "peer-a")
 	if !ok {
 		t.Fatal("first TCP acquire failed")
 	}
 	killed := make(chan struct{}, 1)
 	e.setConnCloser(first, func() { killed <- struct{}{} })
 
-	if _, ok := e.acquireConn("tcp"); ok {
+	if _, ok := e.acquireConn("tcp", "peer-a"); ok {
 		t.Fatal("new connection was accepted before the grace age elapsed")
 	}
 	select {
@@ -55,7 +55,7 @@ func TestConnectionTableGraceReapsOldTCP(t *testing.T) {
 	}
 
 	time.Sleep(1100 * time.Millisecond)
-	second, ok := e.acquireConn("tcp")
+	second, ok := e.acquireConn("tcp", "peer-a")
 	if !ok {
 		t.Fatal("new connection was rejected even though an old TCP entry could be reaped")
 	}
@@ -76,13 +76,13 @@ func TestConnectionTableGraceDoesNotReapUDP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, ok := e.acquireConn("udp")
+	first, ok := e.acquireConn("udp", "peer-a")
 	if !ok {
 		t.Fatal("first UDP acquire failed")
 	}
 	defer e.releaseConn(first)
 	time.Sleep(1100 * time.Millisecond)
-	if _, ok := e.acquireConn("tcp"); ok {
+	if _, ok := e.acquireConn("tcp", "peer-a"); ok {
 		t.Fatal("TCP acquire reaped an old UDP entry; only TCP entries should be grace-reaped")
 	}
 }
@@ -98,22 +98,46 @@ func TestTCPMaxBufferedBytesDerivesGlobalTCPLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, ok := e.acquireConn("tcp")
+	first, ok := e.acquireConn("tcp", "peer-a")
 	if !ok {
 		t.Fatal("first TCP acquire failed")
 	}
 	defer e.releaseConn(first)
-	second, ok := e.acquireConn("tcp")
+	second, ok := e.acquireConn("tcp", "peer-a")
 	if !ok {
 		t.Fatal("second TCP acquire failed")
 	}
 	defer e.releaseConn(second)
-	if _, ok := e.acquireConn("tcp"); ok {
+	if _, ok := e.acquireConn("tcp", "peer-a"); ok {
 		t.Fatal("third TCP acquire succeeded despite tcp_max_buffered_bytes limit")
 	}
-	if udp, ok := e.acquireConn("udp"); !ok {
+	if udp, ok := e.acquireConn("udp", "peer-a"); !ok {
 		t.Fatal("TCP buffer limit unexpectedly rejected UDP")
 	} else {
 		e.releaseConn(udp)
 	}
+}
+
+func TestConnectionTablePerPeerLimitIsolated(t *testing.T) {
+	cfg := config.Default()
+	cfg.Inbound.MaxConnections = 2
+	cfg.Inbound.MaxConnectionsPerPeer = 1
+	e, err := New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, ok := e.acquireConn("udp", "peer-a")
+	if !ok {
+		t.Fatal("first peer-a acquire failed")
+	}
+	defer e.releaseConn(first)
+	if _, ok := e.acquireConn("tcp", "peer-a"); ok {
+		t.Fatal("peer-a exceeded max_connections_per_peer")
+	}
+	second, ok := e.acquireConn("tcp", "peer-b")
+	if !ok {
+		t.Fatal("peer-b should not be blocked by peer-a using its own slot")
+	}
+	defer e.releaseConn(second)
 }
