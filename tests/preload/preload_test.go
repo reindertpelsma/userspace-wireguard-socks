@@ -168,7 +168,7 @@ func assertManagerRejectsHugeUDPPacket(t *testing.T, fdSock string) {
 	if _, err := c.Write([]byte("CONNECT udp 100.64.94.1 18081\n")); err != nil {
 		t.Fatal(err)
 	}
-	if line, err := bufio.NewReader(c).ReadString('\n'); err != nil || strings.TrimSpace(line) != "OK" {
+	if line, err := bufio.NewReader(c).ReadString('\n'); err != nil || !strings.HasPrefix(strings.TrimSpace(line), "OK") {
 		t.Fatalf("UDP manager setup = %q, %v", line, err)
 	}
 	if _, err := c.Write([]byte{0xff, 0xff, 0xff, 0xff}); err != nil {

@@ -243,12 +243,18 @@ The `uwgfdproxy` helper implements the local bridge. The manager accepts small
 bootstrap lines:
 
 ```text
-CONNECT tcp 100.64.90.1 443
-CONNECT udp 100.64.90.1 53
-LISTEN tcp 100.64.90.2 8080
-LISTEN udp 100.64.90.2 5353
+CONNECT tcp 100.64.90.1 443 100.64.90.2 40000 0 0
+CONNECT udp 100.64.90.1 53 100.64.90.2 40001 0 0
+LISTEN tcp 0.0.0.0 8080 1 1
+LISTEN udp 0.0.0.0 5353 1 1
 ATTACH <listener-token> <accepted-connection-id>
 ```
+
+The bind IP/port and reuse flags are optional for compatibility with older
+wrappers; omitted bind fields mean no explicit source bind. Successful
+connected sockets reply as `OK <bind-ip> <bind-port>`, UDP listeners as
+`OKUDP <bind-ip> <bind-port>`, and TCP listeners as
+`OKLISTEN <listener-token> <bind-ip> <bind-port>`.
 
 Then it opens `/v1/socket`, waits for the raw socket `accept` frame, replies to
 the preload wrapper, and bridges data between the Unix fd and raw socket
@@ -262,7 +268,7 @@ The preload wrapper can:
 1. let loopback, Unix sockets, and bypass subnets pass through normally
 2. create a normal dummy AF_INET/AF_INET6 socket so the application gets a real fd
 3. when `connect(2)` targets a proxied destination, connect to `uwgfdproxy`
-4. send the bootstrap line and wait for `OK\n`
+4. send the bootstrap line and wait for the `OK`/`OKUDP`/`OKLISTEN` reply
 5. replace the application's dummy socket fd with the manager fd using `dup2`
 6. let normal `read(2)`, `write(2)`, `send(2)`, `recv(2)`, `sendto(2)`,
    `recvfrom(2)`, `poll(2)`, and many other fd-oriented calls operate on a real
@@ -290,9 +296,18 @@ core calls:
   `udp_datagram` payloads to preserve datagram boundaries.
 - `poll(2)` works for the tested paths because the app is polling a real Unix
   manager fd. Full `select(2)`/`epoll(7)` edge cases still need more coverage.
-- loopback `connect(2)` passes through. Dual-mode `0.0.0.0` listeners that
-  simultaneously accept host-loopback and tunnel-side connections are not fully
-  implemented in the proof preload yet.
+- loopback-specific `connect(2)` and `bind(2)` pass through to the application.
+- `0.0.0.0` TCP listeners and unconnected UDP sockets are dual-mode: fdproxy
+  owns a host-loopback socket in the application's namespace and separately
+  asks uwgsocks for the tunnel-side bind. This matters when uwgsocks is remote
+  over HTTP, because uwgsocks must not try to bind the caller's loopback.
+- if fdproxy binding is disabled, `0.0.0.0` TCP listeners degrade to
+  loopback-only and specific non-loopback TCP listeners become dummy listeners
+  that never receive tunnel accepts. Unconnected UDP can still send and receive
+  established replies.
+- `SO_REUSEADDR`/`SO_REUSEPORT` are honored within one fdproxy instance. TCP
+  accepts are distributed across attached listener members; UDP loopback
+  datagrams without an established owner are randomly delivered to one member.
 
 ## Preload Compatibility Strategy
 
@@ -328,4 +343,9 @@ Binding is privileged:
 - `socket_api.transparent_bind: false` rejects bind IPs outside this peer's
   assigned WireGuard addresses.
 - `socket_api.udp_inbound: false` keeps UDP listener mode established-only.
+- `proxy.bind` is also honored by the socket API as a compatibility alias for
+  enabling tunnel-side binds, and `proxy.lowbind: false` blocks binds below
+  port 1024. The fdproxy process can additionally disable tunnel binds and
+  low-port binds with its own flags/environment so per-application wrappers can
+  be more restrictive than the shared uwgsocks daemon.
 - loopback and Unix sockets should pass through in preload wrappers by default.

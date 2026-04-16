@@ -231,6 +231,9 @@ func (s *socketServer) openUDPConn(id uint64, bind, dest netip.AddrPort, version
 }
 
 func (s *socketServer) dialSocket(ctx context.Context, network string, bind, dest netip.AddrPort) (net.Conn, error) {
+	if bind.Port() != 0 && bind.Port() < 1024 && !s.e.socketLowBindEnabled() {
+		return nil, errors.New("binding low ports is disabled")
+	}
 	if bind.IsValid() {
 		if !s.e.allowedContains(dest.Addr()) {
 			return nil, errors.New("source binding is only supported for WireGuard-routed destinations")
@@ -241,8 +244,11 @@ func (s *socketServer) dialSocket(ctx context.Context, network string, bind, des
 }
 
 func (s *socketServer) openTCPListener(id uint64, bind netip.AddrPort, version uint8) error {
-	if !s.e.cfg.SocketAPI.Bind {
+	if !s.e.socketBindEnabled() {
 		return errors.New("socket API TCP bind is disabled")
+	}
+	if bind.Port() != 0 && bind.Port() < 1024 && !s.e.socketLowBindEnabled() {
+		return errors.New("binding low ports is disabled")
 	}
 	if !bind.IsValid() {
 		ip, ok := s.e.firstLocalAddr(version)
@@ -309,6 +315,9 @@ func (s *socketServer) acceptTCP(listenerID uint64, ln net.Listener) {
 }
 
 func (s *socketServer) openUDPListener(id uint64, bind netip.AddrPort, version uint8) error {
+	if bind.Port() != 0 && bind.Port() < 1024 && !s.e.socketLowBindEnabled() {
+		return errors.New("binding low ports is disabled")
+	}
 	if !bind.IsValid() {
 		ip, ok := s.e.firstLocalAddr(version)
 		if !ok {
@@ -631,6 +640,17 @@ func (e *Engine) firstLocalAddr(version uint8) (netip.Addr, bool) {
 		return e.localAddrs[0], true
 	}
 	return netip.Addr{}, false
+}
+
+func (e *Engine) socketBindEnabled() bool {
+	if e.cfg.SocketAPI.Bind {
+		return true
+	}
+	return e.cfg.Proxy.Bind != nil && *e.cfg.Proxy.Bind
+}
+
+func (e *Engine) socketLowBindEnabled() bool {
+	return e.cfg.Proxy.LowBind != nil && *e.cfg.Proxy.LowBind
 }
 
 func (ss *socketSession) udpFixedDst() netip.AddrPort {

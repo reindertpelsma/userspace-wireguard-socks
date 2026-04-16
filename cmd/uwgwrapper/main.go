@@ -41,6 +41,8 @@ func main() {
 	var forceLoopbackDNS bool
 	var spawnFDProxy bool
 	var noNewPrivileges bool
+	var allowBind bool
+	var allowLowBind bool
 	var verbose bool
 
 	flag.StringVar(&mode, "mode", getenv("UWGS_WRAPPER_MODE", "launch"), "mode: launch or fdproxy")
@@ -54,14 +56,16 @@ func main() {
 	flag.BoolVar(&forceLoopbackDNS, "force-loopback-dns", getenv("UWGS_DISABLE_LOOPBACK_DNS53", "") == "", "force loopback TCP/UDP port 53 to DNS proxy (default true)")
 	flag.BoolVar(&spawnFDProxy, "spawn-fdproxy", getenv("UWGS_WRAPPER_SPAWN_FDPROXY", "") != "0", "launch built-in fdproxy daemon automatically in launch mode")
 	flag.BoolVar(&noNewPrivileges, "no-new-privileges", getenv("UWGS_WRAPPER_NO_NEW_PRIVILEGES", "1") != "0", "set PR_SET_NO_NEW_PRIVS before launching the wrapped program (default true)")
+	flag.BoolVar(&allowBind, "allow-bind", getenv("UWGS_FDPROXY_ALLOW_BIND", "1") != "0", "allow fdproxy-managed tunnel bind/listen requests")
+	flag.BoolVar(&allowLowBind, "allow-lowbind", getenv("UWGS_FDPROXY_ALLOW_LOWBIND", "0") != "0", "allow fdproxy-managed ports below 1024")
 	flag.BoolVar(&verbose, "v", false, "enable wrapper diagnostics")
 	flag.Parse()
 
 	switch mode {
 	case "launch":
-		runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, transport, forceLoopbackDNS, spawnFDProxy, noNewPrivileges, verbose)
+		runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, transport, forceLoopbackDNS, spawnFDProxy, noNewPrivileges, allowBind, allowLowBind, verbose)
 	case "fdproxy":
-		runFDProxy(api, apiToken, socketPath, listenPath)
+		runFDProxy(api, apiToken, socketPath, listenPath, allowBind, allowLowBind)
 	case "exec-helper":
 		if err := runExecHelper(flag.Args()); err != nil {
 			log.Fatal(err)
@@ -75,7 +79,7 @@ func main() {
 	}
 }
 
-func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, transport string, forceLoopbackDNS, spawnFDProxy, noNewPrivileges, verbose bool) {
+func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, transport string, forceLoopbackDNS, spawnFDProxy, noNewPrivileges, allowBind, allowLowBind, verbose bool) {
 	if flag.NArg() == 0 {
 		fmt.Fprintf(os.Stderr, "usage: uwgwrapper [flags] -- program [args...]\n")
 		flag.PrintDefaults()
@@ -108,6 +112,8 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 			"--listen", listenPath,
 			"--api", api,
 			"--socket-path", socketPath,
+			"--allow-bind", boolString(allowBind),
+			"--allow-lowbind", boolString(allowLowBind),
 		)
 		if apiToken != "" {
 			fdproxyCmd.Args = append(fdproxyCmd.Args, "--token", apiToken)
@@ -285,11 +291,19 @@ func runExecHelper(args []string) error {
 	return syscall.Exec(target, args, os.Environ())
 }
 
-func runFDProxy(api, apiToken, socketPath, listenPath string) {
+func runFDProxy(api, apiToken, socketPath, listenPath string, allowBind, allowLowBind bool) {
 	if listenPath == "" {
 		listenPath = "/tmp/uwgfdproxy.sock"
 	}
-	server, err := fdproxy.ListenWithSocketPath(listenPath, api, apiToken, socketPath, log.Default())
+	server, err := fdproxy.ListenWithOptions(fdproxy.Options{
+		Path:         listenPath,
+		API:          api,
+		Token:        apiToken,
+		SocketPath:   socketPath,
+		Logger:       log.Default(),
+		AllowBind:    allowBind,
+		AllowLowBind: allowLowBind,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}

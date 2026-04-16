@@ -66,11 +66,16 @@ proxy:
       subnets: [0.0.0.0/0, ::/0]
   udp_associate: true
   bind: false
+  lowbind: false
   ipv6: null
   prefer_ipv6_for_udp_over_socks: false
 ```
 
 `outbound_proxies` replaces the older single-purpose fallback fields. `fallback_socks5` and `inbound.host_dial_proxy_socks5` still work and are internally converted to outbound proxy rules for compatibility.
+`proxy.bind` enables SOCKS5 BIND and is also accepted by the raw socket API as
+a compatibility switch for listener-style tunnel binds. `proxy.lowbind`
+controls whether raw socket/fdproxy binds below port 1024 are allowed; leave it
+false when wrappers should behave like an unprivileged process.
 
 Roles:
 
@@ -244,6 +249,8 @@ proxy:
   http: 127.0.0.1:8080
   http_listeners:
     - unix:/run/uwgsocks/http.sock
+  bind: false
+  lowbind: false
 ```
 
 CLI:
@@ -277,11 +284,13 @@ userspace netstack.
 `/v1/socket` is the HTTP-upgraded raw socket protocol documented in
 [`docs/socket-protocol.md`](socket-protocol.md). Connected TCP/UDP sockets do
 not need `socket_api.bind`. TCP listener sockets require `socket_api.bind:
-true`. UDP listener-style sockets are allowed even when `bind` is false, but
+true` or `proxy.bind: true`. UDP listener-style sockets are allowed even when
+`bind` is false, but
 they are established-only unless `socket_api.udp_inbound: true`: replies are
 delivered only from remote IP:port pairs the client has contacted recently.
 Binding to addresses outside this peer's assigned WireGuard IPs requires
-`socket_api.transparent_bind: true`. UDP listener-style sockets can be
+`socket_api.transparent_bind: true`. Binding below port 1024 additionally
+requires `proxy.lowbind: true`. UDP listener-style sockets can be
 converted to connected UDP sockets, reconnected to another peer, or disconnected
 again by sending a `connect` frame with `listener_connection_id` set to the
 existing UDP socket ID.
