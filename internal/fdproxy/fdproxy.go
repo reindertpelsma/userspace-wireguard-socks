@@ -41,6 +41,7 @@ type Options struct {
 	Logger       *log.Logger
 	AllowBind    bool
 	AllowLowBind bool
+	Verbose      bool
 }
 
 type Server struct {
@@ -51,6 +52,7 @@ type Server struct {
 	logger       *log.Logger
 	allowBind    bool
 	allowLowBind bool
+	verbose      bool
 	nextID       uint64
 
 	mu         sync.Mutex
@@ -173,10 +175,17 @@ func ListenWithOptions(opts Options) (*Server, error) {
 		logger:       opts.Logger,
 		allowBind:    opts.AllowBind,
 		allowLowBind: opts.AllowLowBind,
+		verbose:      opts.Verbose,
 		tcpMembers:   make(map[string]*tcpListenerMember),
 		tcpGroups:    make(map[string]*tcpListenerGroup),
 		udpGroups:    make(map[string]*udpListenerGroup),
 	}, nil
+}
+
+func (s *Server) debugf(format string, args ...any) {
+	if s != nil && s.verbose && s.logger != nil {
+		s.logger.Printf(format, args...)
+	}
 }
 
 func (s *Server) Addr() net.Addr {
@@ -269,12 +278,12 @@ func (s *Server) handleConnect(c *net.UnixConn, fd int, fields []string) {
 
 	upstreamBind, err := s.connectBindForUpstream(req)
 	if err != nil {
-		s.logger.Printf("CONNECT bind policy rejected %q: %v", strings.Join(fields, " "), err)
+		s.debugf("CONNECT bind policy rejected %q: %v", strings.Join(fields, " "), err)
 		return
 	}
 	up, bind, err := s.openUpstreamConnected(req.proto, req.dest, upstreamBind)
 	if err != nil {
-		s.logger.Printf("CONNECT upstream failed %q: %v", strings.Join(fields, " "), err)
+		s.debugf("CONNECT upstream failed %q: %v", strings.Join(fields, " "), err)
 		return
 	}
 	defer up.Close()
@@ -303,7 +312,7 @@ func (s *Server) handleListen(c *net.UnixConn, fd int, fields []string) {
 		member, bind, err := s.addTCPListenerMember(c, req)
 		if err != nil {
 			_ = c.Close()
-			s.logger.Printf("tcp listener setup failed %q: %v", strings.Join(fields, " "), err)
+			s.debugf("tcp listener setup failed %q: %v", strings.Join(fields, " "), err)
 			return
 		}
 		if _, err := c.Write([]byte(fmt.Sprintf("OKLISTEN %s %s %d\n", member.token, bind.Addr(), bind.Port()))); err != nil {
@@ -315,7 +324,7 @@ func (s *Server) handleListen(c *net.UnixConn, fd int, fields []string) {
 		group, token, bind, err := s.addUDPListenerMember(c, req)
 		if err != nil {
 			_ = c.Close()
-			s.logger.Printf("udp listener setup failed %q: %v", strings.Join(fields, " "), err)
+			s.debugf("udp listener setup failed %q: %v", strings.Join(fields, " "), err)
 			return
 		}
 		_ = token

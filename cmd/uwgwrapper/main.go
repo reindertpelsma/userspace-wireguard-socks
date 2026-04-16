@@ -65,7 +65,7 @@ func main() {
 	case "launch":
 		runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, transport, forceLoopbackDNS, spawnFDProxy, noNewPrivileges, allowBind, allowLowBind, verbose)
 	case "fdproxy":
-		runFDProxy(api, apiToken, socketPath, listenPath, allowBind, allowLowBind)
+		runFDProxy(api, apiToken, socketPath, listenPath, allowBind, allowLowBind, verbose || os.Getenv("UWGS_WRAPPER_DEBUG") != "")
 	case "exec-helper":
 		if err := runExecHelper(flag.Args()); err != nil {
 			log.Fatal(err)
@@ -103,6 +103,7 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 	if listenPath == "" {
 		listenPath = filepath.Join(os.TempDir(), fmt.Sprintf("uwgfdproxy-%d.sock", os.Getpid()))
 	}
+	debug := verbose || os.Getenv("UWGS_WRAPPER_DEBUG") != ""
 
 	var fdproxyCmd *exec.Cmd
 	if spawnFDProxy {
@@ -115,6 +116,9 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 			"--allow-bind", boolString(allowBind),
 			"--allow-lowbind", boolString(allowLowBind),
 		)
+		if debug {
+			fdproxyCmd.Args = append(fdproxyCmd.Args, "-v")
+		}
 		if apiToken != "" {
 			fdproxyCmd.Args = append(fdproxyCmd.Args, "--token", apiToken)
 		}
@@ -177,7 +181,7 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 			FDProxy:         listenPath,
 			SeccompMode:     seccompMode,
 			NoNewPrivileges: noNewPrivileges,
-			Verbose:         verbose || os.Getenv("UWGS_WRAPPER_DEBUG") != "",
+			Verbose:         debug,
 			Shared:          shared,
 			StatsPath:       statsPath,
 		})
@@ -291,7 +295,7 @@ func runExecHelper(args []string) error {
 	return syscall.Exec(target, args, os.Environ())
 }
 
-func runFDProxy(api, apiToken, socketPath, listenPath string, allowBind, allowLowBind bool) {
+func runFDProxy(api, apiToken, socketPath, listenPath string, allowBind, allowLowBind, verbose bool) {
 	if listenPath == "" {
 		listenPath = "/tmp/uwgfdproxy.sock"
 	}
@@ -303,6 +307,7 @@ func runFDProxy(api, apiToken, socketPath, listenPath string, allowBind, allowLo
 		Logger:       log.Default(),
 		AllowBind:    allowBind,
 		AllowLowBind: allowLowBind,
+		Verbose:      verbose,
 	})
 	if err != nil {
 		log.Fatal(err)

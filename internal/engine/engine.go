@@ -220,17 +220,9 @@ func (e *Engine) Start() error {
 	// traffic to send.
 	var bind conn.Bind
 	if e.cfg.TURN.Server != "" {
-		include_wg_pub_key := false
-		if e.cfg.TURN.IncludeWGPublicKey != nil {
-			include_wg_pub_key = *e.cfg.TURN.IncludeWGPublicKey
-		}
-		turnBind := &wgbind.TURNBind{
-			Server:             e.cfg.TURN.Server,
-			Username:           e.cfg.TURN.Username,
-			Password:           e.cfg.TURN.Password,
-			Realm:              e.cfg.TURN.Realm,
-			AllowedPeers:       e.cfg.TURN.Permissions,
-			IncludeWGPublicKey: include_wg_pub_key,
+		turnBind, err := newTURNBind(e.cfg)
+		if err != nil {
+			return err
 		}
 		e.turnBind = turnBind
 		e.updateTURNPermissions()
@@ -284,6 +276,26 @@ func (e *Engine) Start() error {
 		return err
 	}
 	return nil
+}
+
+func newTURNBind(cfg config.Config) (*wgbind.TURNBind, error) {
+	turnBind := &wgbind.TURNBind{
+		Server:             cfg.TURN.Server,
+		Username:           cfg.TURN.Username,
+		Password:           cfg.TURN.Password,
+		Realm:              cfg.TURN.Realm,
+		AllowedPeers:       append([]string(nil), cfg.TURN.Permissions...),
+		IncludeWGPublicKey: cfg.TURN.IncludeWGPublicKey,
+	}
+	if cfg.TURN.IncludeWGPublicKey {
+		privateKey, err := wgtypes.ParseKey(cfg.WireGuard.PrivateKey)
+		if err != nil {
+			return nil, fmt.Errorf("turn.include_wg_public_key private key: %w", err)
+		}
+		publicKey := privateKey.PublicKey()
+		copy(turnBind.WGPublicKey[:], publicKey[:])
+	}
+	return turnBind, nil
 }
 
 func (e *Engine) updateTURNPermissions() {

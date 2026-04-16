@@ -129,6 +129,14 @@ filtering:
 api:
   listen: 127.0.0.1:9090
   token: test-token
+turn:
+  server: 127.0.0.1:3478
+  username: turn-user
+  password: turn-pass
+  realm: turn-realm
+  permissions:
+    - 203.0.113.10:51820
+  include_wg_public_key: true
 acl:
   inbound_default: allow
   outbound_default: deny
@@ -174,6 +182,9 @@ dns_server:
 	}
 	if cfg.API.Listen != "127.0.0.1:9090" || cfg.API.Token != "test-token" {
 		t.Fatalf("API options mismatch: %+v", cfg.API)
+	}
+	if cfg.TURN.Server != "127.0.0.1:3478" || cfg.TURN.Username != "turn-user" || cfg.TURN.Password != "turn-pass" || cfg.TURN.Realm != "turn-realm" || len(cfg.TURN.Permissions) != 1 || !cfg.TURN.IncludeWGPublicKey {
+		t.Fatalf("TURN options mismatch: %+v", cfg.TURN)
 	}
 	if !*cfg.HostForward.Proxy.Enabled || *cfg.HostForward.Inbound.Enabled || cfg.HostForward.Proxy.RedirectIP != "127.0.0.1" || !*cfg.Routing.EnforceAddressSubnets || !*cfg.Filtering.DropIPv4Invalid {
 		t.Fatalf("routing/filter/host-forward options mismatch: host=%+v routing=%+v filtering=%+v", cfg.HostForward, cfg.Routing, cfg.Filtering)

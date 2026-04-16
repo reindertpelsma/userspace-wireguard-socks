@@ -83,9 +83,10 @@ type TURN struct {
 	// through the TURN relay.
 	// It can be a list of specific CIDRs.
 	Permissions []string `yaml:"permissions"`
-	// Wheter to include the Wireguard public key in the username
-	// The wireguard public key is encrypted by the credential, so not exposed over the wire
-	IncludeWGPublicKey *bool `yaml:"include_wg_public_key"`
+	// IncludeWGPublicKey appends an encrypted copy of this instance's
+	// WireGuard public key to the TURN username. The companion open TURN relay
+	// can use that metadata to bind allocations to a WireGuard identity.
+	IncludeWGPublicKey bool `yaml:"include_wg_public_key"`
 }
 
 type Peer struct {
@@ -178,9 +179,9 @@ type Filtering struct {
 }
 
 type TrafficShaper struct {
-	UploadBps     int64 `yaml:"upload_bps"`
-	DownloadBps   int64 `yaml:"download_bps"`
-	LatencyMillis int   `yaml:"latency_ms"`
+	UploadBps     int64 `yaml:"upload_bps" json:"upload_bps"`
+	DownloadBps   int64 `yaml:"download_bps" json:"download_bps"`
+	LatencyMillis int   `yaml:"latency_ms" json:"latency_ms"`
 }
 
 func (t TrafficShaper) IsZero() bool {

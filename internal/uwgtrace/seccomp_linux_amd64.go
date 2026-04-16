@@ -79,6 +79,8 @@ func buildSeccompProgram(mode SeccompMode, secret uint64) ([]unix.SockFilter, er
 		unix.SYS_FCNTL,
 		unix.SYS_GETSOCKOPT,
 		unix.SYS_SETSOCKOPT,
+		unix.SYS_POLL,
+		unix.SYS_PPOLL,
 	}
 
 	alwaysTraceSyscalls := []uint32{

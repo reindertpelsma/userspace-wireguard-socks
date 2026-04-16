@@ -431,6 +431,7 @@ int main(int argc, char **argv) {
     int tcp_no_poll = 0;
     int udp_no_poll = 0;
     int udp_unconnected_no_poll = 0;
+    int udp_connect_probe = 0;
     int use_icmp = 0;
     for (int i = 4; i < argc; i++) {
         if (strcmp(argv[i], "udp") == 0) {
@@ -463,6 +464,9 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "udp-no-poll") == 0) {
             socktype = SOCK_DGRAM;
             udp_no_poll = 1;
+        } else if (strcmp(argv[i], "udp-connect-probe") == 0) {
+            socktype = SOCK_DGRAM;
+            udp_connect_probe = 1;
         } else if (strcmp(argv[i], "icmp") == 0) {
             socktype = SOCK_DGRAM;
             use_icmp = 1;
@@ -530,6 +534,24 @@ int main(int argc, char **argv) {
     if (connect(fd, (struct sockaddr *)&addr, addrlen) != 0) {
         perror("connect");
         return 1;
+    }
+    if (udp_connect_probe) {
+        struct sockaddr_storage tmp;
+        socklen_t tmplen = sizeof(tmp);
+        if (getsockname(fd, (struct sockaddr *)&tmp, &tmplen) != 0) {
+            perror("getsockname");
+            close(fd);
+            return 1;
+        }
+        tmplen = sizeof(tmp);
+        if (getpeername(fd, (struct sockaddr *)&tmp, &tmplen) != 0) {
+            perror("getpeername");
+            close(fd);
+            return 1;
+        }
+        printf("%s\n", argv[3]);
+        close(fd);
+        return 0;
     }
     if (use_icmp) {
         int rc = echo_icmp_connected(fd, argv[3], ipv6);
