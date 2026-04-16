@@ -6,6 +6,7 @@ package engine
 import (
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
@@ -35,6 +36,8 @@ func TestAllowRelayPacketAppliesACLAndAddressSubnetReservations(t *testing.T) {
 	if err := cfg.Normalize(); err != nil {
 		t.Fatal(err)
 	}
+	conntrack := false
+	cfg.Relay.Conntrack = &conntrack
 	rel := acl.List{
 		Default: acl.Deny,
 		Rules: []acl.Rule{{
@@ -68,6 +71,146 @@ func TestAllowRelayPacketAppliesACLAndAddressSubnetReservations(t *testing.T) {
 	}
 }
 
+func TestRelayConntrackTCPAllowsEstablishedReverseWithDefaultDeny(t *testing.T) {
+	e := testRelayEngine(t, acl.List{
+		Default: acl.Deny,
+		Rules: []acl.Rule{{
+			Action:      acl.Allow,
+			Source:      "100.64.2.2/32",
+			Destination: "100.64.2.3/32",
+			DestPort:    "443",
+			Protocol:    "tcp",
+		}},
+	}, nil)
+
+	if !e.allowRelayPacket(testIPv4TCPPacketFlags("100.64.2.2", "100.64.2.3", 40000, 443, tcpFlagSYN)) {
+		t.Fatal("initial TCP SYN matching the relay ACL was denied")
+	}
+	if !e.allowRelayPacket(testIPv4TCPPacketFlags("100.64.2.3", "100.64.2.2", 443, 40000, tcpFlagSYN|tcpFlagACK)) {
+		t.Fatal("reverse TCP SYN+ACK for tracked flow was denied")
+	}
+	if !e.allowRelayPacket(testIPv4TCPPacketFlags("100.64.2.2", "100.64.2.3", 40000, 443, tcpFlagACK)) {
+		t.Fatal("TCP ACK completing tracked flow was denied")
+	}
+	if !e.allowRelayPacket(testIPv4TCPPacketFlags("100.64.2.3", "100.64.2.2", 443, 40000, tcpFlagACK)) {
+		t.Fatal("reverse TCP data/ACK for established flow was denied")
+	}
+	if e.allowRelayPacket(testIPv4TCPPacketFlags("100.64.2.3", "100.64.2.2", 443, 40001, tcpFlagACK)) {
+		t.Fatal("unrelated reverse TCP packet was allowed without a tracked flow")
+	}
+}
+
+func TestRelayConntrackUDPAndICMPEstablished(t *testing.T) {
+	e := testRelayEngine(t, acl.List{
+		Default: acl.Deny,
+		Rules: []acl.Rule{
+			{
+				Action:      acl.Allow,
+				Source:      "100.64.2.2/32",
+				Destination: "100.64.2.3/32",
+				DestPort:    "53",
+				Protocol:    "udp",
+			},
+			{
+				Action:      acl.Allow,
+				Source:      "100.64.2.2/32",
+				Destination: "100.64.2.3/32",
+				Protocol:    "icmp",
+			},
+		},
+	}, nil)
+
+	if e.allowRelayPacket(testIPv4UDPPacket("100.64.2.3", "100.64.2.2", 53, 53000)) {
+		t.Fatal("reverse UDP packet was allowed before an initiating flow existed")
+	}
+	if !e.allowRelayPacket(testIPv4UDPPacket("100.64.2.2", "100.64.2.3", 53000, 53)) {
+		t.Fatal("initial UDP packet matching relay ACL was denied")
+	}
+	if !e.allowRelayPacket(testIPv4UDPPacket("100.64.2.3", "100.64.2.2", 53, 53000)) {
+		t.Fatal("reverse UDP packet for tracked flow was denied")
+	}
+	if !e.allowRelayPacket(testIPv4ICMPEcho("100.64.2.2", "100.64.2.3", 8, 0x1234)) {
+		t.Fatal("ICMP echo request matching relay ACL was denied")
+	}
+	if !e.allowRelayPacket(testIPv4ICMPEcho("100.64.2.3", "100.64.2.2", 0, 0x1234)) {
+		t.Fatal("ICMP echo reply for tracked request was denied")
+	}
+	if e.allowRelayPacket(testIPv4ICMPEcho("100.64.2.3", "100.64.2.2", 8, 0x1234)) {
+		t.Fatal("reverse ICMP echo request reused a tracked request flow")
+	}
+}
+
+func TestRelayConntrackICMPErrorMatchesExistingFlow(t *testing.T) {
+	e := testRelayEngine(t, acl.List{
+		Default: acl.Deny,
+		Rules: []acl.Rule{{
+			Action:      acl.Allow,
+			Source:      "100.64.2.2/32",
+			Destination: "100.64.2.3/32",
+			DestPort:    "1234",
+			Protocol:    "udp",
+		}},
+	}, []netip.Prefix{netip.MustParsePrefix("100.64.0.0/16")})
+	original := testIPv4UDPPacket("100.64.2.2", "100.64.2.3", 40000, 1234)
+	if !e.allowRelayPacket(original) {
+		t.Fatal("initial UDP packet matching relay ACL was denied")
+	}
+	if !e.allowRelayPacket(testIPv4ICMPError("100.64.9.9", "100.64.2.2", original)) {
+		t.Fatal("ICMP error from an allowed peer for tracked flow was denied")
+	}
+	if e.allowRelayPacket(testIPv4ICMPError("100.64.9.9", "100.64.9.8", original)) {
+		t.Fatal("ICMP error with unrelated outer destination was allowed")
+	}
+	if e.allowRelayPacket(testIPv4ICMPError("198.51.100.9", "100.64.2.2", original)) {
+		t.Fatal("ICMP error outside AllowedIPs was allowed")
+	}
+}
+
+func TestRelayConntrackLimitsAndExpiry(t *testing.T) {
+	e := testRelayEngine(t, acl.List{Default: acl.Allow}, []netip.Prefix{netip.MustParsePrefix("100.64.2.0/24")})
+	e.cfg.Relay.ConntrackMaxFlows = 1
+	e.cfg.Relay.ConntrackMaxPerPeer = 1
+
+	now := time.Unix(1000, 0)
+	first, ok := parseRelayPacket(testIPv4UDPPacket("100.64.2.2", "100.64.3.3", 40000, 53))
+	if !ok {
+		t.Fatal("failed to parse first UDP packet")
+	}
+	second, ok := parseRelayPacket(testIPv4UDPPacket("100.64.2.4", "100.64.3.4", 40001, 53))
+	if !ok {
+		t.Fatal("failed to parse second UDP packet")
+	}
+	if !e.allowRelayTracked(first, now) {
+		t.Fatal("first UDP flow was denied")
+	}
+	if e.allowRelayTracked(second, now.Add(time.Second)) {
+		t.Fatal("second UDP flow exceeded the per-peer/total conntrack limit")
+	}
+	if !e.allowRelayTracked(second, now.Add(31*time.Second)) {
+		t.Fatal("expired UDP flow was not swept before admitting a new flow")
+	}
+}
+
+func TestRelayConntrackIPv6TCP(t *testing.T) {
+	e := testRelayEngine(t, acl.List{
+		Default: acl.Deny,
+		Rules: []acl.Rule{{
+			Action:      acl.Allow,
+			Source:      "fd00:64::2/128",
+			Destination: "fd00:64::3/128",
+			DestPort:    "443",
+			Protocol:    "tcp",
+		}},
+	}, nil)
+
+	if !e.allowRelayPacket(testIPv6TCPPacketFlags("fd00:64::2", "fd00:64::3", 40000, 443, tcpFlagSYN)) {
+		t.Fatal("initial IPv6 TCP SYN matching relay ACL was denied")
+	}
+	if !e.allowRelayPacket(testIPv6TCPPacketFlags("fd00:64::3", "fd00:64::2", 443, 40000, tcpFlagSYN|tcpFlagACK)) {
+		t.Fatal("reverse IPv6 TCP SYN+ACK for tracked flow was denied")
+	}
+}
+
 func TestOutboundProxyMatchingUsesMostSpecificSubnet(t *testing.T) {
 	cfg := config.Default()
 	honorEnv := false
@@ -96,11 +239,34 @@ func TestOutboundProxyMatchingUsesMostSpecificSubnet(t *testing.T) {
 	}
 }
 
+func testRelayEngine(t *testing.T, rel acl.List, allowed []netip.Prefix) *Engine {
+	t.Helper()
+	cfg := config.Default()
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rel.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	return &Engine{
+		cfg:        cfg,
+		relACL:     rel,
+		allowed:    allowed,
+		localAddrs: []netip.Addr{netip.MustParseAddr("100.64.0.1"), netip.MustParseAddr("fd00:64::1")},
+	}
+}
+
 func testIPv4TCPPacket(srcRaw, dstRaw string, srcPort, dstPort uint16) []byte {
+	return testIPv4TCPPacketFlags(srcRaw, dstRaw, srcPort, dstPort, 0)
+}
+
+func testIPv4TCPPacketFlags(srcRaw, dstRaw string, srcPort, dstPort uint16, flags byte) []byte {
 	src := netip.MustParseAddr(srcRaw).As4()
 	dst := netip.MustParseAddr(dstRaw).As4()
 	packet := make([]byte, 40)
 	packet[0] = 0x45
+	packet[2] = 0
+	packet[3] = 40
 	packet[9] = 6
 	copy(packet[12:16], src[:])
 	copy(packet[16:20], dst[:])
@@ -108,5 +274,78 @@ func testIPv4TCPPacket(srcRaw, dstRaw string, srcPort, dstPort uint16) []byte {
 	packet[21] = byte(srcPort)
 	packet[22] = byte(dstPort >> 8)
 	packet[23] = byte(dstPort)
+	packet[32] = 5 << 4
+	packet[33] = flags
+	return packet
+}
+
+func testIPv6TCPPacketFlags(srcRaw, dstRaw string, srcPort, dstPort uint16, flags byte) []byte {
+	src := netip.MustParseAddr(srcRaw).As16()
+	dst := netip.MustParseAddr(dstRaw).As16()
+	packet := make([]byte, 60)
+	packet[0] = 0x60
+	packet[4] = 0
+	packet[5] = 20
+	packet[6] = 6
+	copy(packet[8:24], src[:])
+	copy(packet[24:40], dst[:])
+	packet[40] = byte(srcPort >> 8)
+	packet[41] = byte(srcPort)
+	packet[42] = byte(dstPort >> 8)
+	packet[43] = byte(dstPort)
+	packet[52] = 5 << 4
+	packet[53] = flags
+	return packet
+}
+
+func testIPv4UDPPacket(srcRaw, dstRaw string, srcPort, dstPort uint16) []byte {
+	src := netip.MustParseAddr(srcRaw).As4()
+	dst := netip.MustParseAddr(dstRaw).As4()
+	packet := make([]byte, 28)
+	packet[0] = 0x45
+	packet[2] = 0
+	packet[3] = 28
+	packet[9] = 17
+	copy(packet[12:16], src[:])
+	copy(packet[16:20], dst[:])
+	packet[20] = byte(srcPort >> 8)
+	packet[21] = byte(srcPort)
+	packet[22] = byte(dstPort >> 8)
+	packet[23] = byte(dstPort)
+	packet[24] = 0
+	packet[25] = 8
+	return packet
+}
+
+func testIPv4ICMPEcho(srcRaw, dstRaw string, typ byte, id uint16) []byte {
+	src := netip.MustParseAddr(srcRaw).As4()
+	dst := netip.MustParseAddr(dstRaw).As4()
+	packet := make([]byte, 28)
+	packet[0] = 0x45
+	packet[2] = 0
+	packet[3] = 28
+	packet[9] = 1
+	copy(packet[12:16], src[:])
+	copy(packet[16:20], dst[:])
+	packet[20] = typ
+	packet[24] = byte(id >> 8)
+	packet[25] = byte(id)
+	return packet
+}
+
+func testIPv4ICMPError(srcRaw, dstRaw string, inner []byte) []byte {
+	src := netip.MustParseAddr(srcRaw).As4()
+	dst := netip.MustParseAddr(dstRaw).As4()
+	packet := make([]byte, 28+len(inner))
+	packet[0] = 0x45
+	total := len(packet)
+	packet[2] = byte(total >> 8)
+	packet[3] = byte(total)
+	packet[9] = 1
+	copy(packet[12:16], src[:])
+	copy(packet[16:20], dst[:])
+	packet[20] = 3
+	packet[21] = 1
+	copy(packet[28:], inner)
 	return packet
 }

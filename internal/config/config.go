@@ -172,7 +172,10 @@ type Filtering struct {
 }
 
 type Relay struct {
-	Enabled *bool `yaml:"enabled"`
+	Enabled             *bool `yaml:"enabled"`
+	Conntrack           *bool `yaml:"conntrack"`
+	ConntrackMaxFlows   int   `yaml:"conntrack_max_flows"`
+	ConntrackMaxPerPeer int   `yaml:"conntrack_max_per_peer"`
 }
 
 type API struct {
@@ -265,6 +268,12 @@ func Default() Config {
 		},
 		Routing:   Routing{EnforceAddressSubnets: boolPtr(true)},
 		Filtering: Filtering{DropIPv6LinkLocalMulticast: boolPtr(true), DropIPv4Invalid: boolPtr(true)},
+		Relay: Relay{
+			Enabled:             boolPtr(false),
+			Conntrack:           boolPtr(true),
+			ConntrackMaxFlows:   65536,
+			ConntrackMaxPerPeer: 4096,
+		},
 		ACL: ACL{
 			InboundDefault:  acl.Allow,
 			OutboundDefault: acl.Allow,
@@ -470,6 +479,22 @@ func (c *Config) Normalize() error {
 	if c.Relay.Enabled == nil {
 		f := false
 		c.Relay.Enabled = &f
+	}
+	if c.Relay.Conntrack == nil {
+		t := true
+		c.Relay.Conntrack = &t
+	}
+	if c.Relay.ConntrackMaxFlows == 0 {
+		c.Relay.ConntrackMaxFlows = 65536
+	}
+	if c.Relay.ConntrackMaxFlows < 0 {
+		return fmt.Errorf("relay.conntrack_max_flows must be >= 0")
+	}
+	if c.Relay.ConntrackMaxPerPeer == 0 {
+		c.Relay.ConntrackMaxPerPeer = 4096
+	}
+	if c.Relay.ConntrackMaxPerPeer < 0 {
+		return fmt.Errorf("relay.conntrack_max_per_peer must be >= 0")
 	}
 	in := acl.List{Default: c.ACL.InboundDefault, Rules: c.ACL.Inbound}
 	if err := in.Normalize(); err != nil {
