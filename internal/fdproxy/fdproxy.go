@@ -106,6 +106,13 @@ func (s *Server) handle(c *net.UnixConn) {
 		return
 	}
 	switch fields[0] {
+	case "PING":
+		_, _ = c.Write([]byte("PONG\n"))
+		_ = c.Close()
+		if fd >= 0 {
+			_ = syscall.Close(fd)
+		}
+		return
 	case "CONNECT":
 		s.handleConnect(c, fd, fields)
 	case "LISTEN":
@@ -456,8 +463,8 @@ func (s *Server) handleDNS(c *net.UnixConn, fd int, fields []string) {
 	defer up.Close()
 
 	if _, err := c.Write([]byte("OK\n")); err != nil {
-                return
-        }
+		return
+	}
 
 	errc := make(chan struct{}, 2)
 	go func() {

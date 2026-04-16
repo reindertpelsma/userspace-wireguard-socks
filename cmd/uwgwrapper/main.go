@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
@@ -12,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,6 +40,7 @@ func main() {
 	var transport string
 	var forceLoopbackDNS bool
 	var spawnFDProxy bool
+	var noNewPrivileges bool
 	var verbose bool
 
 	flag.StringVar(&mode, "mode", getenv("UWGS_WRAPPER_MODE", "launch"), "mode: launch or fdproxy")
@@ -47,27 +50,32 @@ func main() {
 	flag.StringVar(&preloadPath, "preload", os.Getenv("UWGS_PRELOAD"), "path to preload shared library; defaults to embedded copy extracted to /tmp")
 	flag.StringVar(&listenPath, "listen", getenv("UWGS_FDPROXY", ""), "Unix socket path exposed to the preload wrapper")
 	flag.StringVar(&dnsMode, "dns-mode", getenv("UWGS_DNS_MODE", "full"), "DNS handling mode: full, libc, none")
-	flag.StringVar(&transport, "transport", getenv("UWGS_WRAPPER_TRANSPORT", "auto"), "transport mode: auto, prefer-hot-path, preload+seccomp, preload-only, ptrace-only, combo-only")
+	flag.StringVar(&transport, "transport", getenv("UWGS_WRAPPER_TRANSPORT", "both"), "transport mode: both, ptrace-seccomp, ptrace, preload")
 	flag.BoolVar(&forceLoopbackDNS, "force-loopback-dns", getenv("UWGS_DISABLE_LOOPBACK_DNS53", "") == "", "force loopback TCP/UDP port 53 to DNS proxy (default true)")
 	flag.BoolVar(&spawnFDProxy, "spawn-fdproxy", getenv("UWGS_WRAPPER_SPAWN_FDPROXY", "") != "0", "launch built-in fdproxy daemon automatically in launch mode")
+	flag.BoolVar(&noNewPrivileges, "no-new-privileges", getenv("UWGS_WRAPPER_NO_NEW_PRIVILEGES", "1") != "0", "set PR_SET_NO_NEW_PRIVS before launching the wrapped program (default true)")
 	flag.BoolVar(&verbose, "v", false, "enable wrapper diagnostics")
 	flag.Parse()
 
 	switch mode {
 	case "launch":
-		runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, transport, forceLoopbackDNS, spawnFDProxy, verbose)
+		runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, transport, forceLoopbackDNS, spawnFDProxy, noNewPrivileges, verbose)
 	case "fdproxy":
 		runFDProxy(api, apiToken, socketPath, listenPath)
+	case "exec-helper":
+		if err := runExecHelper(flag.Args()); err != nil {
+			log.Fatal(err)
+		}
 	case "tracee-helper":
 		if err := uwgtrace.RunTraceeHelper(flag.Args()); err != nil {
 			log.Fatal(err)
 		}
 	default:
-		log.Fatalf("unsupported mode %q, expected launch, fdproxy, or tracee-helper", mode)
+		log.Fatalf("unsupported mode %q, expected launch, fdproxy, exec-helper, or tracee-helper", mode)
 	}
 }
 
-func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, transport string, forceLoopbackDNS, spawnFDProxy, verbose bool) {
+func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, transport string, forceLoopbackDNS, spawnFDProxy, noNewPrivileges, verbose bool) {
 	if flag.NArg() == 0 {
 		fmt.Fprintf(os.Stderr, "usage: uwgwrapper [flags] -- program [args...]\n")
 		flag.PrintDefaults()
@@ -111,11 +119,11 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 			log.Fatalf("start built-in uwgfdproxy: %v", err)
 		}
 		defer cleanupSpawnedFDProxy(fdproxyCmd, listenPath)
-		if err := waitUnixSocket(listenPath, 5*time.Second); err != nil {
+		if err := waitFDProxyReady(listenPath, 5*time.Second); err != nil {
 			log.Fatalf("uwgfdproxy did not become ready: %v", err)
 		}
 	} else {
-		if err := waitUnixSocket(listenPath, 5*time.Second); err != nil {
+		if err := waitFDProxyReady(listenPath, 5*time.Second); err != nil {
 			log.Fatalf("existing uwgfdproxy socket %s not ready: %v", listenPath, err)
 		}
 	}
@@ -149,19 +157,23 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 	}
 	env = setEnv(env, "UWGS_SHARED_STATE_PATH", shared.Path())
 	env = setEnv(env, "UWGS_TRACE_SECRET", fmt.Sprintf("%d", shared.Secret()))
+	env = setEnv(env, "UWGS_TRACE_NO_NEW_PRIVS", boolString(noNewPrivileges))
+	statsPath := os.Getenv("UWGS_TRACE_STATS_PATH")
 
-	traceRun := func(useSeccomp, withPreload bool) error {
+	traceRun := func(seccompMode uwgtrace.SeccompMode, withPreload bool) error {
 		traceEnv := append([]string{}, env...)
 		if withPreload {
 			traceEnv = prependEnvPath(traceEnv, "LD_PRELOAD", preloadPath)
 		}
 		code, err := uwgtrace.Run(uwgtrace.Options{
-			Args:       append([]string{target}, progArgs...),
-			Env:        traceEnv,
-			FDProxy:    listenPath,
-			UseSeccomp: useSeccomp,
-			Verbose:    verbose || os.Getenv("UWGS_WRAPPER_DEBUG") != "",
-			Shared:     shared,
+			Args:            append([]string{target}, progArgs...),
+			Env:             traceEnv,
+			FDProxy:         listenPath,
+			SeccompMode:     seccompMode,
+			NoNewPrivileges: noNewPrivileges,
+			Verbose:         verbose || os.Getenv("UWGS_WRAPPER_DEBUG") != "",
+			Shared:          shared,
+			StatsPath:       statsPath,
 		})
 		if err != nil {
 			return err
@@ -177,90 +189,77 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 		}
 		envPreload := prependEnvPath(append([]string{}, env...), "LD_PRELOAD", preloadPath)
 		_ = shared.Close(false)
-		if err := syscall.Exec(target, append([]string{target}, progArgs...), envPreload); err != nil {
-			if fdproxyCmd != nil {
-				cleanupSpawnedFDProxy(fdproxyCmd, listenPath)
+		cmdArgs := append([]string{"--mode=exec-helper", "--", target}, progArgs...)
+		cmd := exec.Command(os.Args[0], cmdArgs...)
+		cmd.Env = envPreload
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
+		if err := cmd.Run(); err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+					if status.Exited() {
+						os.Exit(status.ExitStatus())
+					}
+					if status.Signaled() {
+						os.Exit(128 + int(status.Signal()))
+					}
+				}
 			}
-			log.Fatalf("exec %s: %v", target, err)
+			log.Fatalf("run %s: %v", target, err)
 		}
+		os.Exit(0)
 	}
 
 	combo := func() error {
 		if preloadPath == "" {
 			return errors.New("combo transport requires preload")
 		}
-		return traceRun(true, true)
+		return traceRun(uwgtrace.SeccompSecret, true)
 	}
-	traceOnly := func() error {
-		return traceRun(true, false)
+	traceSimple := func() error {
+		return traceRun(uwgtrace.SeccompSimple, false)
 	}
-	traceOnlyNoSeccomp := func() error {
-		return traceRun(false, false)
-	}
-	fallback := func(err error, allowed ...error) bool {
-		for _, candidate := range allowed {
-			if errors.Is(err, candidate) {
-				return true
-			}
-		}
-		return false
+	traceNoSeccomp := func() error {
+		return traceRun(uwgtrace.SeccompNone, false)
 	}
 
 	switch transport {
-	case "auto":
-		if preloadPath != "" {
-			if err := combo(); err == nil {
-				return
-			} else if !fallback(err, uwgtrace.ErrPtraceUnavailable, uwgtrace.ErrSeccompUnavailable) {
-				log.Fatalf("combined ptrace+preload mode failed: %v", err)
-			}
-		}
-		if err := traceOnly(); err == nil {
-			return
-		} else if !fallback(err, uwgtrace.ErrSeccompUnavailable) {
-			log.Fatalf("ptrace-only mode failed: %v", err)
-		}
-		if err := traceOnlyNoSeccomp(); err == nil {
-			return
-		} else if !fallback(err, uwgtrace.ErrPtraceUnavailable) {
-			log.Fatalf("ptrace-only-no-seccomp mode failed: %v", err)
-		}
+	case "preload", "preload-only":
 		preloadRun()
-	case "prefer-hot-path":
-		if preloadPath != "" {
-			if err := combo(); err == nil {
-				return
-			} else if !fallback(err, uwgtrace.ErrPtraceUnavailable, uwgtrace.ErrSeccompUnavailable) {
-				log.Fatalf("combined ptrace+preload mode failed: %v", err)
-			}
-		}
-		preloadRun()
-	case "preload-only":
-		preloadRun()
-	case "ptrace-only", "trace-only":
-		if err := traceOnly(); err == nil {
-			return
-		} else if !fallback(err, uwgtrace.ErrSeccompUnavailable) {
-			log.Fatalf("ptrace-only mode failed: %v", err)
-		}
-		if err := traceOnlyNoSeccomp(); err != nil {
-			log.Fatalf("ptrace-only mode failed: %v", err)
-		}
-	case "ptrace-only-with-seccomp", "trace-only-with-seccomp":
-		if err := traceOnly(); err != nil {
-			log.Fatalf("ptrace-only mode failed: %v", err)
-		}
-	case "ptrace-only-no-seccomp", "trace-only-no-seccomp":
-		if err := traceOnlyNoSeccomp(); err != nil {
-			log.Fatalf("ptrace-only-no-seccomp mode failed: %v", err)
-		}
-	case "combo-only", "preload+seccomp", "preload-plus-seccomp":
+	case "both", "combo-only", "preload+seccomp", "preload-plus-seccomp":
 		if err := combo(); err != nil {
-			log.Fatalf("combined ptrace+preload mode failed: %v", err)
+			log.Fatalf("both mode failed: %v", err)
+		}
+	case "ptrace-seccomp", "ptrace-only-with-seccomp", "trace-only-with-seccomp":
+		if err := traceSimple(); err != nil {
+			log.Fatalf("ptrace+seccomp mode failed: %v", err)
+		}
+	case "ptrace", "ptrace-only", "trace-only", "ptrace-only-no-seccomp", "trace-only-no-seccomp":
+		if err := traceNoSeccomp(); err != nil {
+			log.Fatalf("ptrace mode failed: %v", err)
 		}
 	default:
 		log.Fatalf("unsupported transport %q", transport)
 	}
+}
+
+func runExecHelper(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("exec helper requires target program")
+	}
+	if os.Getenv("UWGS_TRACE_NO_NEW_PRIVS") != "0" {
+		if err := uwgtrace.SetNoNewPrivileges(); err != nil {
+			return err
+		}
+	}
+	target, err := exec.LookPath(args[0])
+	if err != nil {
+		return err
+	}
+	return syscall.Exec(target, args, os.Environ())
 }
 
 func runFDProxy(api, apiToken, socketPath, listenPath string) {
@@ -296,6 +295,33 @@ func waitUnixSocket(path string, timeout time.Duration) error {
 		time.Sleep(25 * time.Millisecond)
 	}
 	return fmt.Errorf("timeout waiting for %s", path)
+}
+
+func waitFDProxyReady(path string, timeout time.Duration) error {
+	if err := waitUnixSocket(path, timeout); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("unix", path, 200*time.Millisecond)
+		if err != nil {
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+		_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+		if _, err := conn.Write([]byte("PING\n")); err != nil {
+			_ = conn.Close()
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+		line, err := bufio.NewReader(conn).ReadString('\n')
+		_ = conn.Close()
+		if err == nil && strings.TrimSpace(line) == "PONG" {
+			return nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for fdproxy readiness on %s", path)
 }
 
 func ensureEmbeddedPreload() (string, error) {
@@ -386,6 +412,13 @@ func getenv(k, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func boolString(v bool) string {
+	if v {
+		return "1"
+	}
+	return "0"
 }
 
 func init() {

@@ -8,6 +8,7 @@ package uwgtrace
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,14 +19,17 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/uwgshared"
 	"golang.org/x/sys/unix"
 )
 
 const (
-	envTraceUseSeccomp = "UWGS_TRACE_USE_SECCOMP"
-	envTraceSecret     = "UWGS_TRACE_SECRET"
+	envTraceSeccompMode = "UWGS_TRACE_SECCOMP_MODE"
+	envTraceSecret      = "UWGS_TRACE_SECRET"
+	envTraceNoNewPrivs  = "UWGS_TRACE_NO_NEW_PRIVS"
+	envTraceStatsPath   = "UWGS_TRACE_STATS_PATH"
 
 	helperExitPtraceUnsupported  = 111
 	helperExitSeccompUnsupported = 112
@@ -37,28 +41,45 @@ var (
 )
 
 type Options struct {
-	Args       []string
-	Env        []string
-	FDProxy    string
-	UseSeccomp bool
-	Verbose    bool
-	Shared     *uwgshared.Table
+	Args            []string
+	Env             []string
+	FDProxy         string
+	SeccompMode     SeccompMode
+	NoNewPrivileges bool
+	Verbose         bool
+	Shared          *uwgshared.Table
+	StatsPath       string
 }
 
 type tracer struct {
-	useSeccomp bool
-	verbose    bool
-	fdproxy    string
-	shared     *uwgshared.Table
-	pid        int
-	pidfd      int
-	pending    map[int]pendingSyscall
-	localMu    sync.Mutex
-	taskGroup  map[int]int
-	pidfds     map[int]int
-	fdEpoch    map[procFD]uint64
-	nextEpoch  uint64
-	localFDs   map[procFD]int
+	seccompMode SeccompMode
+	verbose     bool
+	fdproxy     string
+	shared      *uwgshared.Table
+	pid         int
+	pidfd       int
+	pending     map[int]pendingSyscall
+	blocked     map[int]blockedSyscall
+	localMu     sync.Mutex
+	taskGroup   map[int]int
+	pidfds      map[int]int
+	fdEpoch     map[procFD]uint64
+	nextEpoch   uint64
+	localFDs    map[procFD]int
+	statsPath   string
+	stats       traceStats
+}
+
+type SeccompMode int
+
+const (
+	SeccompNone SeccompMode = iota
+	SeccompSimple
+	SeccompSecret
+)
+
+type traceStats struct {
+	Syscalls map[string]uint64 `json:"syscalls"`
 }
 
 type pendingKind int
@@ -88,6 +109,11 @@ type pendingSyscall struct {
 	state   uwgshared.TrackedFD
 }
 
+type blockedSyscall struct {
+	seccompStop bool
+	regs        unix.PtraceRegs
+}
+
 type procFD struct {
 	pid int
 	fd  int
@@ -110,7 +136,11 @@ func Run(opts Options) (int, error) {
 	args := append([]string{"--mode=tracee-helper", "--"}, opts.Args...)
 	cmd := exec.Command(self, args...)
 	cmd.Env = append([]string{}, opts.Env...)
-	cmd.Env = setEnv(cmd.Env, envTraceUseSeccomp, boolString(opts.UseSeccomp))
+	cmd.Env = setEnv(cmd.Env, envTraceSeccompMode, opts.SeccompMode.String())
+	cmd.Env = setEnv(cmd.Env, envTraceNoNewPrivs, boolString(opts.NoNewPrivileges))
+	if opts.StatsPath != "" {
+		cmd.Env = setEnv(cmd.Env, envTraceStatsPath, opts.StatsPath)
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -120,17 +150,21 @@ func Run(opts Options) (int, error) {
 	}
 
 	t := &tracer{
-		useSeccomp: opts.UseSeccomp,
-		verbose:    opts.Verbose,
-		fdproxy:    opts.FDProxy,
-		shared:     opts.Shared,
-		pid:        cmd.Process.Pid,
-		pending:    make(map[int]pendingSyscall),
-		taskGroup:  make(map[int]int),
-		pidfds:     make(map[int]int),
-		fdEpoch:    make(map[procFD]uint64),
-		localFDs:   make(map[procFD]int),
+		seccompMode: opts.SeccompMode,
+		verbose:     opts.Verbose,
+		fdproxy:     opts.FDProxy,
+		shared:      opts.Shared,
+		pid:         cmd.Process.Pid,
+		pending:     make(map[int]pendingSyscall),
+		blocked:     make(map[int]blockedSyscall),
+		taskGroup:   make(map[int]int),
+		pidfds:      make(map[int]int),
+		fdEpoch:     make(map[procFD]uint64),
+		localFDs:    make(map[procFD]int),
+		statsPath:   opts.StatsPath,
+		stats:       traceStats{Syscalls: make(map[string]uint64)},
 	}
+	defer t.writeStats()
 	t.taskGroup[t.pid] = t.pid
 
 	var status syscall.WaitStatus
@@ -180,13 +214,13 @@ func Run(opts Options) (int, error) {
 		unix.PTRACE_O_TRACEVFORK |
 		unix.PTRACE_O_TRACEEXEC |
 		unix.PTRACE_O_EXITKILL
-	if opts.UseSeccomp {
+	if opts.SeccompMode != SeccompNone {
 		options |= unix.PTRACE_O_TRACESECCOMP
 	}
 	if err := unix.PtraceSetOptions(t.pid, options); err != nil {
 		return 0, err
 	}
-	if opts.UseSeccomp {
+	if opts.SeccompMode != SeccompNone {
 		if err := unix.PtraceCont(t.pid, 0); err != nil {
 			return 0, err
 		}
@@ -205,8 +239,15 @@ func RunTraceeHelper(args []string) error {
 	if err := ptraceTraceme(); err != nil {
 		os.Exit(helperExitPtraceUnsupported)
 	}
-	if os.Getenv(envTraceUseSeccomp) == "1" {
-		if err := installSeccompFilter(parseSecret(os.Getenv(envTraceSecret))); err != nil {
+	noNewPrivs := os.Getenv(envTraceNoNewPrivs) != "0"
+	if noNewPrivs {
+		if err := setNoNewPrivileges(); err != nil {
+			return err
+		}
+	}
+	seccompMode := parseSeccompMode(os.Getenv(envTraceSeccompMode))
+	if seccompMode != SeccompNone {
+		if err := installSeccompFilter(seccompMode, parseSecret(os.Getenv(envTraceSecret)), noNewPrivs); err != nil {
 			os.Exit(helperExitSeccompUnsupported)
 		}
 	}
@@ -222,13 +263,26 @@ func RunTraceeHelper(args []string) error {
 
 func (t *tracer) loop() (int, error) {
 	for {
+		if progressed, err := t.retryBlocked(); err != nil {
+			return 0, err
+		} else if progressed {
+			continue
+		}
 		var status syscall.WaitStatus
-		tid, err := syscall.Wait4(-1, &status, unix.WALL, nil)
+		waitFlags := unix.WALL
+		if len(t.blocked) > 0 {
+			waitFlags |= syscall.WNOHANG
+		}
+		tid, err := syscall.Wait4(-1, &status, waitFlags, nil)
 		if err != nil {
 			if errors.Is(err, syscall.ECHILD) {
 				return 0, nil
 			}
 			return 0, err
+		}
+		if tid == 0 {
+			time.Sleep(500 * time.Microsecond)
+			continue
 		}
 		switch {
 		case status.Exited():
@@ -243,10 +297,53 @@ func (t *tracer) loop() (int, error) {
 			}
 		case status.Stopped():
 			if err := t.handleStop(tid, status); err != nil {
+				if errors.Is(err, syscall.ESRCH) {
+					continue
+				}
 				return 0, err
 			}
 		}
 	}
+}
+
+func (t *tracer) retryBlocked() (bool, error) {
+	t.scrubStaleGuards()
+	for tid, blocked := range t.blocked {
+		switch t.shared.GuardDisposition(tid) {
+		case uwgshared.GuardOwnedBySelf:
+			delete(t.blocked, tid)
+			return true, t.resumeDefault(tid, blocked.seccompStop)
+		case uwgshared.GuardOwnedByOther:
+			continue
+		case uwgshared.GuardUnlocked:
+			delete(t.blocked, tid)
+			return true, t.dispatchInterceptedSyscall(tid, blocked.regs, blocked.seccompStop)
+		}
+	}
+	return false, nil
+}
+
+func (t *tracer) scrubStaleGuards() {
+	writer, readers := t.shared.GuardOwners()
+	if writer != 0 && !t.guardOwnerAlive(int(writer)) {
+		_ = t.shared.ClearGuardWriterOwner(writer)
+	}
+	for _, reader := range readers {
+		if !t.guardOwnerAlive(int(reader)) {
+			_ = t.shared.ClearGuardReaderOwner(reader)
+		}
+	}
+}
+
+func (t *tracer) guardOwnerAlive(tid int) bool {
+	if tid <= 0 {
+		return false
+	}
+	if _, ok := t.taskGroup[tid]; ok {
+		return true
+	}
+	err := syscall.Kill(tid, 0)
+	return err == nil || err == syscall.EPERM
 }
 
 func (t *tracer) handleStop(tid int, status syscall.WaitStatus) error {
@@ -282,6 +379,9 @@ func (t *tracer) handleStop(tid int, status syscall.WaitStatus) error {
 		t.setTaskGroup(tid, t.groupFor(tid))
 		return t.resume(tid)
 	case unix.PTRACE_EVENT_SECCOMP:
+		if _, ok := t.pending[tid]; ok {
+			return t.resumeForExit(tid)
+		}
 		return t.handleInterceptedSyscall(tid, true)
 	}
 	if status.StopSignal() == syscall.Signal(syscall.SIGTRAP|0x80) {
@@ -292,7 +392,7 @@ func (t *tracer) handleStop(tid int, status syscall.WaitStatus) error {
 			}
 			return err
 		}
-		if t.useSeccomp {
+		if t.seccompMode != SeccompNone {
 			if pending, ok := t.pending[tid]; ok {
 				delete(t.pending, tid)
 				return t.handlePendingExit(tid, pending, regs)
@@ -326,6 +426,23 @@ func (t *tracer) handleInterceptedSyscall(tid int, seccompStop bool) error {
 	if nr < 0 {
 		return t.resume(tid)
 	}
+	t.scrubStaleGuards()
+	switch t.shared.GuardDisposition(tid) {
+	case uwgshared.GuardOwnedBySelf:
+		return t.resumeDefault(tid, seccompStop)
+	case uwgshared.GuardOwnedByOther:
+		t.blocked[tid] = blockedSyscall{seccompStop: seccompStop, regs: regs}
+		return nil
+	}
+	return t.dispatchInterceptedSyscall(tid, regs, seccompStop)
+}
+
+func (t *tracer) dispatchInterceptedSyscall(tid int, regs unix.PtraceRegs, seccompStop bool) error {
+	nr := int64(regs.Orig_rax)
+	if nr < 0 {
+		return t.resume(tid)
+	}
+	t.countSyscall(nr)
 	if t.verbose {
 		fmt.Fprintf(os.Stderr, "uwgwrapper: tid=%d syscall=%d seccomp=%t rax=%d\n", tid, nr, seccompStop, int64(regs.Rax))
 	}
@@ -337,35 +454,35 @@ func (t *tracer) handleInterceptedSyscall(tid int, seccompStop bool) error {
 	case unix.SYS_BIND:
 		return t.handleBind(tid, regs, seccompStop)
 	case unix.SYS_LISTEN:
-		return t.handleListen(tid, regs)
+		return t.handleListen(tid, regs, seccompStop)
 	case unix.SYS_ACCEPT, unix.SYS_ACCEPT4:
-		return t.handleAccept(tid, regs, nr == unix.SYS_ACCEPT4)
+		return t.handleAccept(tid, regs, nr == unix.SYS_ACCEPT4, seccompStop)
 	case unix.SYS_CLOSE:
 		return t.handleClose(tid, regs, seccompStop)
 	case unix.SYS_SENDTO:
-		return t.handleSendto(tid, regs)
+		return t.handleSendto(tid, regs, seccompStop)
 	case unix.SYS_RECVFROM:
-		return t.handleRecvfrom(tid, regs)
+		return t.handleRecvfrom(tid, regs, seccompStop)
 	case unix.SYS_READ:
-		return t.handleRead(tid, regs)
+		return t.handleRead(tid, regs, seccompStop)
 	case unix.SYS_WRITE:
-		return t.handleWrite(tid, regs)
+		return t.handleWrite(tid, regs, seccompStop)
 	case unix.SYS_DUP:
 		return t.handleDup(tid, regs, seccompStop)
 	case unix.SYS_DUP2, unix.SYS_DUP3:
 		return t.handleDupN(tid, regs, nr == unix.SYS_DUP3, seccompStop)
 	case unix.SYS_GETSOCKNAME:
-		return t.handleGetSockName(tid, regs, false)
+		return t.handleGetSockName(tid, regs, false, seccompStop)
 	case unix.SYS_GETPEERNAME:
-		return t.handleGetSockName(tid, regs, true)
+		return t.handleGetSockName(tid, regs, true, seccompStop)
 	case unix.SYS_SHUTDOWN:
-		return t.handleShutdown(tid, regs)
+		return t.handleShutdown(tid, regs, seccompStop)
 	case unix.SYS_FCNTL:
-		return t.handleFcntl(tid, regs)
+		return t.handleFcntl(tid, regs, seccompStop)
 	case unix.SYS_GETSOCKOPT:
-		return t.handleGetSockOpt(tid, regs)
+		return t.handleGetSockOpt(tid, regs, seccompStop)
 	case unix.SYS_SETSOCKOPT:
-		return t.handleSetSockOpt(tid, regs)
+		return t.handleSetSockOpt(tid, regs, seccompStop)
 	default:
 		return t.resumeDefault(tid, seccompStop)
 	}
@@ -381,6 +498,9 @@ func (t *tracer) handleSocket(tid int, regs unix.PtraceRegs, seccompStop bool) e
 	base := typ & 0xf
 	if base != unix.SOCK_STREAM && base != unix.SOCK_DGRAM {
 		return t.resumeDefault(tid, seccompStop)
+	}
+	if t.verbose {
+		fmt.Fprintf(os.Stderr, "uwgwrapper: pending socket tid=%d domain=%d type=%d proto=%d\n", tid, domain, typ, proto)
 	}
 	t.pending[tid] = pendingSyscall{kind: pendingSocket, domain: domain, typ: typ, proto: proto}
 	return t.resumeForExit(tid)
@@ -424,6 +544,7 @@ func (t *tracer) handleConnect(tid int, regs unix.PtraceRegs, seccompStop bool) 
 	t.shared.Update(fd, func(entry *uwgshared.TrackedFD) {
 		entry.Proxied = 1
 		entry.Kind = kind
+		entry.HotReady = 0
 		entry.RemoteFamily = int32(addr.family)
 		entry.RemotePort = addr.port
 		uwgshared.StringToBytes(entry.RemoteIP[:], addr.ip)
@@ -454,15 +575,15 @@ func (t *tracer) handleBind(tid int, regs unix.PtraceRegs, seccompStop bool) err
 	return t.finishEmulated(tid, regs, 0, seccompStop)
 }
 
-func (t *tracer) handleListen(tid int, regs unix.PtraceRegs) error {
+func (t *tracer) handleListen(tid int, regs unix.PtraceRegs, seccompStop bool) error {
 	fd := int(int32(regs.Rdi))
 	state := t.shared.Snapshot(fd)
 	if state.Active == 0 || int(state.Type)&0xf != unix.SOCK_STREAM {
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
 	}
 	managerLocal, err := t.openManagerSocket()
 	if err != nil {
-		return t.finishEmulated(tid, regs, -errnoResult(err), false)
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 	}
 	bindIP := uwgshared.BytesToString(state.BindIP[:])
 	if bindIP == "" {
@@ -476,53 +597,54 @@ func (t *tracer) handleListen(tid int, regs unix.PtraceRegs) error {
 	reply, err := managerRequestLine(managerLocal, line)
 	if err != nil {
 		_ = unix.Close(managerLocal)
-		return t.finishEmulated(tid, regs, -errnoResult(err), false)
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 	}
 	if !strings.HasPrefix(reply, "OKLISTEN ") {
 		_ = unix.Close(managerLocal)
-		return t.finishEmulated(tid, regs, -int64(syscall.ECONNREFUSED), false)
+		return t.finishEmulated(tid, regs, -int64(syscall.ECONNREFUSED), seccompStop)
 	}
 	t.setLocalFD(procFD{pid: t.groupFor(tid), fd: fd}, managerLocal)
 	t.shared.Update(fd, func(entry *uwgshared.TrackedFD) {
 		entry.Proxied = 1
 		entry.Kind = uwgshared.KindTCPListener
+		entry.HotReady = 0
 	})
-	return t.finishEmulated(tid, regs, 0, false)
+	return t.finishEmulated(tid, regs, 0, seccompStop)
 }
 
-func (t *tracer) handleAccept(tid int, regs unix.PtraceRegs, accept4 bool) error {
+func (t *tracer) handleAccept(tid int, regs unix.PtraceRegs, accept4 bool, seccompStop bool) error {
 	fd := int(int32(regs.Rdi))
 	state := t.shared.Snapshot(fd)
 	if state.Proxied == 0 || state.Kind != uwgshared.KindTCPListener {
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
 	}
 	group := t.groupFor(tid)
 	localFD, err := t.ensureLocalFD(procFD{pid: group, fd: fd})
 	if err != nil {
-		return t.finishEmulated(tid, regs, -errnoResult(err), false)
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 	}
 	line, err := readLineFD(localFD)
 	if err != nil {
-		return t.finishEmulated(tid, regs, -errnoResult(err), false)
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 	}
 	var token, ip string
 	var attachID uint64
 	var port uint16
 	if _, err := fmt.Sscanf(line, "ACCEPT %s %d %s %d", &token, &attachID, &ip, &port); err != nil {
-		return t.finishEmulated(tid, regs, -int64(syscall.EPROTO), false)
+		return t.finishEmulated(tid, regs, -int64(syscall.EPROTO), seccompStop)
 	}
 	managerLocal, err := t.openManagerSocket()
 	if err != nil {
-		return t.finishEmulated(tid, regs, -errnoResult(err), false)
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 	}
 	reply, err := managerRequestLine(managerLocal, fmt.Sprintf("ATTACH %s %d\n", token, attachID))
 	if err != nil {
 		_ = unix.Close(managerLocal)
-		return t.finishEmulated(tid, regs, -errnoResult(err), false)
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 	}
 	if !strings.HasPrefix(reply, "OK") {
 		_ = unix.Close(managerLocal)
-		return t.finishEmulated(tid, regs, -int64(syscall.ECONNABORTED), false)
+		return t.finishEmulated(tid, regs, -int64(syscall.ECONNABORTED), seccompStop)
 	}
 	flags := 0
 	if accept4 {
@@ -571,35 +693,35 @@ func (t *tracer) handleClose(tid int, regs unix.PtraceRegs, seccompStop bool) er
 	return t.resumeForExit(tid)
 }
 
-func (t *tracer) handleRead(tid int, regs unix.PtraceRegs) error {
+func (t *tracer) handleRead(tid int, regs unix.PtraceRegs, seccompStop bool) error {
 	fd := int(int32(regs.Rdi))
 	state := t.shared.Snapshot(fd)
 	if state.Proxied == 0 {
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
 	}
 	if state.Kind == uwgshared.KindTCPStream || state.Kind == uwgshared.KindUDPConnected || state.Kind == uwgshared.KindUDPListener {
 		regs.R8 = 0
 		regs.R9 = 0
-		return t.handleRecvfrom(tid, regs)
+		return t.handleRecvfrom(tid, regs, seccompStop)
 	}
-	return t.resumeDefault(tid, false)
+	return t.resumeDefault(tid, seccompStop)
 }
 
-func (t *tracer) handleWrite(tid int, regs unix.PtraceRegs) error {
+func (t *tracer) handleWrite(tid int, regs unix.PtraceRegs, seccompStop bool) error {
 	fd := int(int32(regs.Rdi))
 	state := t.shared.Snapshot(fd)
 	if state.Proxied == 0 {
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
 	}
 	if state.Kind == uwgshared.KindTCPStream || state.Kind == uwgshared.KindUDPConnected || state.Kind == uwgshared.KindUDPListener {
 		regs.R8 = 0
 		regs.R9 = 0
-		return t.handleSendto(tid, regs)
+		return t.handleSendto(tid, regs, seccompStop)
 	}
-	return t.resumeDefault(tid, false)
+	return t.resumeDefault(tid, seccompStop)
 }
 
-func (t *tracer) handleSendto(tid int, regs unix.PtraceRegs) error {
+func (t *tracer) handleSendto(tid int, regs unix.PtraceRegs, seccompStop bool) error {
 	fd := int(int32(regs.Rdi))
 	state := t.shared.Snapshot(fd)
 	if state.Active != 0 && state.Proxied == 0 && int(state.Type)&0xf == unix.SOCK_DGRAM {
@@ -607,7 +729,7 @@ func (t *tracer) handleSendto(tid int, regs unix.PtraceRegs) error {
 		if err == nil && (dest.family == unix.AF_INET || dest.family == unix.AF_INET6) && !isLoopback(dest) {
 			managerLocal, openErr := t.openManagerSocket()
 			if openErr != nil {
-				return t.finishEmulated(tid, regs, -errnoResult(openErr), false)
+				return t.finishEmulated(tid, regs, -errnoResult(openErr), seccompStop)
 			}
 			bindIP := uwgshared.BytesToString(state.BindIP[:])
 			if bindIP == "" {
@@ -620,90 +742,91 @@ func (t *tracer) handleSendto(tid int, regs unix.PtraceRegs) error {
 			reply, reqErr := managerRequestLine(managerLocal, fmt.Sprintf("LISTEN udp %s %d\n", bindIP, state.BindPort))
 			if reqErr != nil {
 				_ = unix.Close(managerLocal)
-				return t.finishEmulated(tid, regs, -errnoResult(reqErr), false)
+				return t.finishEmulated(tid, regs, -errnoResult(reqErr), seccompStop)
 			}
 			if !strings.HasPrefix(reply, "OKUDP") {
 				_ = unix.Close(managerLocal)
-				return t.finishEmulated(tid, regs, -int64(syscall.ECONNREFUSED), false)
+				return t.finishEmulated(tid, regs, -int64(syscall.ECONNREFUSED), seccompStop)
 			}
 			t.setLocalFD(procFD{pid: t.groupFor(tid), fd: fd}, managerLocal)
 			t.shared.Update(fd, func(entry *uwgshared.TrackedFD) {
 				entry.Proxied = 1
 				entry.Kind = uwgshared.KindUDPListener
+				entry.HotReady = 0
 			})
 			state = t.shared.Snapshot(fd)
 		}
 	}
 	if state.Proxied == 0 {
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
 	}
 	localFD, err := t.ensureLocalFD(procFD{pid: t.groupFor(tid), fd: fd})
 	if err != nil {
-		return t.finishEmulated(tid, regs, -errnoResult(err), false)
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 	}
 	buf, err := t.readTraceeBytes(tid, uintptr(regs.Rsi), int(regs.Rdx))
 	if err != nil {
-		return t.finishEmulated(tid, regs, -errnoResult(err), false)
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 	}
 	switch state.Kind {
 	case uwgshared.KindTCPStream:
 		if regs.R8 != 0 {
-			return t.finishEmulated(tid, regs, -int64(syscall.EISCONN), false)
+			return t.finishEmulated(tid, regs, -int64(syscall.EISCONN), seccompStop)
 		}
 		n, err := unix.Write(localFD, buf)
 		if err != nil {
-			return t.finishEmulated(tid, regs, -errnoResult(err), false)
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
-		return t.finishEmulated(tid, regs, int64(n), false)
+		return t.finishEmulated(tid, regs, int64(n), seccompStop)
 	case uwgshared.KindUDPConnected:
 		if regs.R8 != 0 {
-			return t.finishEmulated(tid, regs, -int64(syscall.EISCONN), false)
+			return t.finishEmulated(tid, regs, -int64(syscall.EISCONN), seccompStop)
 		}
 		if err := writePacketFD(localFD, buf); err != nil {
-			return t.finishEmulated(tid, regs, -errnoResult(err), false)
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
-		return t.finishEmulated(tid, regs, int64(len(buf)), false)
+		return t.finishEmulated(tid, regs, int64(len(buf)), seccompStop)
 	case uwgshared.KindUDPListener:
 		if regs.R8 == 0 {
-			return t.finishEmulated(tid, regs, -int64(syscall.EDESTADDRREQ), false)
+			return t.finishEmulated(tid, regs, -int64(syscall.EDESTADDRREQ), seccompStop)
 		}
 		dest, err := t.readSockaddr(tid, uintptr(regs.R8), regs.R9)
 		if err != nil {
-			return t.finishEmulated(tid, regs, -errnoResult(err), false)
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
 		packet, err := encodeUDPDatagram(dest, buf)
 		if err != nil {
-			return t.finishEmulated(tid, regs, -errnoResult(err), false)
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
 		if err := writePacketFD(localFD, packet); err != nil {
-			return t.finishEmulated(tid, regs, -errnoResult(err), false)
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
-		return t.finishEmulated(tid, regs, int64(len(buf)), false)
+		return t.finishEmulated(tid, regs, int64(len(buf)), seccompStop)
 	default:
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
 	}
 }
 
-func (t *tracer) handleRecvfrom(tid int, regs unix.PtraceRegs) error {
+func (t *tracer) handleRecvfrom(tid int, regs unix.PtraceRegs, seccompStop bool) error {
 	fd := int(int32(regs.Rdi))
 	state := t.shared.Snapshot(fd)
 	if state.Proxied == 0 {
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
 	}
 	localFD, err := t.ensureLocalFD(procFD{pid: t.groupFor(tid), fd: fd})
 	if err != nil {
-		return t.finishEmulated(tid, regs, -errnoResult(err), false)
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 	}
 	switch state.Kind {
 	case uwgshared.KindTCPStream:
 		out := make([]byte, int(regs.Rdx))
 		n, err := unix.Read(localFD, out)
 		if err != nil {
-			return t.finishEmulated(tid, regs, -errnoResult(err), false)
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
 		if n > 0 {
 			if err := t.writeTracee(tid, uintptr(regs.Rsi), out[:n]); err != nil {
-				return t.finishEmulated(tid, regs, -errnoResult(err), false)
+				return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 			}
 		}
 		if regs.R8 != 0 && regs.R9 != 0 {
@@ -715,18 +838,18 @@ func (t *tracer) handleRecvfrom(tid int, regs unix.PtraceRegs) error {
 			_ = t.writeTracee(tid, uintptr(regs.R8), sa)
 			_ = t.writeUint32(tid, uintptr(regs.R9), uint32(saLen))
 		}
-		return t.finishEmulated(tid, regs, int64(n), false)
+		return t.finishEmulated(tid, regs, int64(n), seccompStop)
 	case uwgshared.KindUDPConnected:
 		packet, err := readPacketFD(localFD)
 		if err != nil {
-			return t.finishEmulated(tid, regs, -errnoResult(err), false)
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
 		out := packet
 		if len(out) > int(regs.Rdx) {
 			out = out[:int(regs.Rdx)]
 		}
 		if err := t.writeTracee(tid, uintptr(regs.Rsi), out); err != nil {
-			return t.finishEmulated(tid, regs, -errnoResult(err), false)
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
 		if regs.R8 != 0 && regs.R9 != 0 {
 			sa, saLen := sockaddrBytes(tracedSockaddr{
@@ -745,31 +868,31 @@ func (t *tracer) handleRecvfrom(tid int, regs unix.PtraceRegs) error {
 			_ = t.writeTracee(tid, uintptr(regs.R8), sa)
 			_ = t.writeUint32(tid, uintptr(regs.R9), uint32(saLen))
 		}
-		return t.finishEmulated(tid, regs, int64(len(out)), false)
+		return t.finishEmulated(tid, regs, int64(len(out)), seccompStop)
 	case uwgshared.KindUDPListener:
 		packet, err := readPacketFD(localFD)
 		if err != nil {
-			return t.finishEmulated(tid, regs, -errnoResult(err), false)
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
 		src, payload, err := decodeUDPDatagram(packet)
 		if err != nil {
-			return t.finishEmulated(tid, regs, -errnoResult(err), false)
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
 		out := payload
 		if len(out) > int(regs.Rdx) {
 			out = out[:int(regs.Rdx)]
 		}
 		if err := t.writeTracee(tid, uintptr(regs.Rsi), out); err != nil {
-			return t.finishEmulated(tid, regs, -errnoResult(err), false)
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
 		if regs.R8 != 0 && regs.R9 != 0 {
 			sa, saLen := sockaddrBytes(src)
 			_ = t.writeTracee(tid, uintptr(regs.R8), sa)
 			_ = t.writeUint32(tid, uintptr(regs.R9), uint32(saLen))
 		}
-		return t.finishEmulated(tid, regs, int64(len(out)), false)
+		return t.finishEmulated(tid, regs, int64(len(out)), seccompStop)
 	default:
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
 	}
 }
 
@@ -789,17 +912,17 @@ func (t *tracer) handleDupN(tid int, regs unix.PtraceRegs, dup3 bool, seccompSto
 	return t.resumeForExit(tid)
 }
 
-func (t *tracer) handleGetSockName(tid int, regs unix.PtraceRegs, peer bool) error {
+func (t *tracer) handleGetSockName(tid int, regs unix.PtraceRegs, peer bool, seccompStop bool) error {
 	fd := int(int32(regs.Rdi))
 	state := t.shared.Snapshot(fd)
 	if state.Proxied == 0 {
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
 	}
 	var sa tracedSockaddr
 	switch {
 	case peer:
 		if state.Kind != uwgshared.KindTCPStream && state.Kind != uwgshared.KindUDPConnected {
-			return t.finishEmulated(tid, regs, -int64(syscall.ENOTCONN), false)
+			return t.finishEmulated(tid, regs, -int64(syscall.ENOTCONN), seccompStop)
 		}
 		family := int(state.RemoteFamily)
 		if family == 0 {
@@ -832,56 +955,72 @@ func (t *tracer) handleGetSockName(tid int, regs unix.PtraceRegs, peer bool) err
 	if regs.Rsi != 0 && regs.Rdx != 0 {
 		raw, rawLen := sockaddrBytes(sa)
 		if err := t.writeTracee(tid, uintptr(regs.Rsi), raw); err != nil {
-			return t.finishEmulated(tid, regs, -errnoResult(err), false)
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
 		if err := t.writeUint32(tid, uintptr(regs.Rdx), uint32(rawLen)); err != nil {
-			return t.finishEmulated(tid, regs, -errnoResult(err), false)
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
 	}
-	return t.finishEmulated(tid, regs, 0, false)
+	return t.finishEmulated(tid, regs, 0, seccompStop)
 }
 
-func (t *tracer) handleShutdown(tid int, regs unix.PtraceRegs) error {
+func (t *tracer) handleShutdown(tid int, regs unix.PtraceRegs, seccompStop bool) error {
 	fd := int(int32(regs.Rdi))
 	how := int(int32(regs.Rsi))
 	state := t.shared.Snapshot(fd)
 	if state.Proxied == 0 {
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
+	}
+	if state.HotReady == 0 && (state.Kind == uwgshared.KindTCPStream || state.Kind == uwgshared.KindTCPListener) {
+		localFD, err := t.ensureLocalFD(procFD{pid: t.groupFor(tid), fd: fd})
+		if err != nil {
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+		}
+		if err := unix.Shutdown(localFD, how); err != nil {
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+		}
+		return t.finishEmulated(tid, regs, 0, seccompStop)
 	}
 	if state.Kind == uwgshared.KindUDPConnected || state.Kind == uwgshared.KindUDPListener {
 		if how == unix.SHUT_RD || how == unix.SHUT_WR || how == unix.SHUT_RDWR {
-			return t.finishEmulated(tid, regs, 0, false)
+			return t.finishEmulated(tid, regs, 0, seccompStop)
 		}
-		return t.finishEmulated(tid, regs, -int64(syscall.EINVAL), false)
+		return t.finishEmulated(tid, regs, -int64(syscall.EINVAL), seccompStop)
 	}
-	return t.resumeDefault(tid, false)
+	return t.resumeDefault(tid, seccompStop)
 }
 
-func (t *tracer) handleFcntl(tid int, regs unix.PtraceRegs) error {
+func (t *tracer) handleFcntl(tid int, regs unix.PtraceRegs, seccompStop bool) error {
 	fd := int(int32(regs.Rdi))
 	cmd := int(int32(regs.Rsi))
 	arg := int32(regs.Rdx)
 	state := t.shared.Snapshot(fd)
 	if state.Proxied == 0 {
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
 	}
 	switch cmd {
 	case unix.F_GETFL:
-		return t.finishEmulated(tid, regs, int64(state.SavedFL), false)
+		return t.finishEmulated(tid, regs, int64(state.SavedFL), seccompStop)
 	case unix.F_SETFL:
 		t.shared.Update(fd, func(entry *uwgshared.TrackedFD) { entry.SavedFL = arg })
-		return t.resumeDefault(tid, false)
+		if state.HotReady == 0 {
+			return t.finishEmulated(tid, regs, 0, seccompStop)
+		}
+		return t.resumeDefault(tid, seccompStop)
 	case unix.F_GETFD:
-		return t.finishEmulated(tid, regs, int64(state.SavedFDFL), false)
+		return t.finishEmulated(tid, regs, int64(state.SavedFDFL), seccompStop)
 	case unix.F_SETFD:
 		t.shared.Update(fd, func(entry *uwgshared.TrackedFD) { entry.SavedFDFL = arg })
-		return t.resumeDefault(tid, false)
+		if state.HotReady == 0 {
+			return t.finishEmulated(tid, regs, 0, seccompStop)
+		}
+		return t.resumeDefault(tid, seccompStop)
 	default:
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
 	}
 }
 
-func (t *tracer) handleGetSockOpt(tid int, regs unix.PtraceRegs) error {
+func (t *tracer) handleGetSockOpt(tid int, regs unix.PtraceRegs, seccompStop bool) error {
 	fd := int(int32(regs.Rdi))
 	level := int(int32(regs.Rsi))
 	optname := int(int32(regs.Rdx))
@@ -889,7 +1028,7 @@ func (t *tracer) handleGetSockOpt(tid int, regs unix.PtraceRegs) error {
 	optlenp := uintptr(regs.R8)
 	state := t.shared.Snapshot(fd)
 	if state.Proxied == 0 || optval == 0 || optlenp == 0 {
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
 	}
 	writeInt := func(v int32) error {
 		if err := t.writeTracee(tid, optval, int32Bytes(v)); err != nil {
@@ -902,40 +1041,43 @@ func (t *tracer) handleGetSockOpt(tid int, regs unix.PtraceRegs) error {
 		switch optname {
 		case unix.SO_ERROR:
 			if err := writeInt(0); err != nil {
-				return t.finishEmulated(tid, regs, -errnoResult(err), false)
+				return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 			}
-			return t.finishEmulated(tid, regs, 0, false)
+			return t.finishEmulated(tid, regs, 0, seccompStop)
 		case unix.SO_TYPE:
 			if err := writeInt(state.Type & 0xf); err != nil {
-				return t.finishEmulated(tid, regs, -errnoResult(err), false)
+				return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 			}
-			return t.finishEmulated(tid, regs, 0, false)
+			return t.finishEmulated(tid, regs, 0, seccompStop)
 		}
 	}
-	return t.resumeDefault(tid, false)
+	return t.resumeDefault(tid, seccompStop)
 }
 
-func (t *tracer) handleSetSockOpt(tid int, regs unix.PtraceRegs) error {
+func (t *tracer) handleSetSockOpt(tid int, regs unix.PtraceRegs, seccompStop bool) error {
 	fd := int(int32(regs.Rdi))
 	level := int(int32(regs.Rsi))
 	optname := int(int32(regs.Rdx))
 	state := t.shared.Snapshot(fd)
 	if state.Proxied == 0 {
-		return t.resumeDefault(tid, false)
+		return t.resumeDefault(tid, seccompStop)
 	}
 	if level == unix.SOL_SOCKET {
 		switch optname {
 		case unix.SO_KEEPALIVE, unix.SO_REUSEADDR, unix.SO_SNDBUF, unix.SO_RCVBUF:
-			return t.finishEmulated(tid, regs, 0, false)
+			return t.finishEmulated(tid, regs, 0, seccompStop)
 		}
 	}
-	return t.resumeDefault(tid, false)
+	return t.resumeDefault(tid, seccompStop)
 }
 
 func (t *tracer) handlePendingExit(tid int, pending pendingSyscall, regs unix.PtraceRegs) error {
 	switch pending.kind {
 	case pendingSocket:
 		fd := int(int64(regs.Rax))
+		if t.verbose {
+			fmt.Fprintf(os.Stderr, "uwgwrapper: socket exit tid=%d fd=%d\n", tid, fd)
+		}
 		if fd >= 0 && fd < uwgshared.MaxTrackedFD {
 			savedFL := int32(0)
 			if pending.typ&unix.SOCK_NONBLOCK != 0 {
@@ -951,6 +1093,7 @@ func (t *tracer) handlePendingExit(tid int, pending pendingSyscall, regs unix.Pt
 				entry.Domain = int32(pending.domain)
 				entry.Type = int32(pending.typ)
 				entry.Protocol = int32(pending.proto)
+				entry.HotReady = 0
 				entry.SavedFL = savedFL
 				entry.SavedFDFL = savedFDFL
 			})
@@ -1018,6 +1161,7 @@ func (t *tracer) handlePendingExit(tid int, pending pendingSyscall, regs unix.Pt
 			entry.Type = int32(pending.typ)
 			entry.Proxied = 1
 			entry.Kind = uwgshared.KindTCPStream
+			entry.HotReady = 0
 			entry.RemoteFamily = int32(pending.peer.family)
 			entry.RemotePort = pending.peer.port
 			entry.SavedFL = savedFL
@@ -1048,7 +1192,7 @@ func (t *tracer) resumeForExit(tid int) error {
 }
 
 func (t *tracer) resume(tid int) error {
-	if t.useSeccomp {
+	if t.seccompMode != SeccompNone {
 		if err := unix.PtraceCont(tid, 0); err != nil {
 			if errors.Is(err, syscall.ESRCH) {
 				return nil
@@ -1067,7 +1211,7 @@ func (t *tracer) resume(tid int) error {
 }
 
 func (t *tracer) resumeSignal(tid int, sig int) error {
-	if t.useSeccomp {
+	if t.seccompMode != SeccompNone {
 		if err := unix.PtraceCont(tid, sig); err != nil {
 			if errors.Is(err, syscall.ESRCH) {
 				return nil
@@ -1296,6 +1440,8 @@ func (t *tracer) clearLocalFD(key procFD) {
 }
 
 func (t *tracer) clearProcess(pid int) {
+	delete(t.blocked, pid)
+	delete(t.pending, pid)
 	t.localMu.Lock()
 	defer t.localMu.Unlock()
 	delete(t.pending, pid)
@@ -1622,6 +1768,101 @@ func errnoResult(err error) int64 {
 		return int64(errno)
 	}
 	return int64(syscall.EIO)
+}
+
+func (m SeccompMode) String() string {
+	switch m {
+	case SeccompSimple:
+		return "simple"
+	case SeccompSecret:
+		return "secret"
+	default:
+		return "none"
+	}
+}
+
+func parseSeccompMode(raw string) SeccompMode {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "simple":
+		return SeccompSimple
+	case "secret", "combo", "both":
+		return SeccompSecret
+	default:
+		return SeccompNone
+	}
+}
+
+func setNoNewPrivileges() error {
+	return unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+}
+
+func SetNoNewPrivileges() error {
+	return setNoNewPrivileges()
+}
+
+func (t *tracer) countSyscall(nr int64) {
+	if t == nil || t.stats.Syscalls == nil {
+		return
+	}
+	t.stats.Syscalls[syscallName(nr)]++
+}
+
+func (t *tracer) writeStats() {
+	if t == nil || t.statsPath == "" {
+		return
+	}
+	data, err := json.MarshalIndent(t.stats, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(t.statsPath, append(data, '\n'), 0o644)
+}
+
+func syscallName(nr int64) string {
+	switch nr {
+	case unix.SYS_SOCKET:
+		return "socket"
+	case unix.SYS_CONNECT:
+		return "connect"
+	case unix.SYS_BIND:
+		return "bind"
+	case unix.SYS_LISTEN:
+		return "listen"
+	case unix.SYS_ACCEPT:
+		return "accept"
+	case unix.SYS_ACCEPT4:
+		return "accept4"
+	case unix.SYS_CLOSE:
+		return "close"
+	case unix.SYS_SENDTO:
+		return "sendto"
+	case unix.SYS_RECVFROM:
+		return "recvfrom"
+	case unix.SYS_WRITE:
+		return "write"
+	case unix.SYS_READ:
+		return "read"
+	case unix.SYS_DUP:
+		return "dup"
+	case unix.SYS_DUP2:
+		return "dup2"
+	case unix.SYS_DUP3:
+		return "dup3"
+	case unix.SYS_GETSOCKNAME:
+		return "getsockname"
+	case unix.SYS_GETPEERNAME:
+		return "getpeername"
+	case unix.SYS_SHUTDOWN:
+		return "shutdown"
+	case unix.SYS_FCNTL:
+		return "fcntl"
+	case unix.SYS_GETSOCKOPT:
+		return "getsockopt"
+	case unix.SYS_SETSOCKOPT:
+		return "setsockopt"
+	default:
+		return strconv.FormatInt(nr, 10)
+	}
 }
 
 func int32Bytes(v int32) []byte {
