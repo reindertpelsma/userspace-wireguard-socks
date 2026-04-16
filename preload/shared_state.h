@@ -36,6 +36,8 @@ struct tracked_fd {
   int kind;
   int hot_ready;
   int bound;
+  int reuse_addr;
+  int reuse_port;
   int bind_family;
   uint16_t bind_port;
   char bind_ip[46];
@@ -108,7 +110,7 @@ static inline void uwg_rwlock_wrunlock(struct uwg_rwlock *lock) {
 }
 
 #define UWG_SHARED_MAGIC 0x55574753u
-#define UWG_SHARED_VERSION 4u
+#define UWG_SHARED_VERSION 5u
 
 static inline int uwg_guard_hold_slot(struct uwg_guardlock *lock, int32_t tid) {
   for (size_t i = 0; i < UWG_GUARD_SLOTS; i++) {

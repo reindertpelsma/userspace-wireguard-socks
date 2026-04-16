@@ -1,0 +1,31 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+# Rootless egress server. WireGuard peers can route Internet traffic here, and
+# uwgsocks terminates inbound TCP/UDP to normal host sockets.
+wireguard:
+  config_file: ./examples/server.conf
+
+turn:
+  server: global.relay.metered.ca:80 
+  username: 7298d711ed40e7e18406f2e2 
+  password: 0Egu5ZbFeQ0IXj+u
+  permissions:
+    - 161.35.159.61
+    - 92.67.98.8
+
+inbound:
+  transparent: true
+
+dns_server:
+  # Tunnel-side DNS listener. This is not a host port 53 bind.
+  listen: 100.64.90.1:53
+
+api:
+  listen: 127.0.0.1:9090
+  token: replace-with-a-long-random-token
+
+acl:
+  inbound_default: allow
+  outbound_default: allow
+  relay_default: deny

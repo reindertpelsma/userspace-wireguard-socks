@@ -140,17 +140,19 @@ Application -> uwgpreload.so overriding libc functions -> (local UNIX socket fil
 
 Supported by the wrapper
 - UDP/TCP sockets. ICMP ping sockets not supported
-- Binding TCP listeners sockets to the Wireguard tunnel. Binding is disabled by default, enable with `proxy.bind` in the config in `ugwsocks`
-- Unconnected UDP sockets. if binding is not enabled, unconnected UDP sockets cannot receive inbound connections.
+- Binding TCP listener sockets and unconnected UDP sockets to the WireGuard tunnel. Tunnel-side binding is disabled by default; enable it with `proxy.bind`/`socket_api.bind` in `uwgsocks`, and enable ports below 1024 with `proxy.lowbind`.
+- Connected TCP/UDP sockets preserve explicit `bind(2)` source IP/port when the destination is WireGuard-routed.
+- Unconnected UDP sockets can send to many peers. If binding is not enabled, inbound UDP is established-only: replies are delivered only from remotes the socket recently sent to.
 - Works across forks, multi process, multiple threads and executable boundaries
 - Full support for DNS tunneling to through Wireguard
-- Bypass for loopback connections. currently binding to 0.0.0.0 does not bind to loopback, will be fixed asap
+- Bypass for explicit loopback connections and binds. Binding TCP listeners or unconnected UDP sockets to `0.0.0.0` is handled by fdproxy as both the local application's loopback and the tunnel-side bind; uwgsocks itself never binds the caller's loopback because it may be remote over HTTP.
+- `SO_REUSEADDR`/`SO_REUSEPORT` works within a single fdproxy instance for TCP listener distribution and UDP loopback datagram distribution.
 
 Limitations of the wrapper:
 - the wrapper cannot intercept connections of static binaries/libraries not linked to libc.
 - the wrapper does not work across user boundaries, that is the application cannot switch user like apt, sudo etc, if it does the connection either fails or bypasses Wireguard. Every user needs its own wrapper 
 - the wrapper does not inferere with loopback connections
-- partial bind(2) support. bind is only supported for TCP listeners and unconnected UDP sockets. binding is ignored for connected TCP/UDP sockets.
+- `SO_REUSEPORT` is local to one fdproxy instance/wrapper and is not coordinated across multiple fdproxy processes.
 - not all applications are supported, support is experimental
 
 *NOTE*: Its highly recommended to use SOCKS or HTTP proxy for applications supporting it instead of the wrapper. Use the wrapper only to tunnel applications that do not support SOCKS/HTTP proxies. For applications requiring inbound connections, prefer using the [proxy protocol](https://www.haproxy.com/blog/use-the-proxy-protocol-to-preserve-a-clients-ip-address). If you bind SOCKS5 to loopback, you can combine it with the launcher wrapper since loopback is bypassed
@@ -264,6 +266,7 @@ proxy:
       subnets: [203.0.113.0/24]
   udp_associate: true
   bind: false
+  lowbind: false
   prefer_ipv6_for_udp_over_socks: false
 
 host_forward:
@@ -698,7 +701,9 @@ multiple remotes from one bound UDP socket and receive replies only from those
 recently contacted IP:port pairs. That state follows the UDP idle timer. A UDP
 socket can also be reconnected by sending a `connect` frame with
 `listener_connection_id` set to the existing UDP socket ID; an all-zero
-destination disconnects it again.
+destination disconnects it back to unconnected UDP. Set `proxy.lowbind: true`
+only when raw socket/fdproxy clients should be allowed to bind ports below
+1024.
 
 
 ## Local Demo Troubleshooting

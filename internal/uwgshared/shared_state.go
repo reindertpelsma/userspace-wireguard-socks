@@ -16,7 +16,7 @@ import (
 const (
 	MaxTrackedFD  = 65536
 	SharedMagic   = 0x55574753
-	SharedVersion = 4
+	SharedVersion = 5
 	MaxGuardSlots = 256
 
 	KindNone         = 0
@@ -35,6 +35,8 @@ type TrackedFD struct {
 	Kind         int32
 	HotReady     int32
 	Bound        int32
+	ReuseAddr    int32
+	ReusePort    int32
 	BindFamily   int32
 	BindPort     uint16
 	BindIP       [46]byte

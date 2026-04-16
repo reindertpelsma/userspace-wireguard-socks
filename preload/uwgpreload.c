@@ -1264,6 +1264,75 @@ static ssize_t decode_udp_datagram(const void *packet, size_t packet_len,
   return (ssize_t)copy;
 }
 
+static void default_bind_text(int family, char *ip, size_t len) {
+  if (!ip || len == 0)
+    return;
+  snprintf(ip, len, "%s", family == AF_INET6 ? "::" : "0.0.0.0");
+}
+
+static void tracked_bind_text(const struct tracked_fd *state, char *ip,
+                              size_t len) {
+  if (!state || !ip || len == 0)
+    return;
+  if (state->bound && state->bind_ip[0]) {
+    snprintf(ip, len, "%s", state->bind_ip);
+    return;
+  }
+  default_bind_text(state->domain == AF_INET6 ? AF_INET6 : AF_INET, ip, len);
+}
+
+static int parse_connect_reply(const char *reply, char *ip, size_t ip_len,
+                               uint16_t *port) {
+  unsigned int port_u = 0;
+  if (!reply || strncmp(reply, "OK", 2) != 0)
+    return -1;
+  if (ip && ip_len > 0)
+    ip[0] = 0;
+  if (port)
+    *port = 0;
+  if (sscanf(reply + 2, " %45s %u", ip, &port_u) == 2 && port)
+    *port = (uint16_t)port_u;
+  return 0;
+}
+
+static int parse_udp_listen_reply(const char *reply, char *ip, size_t ip_len,
+                                  uint16_t *port) {
+  unsigned int port_u = 0;
+  if (!reply || strncmp(reply, "OKUDP", 5) != 0)
+    return -1;
+  if (ip && ip_len > 0)
+    ip[0] = 0;
+  if (port)
+    *port = 0;
+  if (sscanf(reply + 5, " %45s %u", ip, &port_u) == 2 && port)
+    *port = (uint16_t)port_u;
+  return 0;
+}
+
+static int parse_tcp_listen_reply(const char *reply, char *token,
+                                  size_t token_len, char *ip, size_t ip_len,
+                                  uint16_t *port) {
+  char local_token[80];
+  unsigned int port_u = 0;
+  int count;
+  if (!reply || strncmp(reply, "OKLISTEN ", 9) != 0)
+    return -1;
+  if (token && token_len > 0)
+    token[0] = 0;
+  if (ip && ip_len > 0)
+    ip[0] = 0;
+  if (port)
+    *port = 0;
+  count = sscanf(reply + 9, " %79s %45s %u", local_token, ip, &port_u);
+  if (count < 1)
+    return -1;
+  if (token && token_len > 0)
+    snprintf(token, token_len, "%s", local_token);
+  if (count == 3 && port)
+    *port = (uint16_t)port_u;
+  return 0;
+}
+
 static int proxy_connect(int fd, const struct sockaddr *addr,
                          socklen_t addrlen) {
   (void)addrlen;
@@ -1280,27 +1349,39 @@ static int proxy_connect(int fd, const struct sockaddr *addr,
     return real_connect_call(fd, addr, addrlen);
   }
   char ip[INET6_ADDRSTRLEN];
+  char bind_ip[INET6_ADDRSTRLEN];
   uint16_t port = 0;
+  uint16_t bind_port = 0;
   int family = 0;
   if (sockaddr_to_ip_port(addr, ip, sizeof(ip), &port, &family) != 0) {
     return real_connect_call(fd, addr, addrlen);
   }
+  tracked_bind_text(&state, bind_ip, sizeof(bind_ip));
+  bind_port = state.bound ? state.bind_port : 0;
   int base = state.type & SOCK_TYPE_MASK;
   const char *proto = base == SOCK_DGRAM ? "udp" : "tcp";
   char line[256], ok[128];
-  snprintf(line, sizeof(line), "CONNECT %s %s %u\n", proto, ip, (unsigned)port);
+  snprintf(line, sizeof(line), "CONNECT %s %s %u %s %u\n", proto, ip,
+           (unsigned)port, bind_ip, (unsigned)bind_port);
   int manager_fd = manager_request(line, ok, sizeof(ok));
   if (manager_fd < 0)
     return -1;
   if (debug_enabled())
     debugf("proxy_connect proto=%s fd=%d reply=%s", proto, fd, ok);
-  if (strncmp(ok, "OK", 2) != 0) {
+  char actual_bind_ip[INET6_ADDRSTRLEN];
+  uint16_t actual_bind_port = 0;
+  if (parse_connect_reply(ok, actual_bind_ip, sizeof(actual_bind_ip),
+                          &actual_bind_port) != 0) {
     real_close_call(manager_fd);
     errno = ECONNREFUSED;
     return -1;
   }
   if (fd_ok(fd)) {
     hot_path_wrlock();
+    state.bound = 1;
+    if (actual_bind_ip[0])
+      snprintf(state.bind_ip, sizeof(state.bind_ip), "%s", actual_bind_ip);
+    state.bind_port = actual_bind_port;
     state.remote_family = family;
     state.remote_port = port;
     snprintf(state.remote_ip, sizeof(state.remote_ip), "%s", ip);
@@ -1324,24 +1405,33 @@ static int ensure_udp_listener(int fd, int family) {
   }
   char ip[INET6_ADDRSTRLEN];
   uint16_t port = 0;
-  if (state.bound) {
-    snprintf(ip, sizeof(ip), "%s", state.bind_ip);
-    port = state.bind_port;
-  } else if (family == AF_INET6) {
-    snprintf(ip, sizeof(ip), "::");
-  } else {
-    snprintf(ip, sizeof(ip), "0.0.0.0");
-  }
+  tracked_bind_text(&state, ip, sizeof(ip));
+  port = state.bound ? state.bind_port : 0;
   char line[256], ok[128];
-  snprintf(line, sizeof(line), "LISTEN udp %s %u\n", ip, (unsigned)port);
+  snprintf(line, sizeof(line), "LISTEN udp %s %u %d %d\n", ip,
+           (unsigned)port, state.reuse_addr ? 1 : 0,
+           state.reuse_port ? 1 : 0);
   int manager_fd = manager_request(line, ok, sizeof(ok));
   if (manager_fd < 0)
     return -1;
-  if (strncmp(ok, "OKUDP", 5) != 0) {
+  char actual_bind_ip[INET6_ADDRSTRLEN];
+  uint16_t actual_bind_port = 0;
+  if (parse_udp_listen_reply(ok, actual_bind_ip, sizeof(actual_bind_ip),
+                             &actual_bind_port) != 0) {
     real_close_fn(manager_fd);
     errno = ECONNREFUSED;
     return -1;
   }
+  hot_path_wrlock();
+  state = tracked_snapshot(fd);
+  state.bound = 1;
+  if (!state.bind_ip[0])
+    default_bind_text(family == AF_INET6 ? AF_INET6 : AF_INET, state.bind_ip,
+                      sizeof(state.bind_ip));
+  if (actual_bind_port != 0)
+    state.bind_port = actual_bind_port;
+  tracked_store(fd, &state);
+  hot_path_wrunlock();
   return replace_fd(fd, manager_fd, KIND_UDP_LISTENER);
 }
 
@@ -1353,18 +1443,35 @@ static int start_tcp_listener(int fd) {
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
   hot_path_rdunlock();
-  const char *ip = state.bound ? state.bind_ip : "0.0.0.0";
+  char ip[INET6_ADDRSTRLEN];
+  tracked_bind_text(&state, ip, sizeof(ip));
   uint16_t port = state.bound ? state.bind_port : 0;
   char line[256], ok[128];
-  snprintf(line, sizeof(line), "LISTEN tcp %s %u\n", ip, (unsigned)port);
+  snprintf(line, sizeof(line), "LISTEN tcp %s %u %d %d\n", ip,
+           (unsigned)port, state.reuse_addr ? 1 : 0,
+           state.reuse_port ? 1 : 0);
   int manager_fd = manager_request(line, ok, sizeof(ok));
   if (manager_fd < 0)
     return -1;
-  if (strncmp(ok, "OKLISTEN ", 9) != 0) {
+  char actual_bind_ip[INET6_ADDRSTRLEN];
+  char token[80];
+  uint16_t actual_bind_port = 0;
+  if (parse_tcp_listen_reply(ok, token, sizeof(token), actual_bind_ip,
+                             sizeof(actual_bind_ip), &actual_bind_port) != 0) {
     real_close_fn(manager_fd);
     errno = ECONNREFUSED;
     return -1;
   }
+  hot_path_wrlock();
+  state = tracked_snapshot(fd);
+  state.bound = 1;
+  if (!state.bind_ip[0])
+    default_bind_text(state.domain == AF_INET6 ? AF_INET6 : AF_INET,
+                      state.bind_ip, sizeof(state.bind_ip));
+  if (actual_bind_port != 0)
+    state.bind_port = actual_bind_port;
+  tracked_store(fd, &state);
+  hot_path_wrunlock();
   return replace_fd(fd, manager_fd, KIND_TCP_LISTENER);
 }
 
@@ -1762,6 +1869,17 @@ ssize_t recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *src,
   struct tracked_fd state = tracked_snapshot(fd);
   int cold = fd_ok(fd) && should_cold_path(&state);
   hot_path_rdunlock();
+  if (fd_ok(fd) && state.active && !state.proxied &&
+      (state.type & SOCK_TYPE_MASK) == SOCK_DGRAM && state.bound) {
+    int family = state.bind_family ? state.bind_family :
+                 (state.domain == AF_INET6 ? AF_INET6 : AF_INET);
+    if (ensure_udp_listener(fd, family) != 0)
+      return -1;
+    hot_path_rdlock();
+    state = tracked_snapshot(fd);
+    cold = fd_ok(fd) && should_cold_path(&state);
+    hot_path_rdunlock();
+  }
   if (cold)
     return (ssize_t)cold_syscall(SYS_recvfrom, fd, (long)buf, (long)len, flags,
                                  (long)src, (long)srclen);
@@ -2161,9 +2279,9 @@ int getsockopt(int fd, int level, int optname, void *optval,
     return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
-  int proxied = fd_ok(fd) && state.proxied && optval && optlen;
+  int managed = fd_ok(fd) && (state.active || state.proxied) && optval && optlen;
   hot_path_rdunlock();
-  if (proxied) {
+  if (managed) {
     if (level == SOL_SOCKET) {
       if (optname == SO_ERROR && *optlen >= sizeof(int)) {
         *(int *)optval = 0;
@@ -2196,6 +2314,18 @@ int getsockopt(int fd, int level, int optname, void *optval,
         return 0;
       }
 #endif
+      if (optname == SO_REUSEADDR && *optlen >= sizeof(int)) {
+        *(int *)optval = state.reuse_addr ? 1 : 0;
+        *optlen = sizeof(int);
+        return 0;
+      }
+#ifdef SO_REUSEPORT
+      if (optname == SO_REUSEPORT && *optlen >= sizeof(int)) {
+        *(int *)optval = state.reuse_port ? 1 : 0;
+        *optlen = sizeof(int);
+        return 0;
+      }
+#endif
     }
 #ifdef IPPROTO_TCP
 #ifdef TCP_NODELAY
@@ -2218,8 +2348,28 @@ int setsockopt(int fd, int level, int optname, const void *optval,
     return -1;
   hot_path_rdlock();
   struct tracked_fd state = tracked_snapshot(fd);
+  int tracked_socket = fd_ok(fd) && (state.active || state.proxied);
   int proxied = fd_ok(fd) && state.proxied;
   hot_path_rdunlock();
+  if (tracked_socket && level == SOL_SOCKET && optval && optlen >= sizeof(int)) {
+    int value = *(const int *)optval;
+    if (optname == SO_REUSEADDR) {
+      hot_path_wrlock();
+      state = tracked_snapshot(fd);
+      state.reuse_addr = value ? 1 : 0;
+      tracked_store(fd, &state);
+      hot_path_wrunlock();
+    }
+#ifdef SO_REUSEPORT
+    if (optname == SO_REUSEPORT) {
+      hot_path_wrlock();
+      state = tracked_snapshot(fd);
+      state.reuse_port = value ? 1 : 0;
+      tracked_store(fd, &state);
+      hot_path_wrunlock();
+    }
+#endif
+  }
   if (proxied) {
     if (level == SOL_SOCKET) {
       switch (optname) {
