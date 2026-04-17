@@ -2432,7 +2432,9 @@ ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
   if (tracked_reentrant_socket_fd(fd))
     return -1;
   struct tracked_fd state = tracked_snapshot(fd);
-  if (fd_ok(fd) && state.proxied) {
+  int dgram = fd_ok(fd) && state.active &&
+              (state.type & SOCK_TYPE_MASK) == SOCK_DGRAM;
+  if (fd_ok(fd) && msg && (state.proxied || (dgram && msg->msg_name))) {
     size_t len = 0, off = 0;
     for (size_t i = 0; i < msg->msg_iovlen; i++)
       len += msg->msg_iov[i].iov_len;
@@ -2446,12 +2448,13 @@ ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
       off += msg->msg_iov[i].iov_len;
     }
     ssize_t r;
-    if ((state.kind == KIND_UDP_LISTENER || state.kind == KIND_UDP_CONNECTED) &&
-        msg->msg_name) {
+    if (dgram && msg->msg_name) {
       r = sendto(fd, buf, len, flags, (const struct sockaddr *)msg->msg_name,
                  msg->msg_namelen);
-    } else {
+    } else if (state.proxied) {
       r = send(fd, buf, len, flags);
+    } else {
+      r = real_sendmsg_fn ? real_sendmsg_fn(fd, msg, flags) : -1;
     }
     free(buf);
     return r;

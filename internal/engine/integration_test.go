@@ -1603,6 +1603,77 @@ func TestRelayACLDenyThenAllow(t *testing.T) {
 	}
 }
 
+func TestRelayConntrackACLWithThreePeers(t *testing.T) {
+	serverKey, c1Key, c2Key, c3Key := mustKey(t), mustKey(t), mustKey(t), mustKey(t)
+	serverPort := freeUDPPort(t)
+
+	serverCfg := config.Default()
+	serverCfg.WireGuard.PrivateKey = serverKey.String()
+	relay := true
+	serverCfg.Relay.Enabled = &relay
+	serverCfg.ACL.RelayDefault = acl.Deny
+	serverCfg.ACL.Relay = []acl.Rule{{
+		Action:      acl.Allow,
+		Protocol:    "tcp",
+		Source:      "100.64.50.2/32",
+		Destination: "100.64.50.3/32",
+		DestPort:    "18080",
+	}}
+	serverCfg.WireGuard.ListenPort = &serverPort
+	serverCfg.WireGuard.Addresses = []string{"100.64.50.1/32"}
+	serverCfg.WireGuard.Peers = []config.Peer{
+		{PublicKey: c1Key.PublicKey().String(), AllowedIPs: []string{"100.64.50.2/32"}},
+		{PublicKey: c2Key.PublicKey().String(), AllowedIPs: []string{"100.64.50.3/32"}},
+		{PublicKey: c3Key.PublicKey().String(), AllowedIPs: []string{"100.64.50.4/32"}},
+	}
+	mustStart(t, serverCfg)
+
+	clientCfg := func(key wgtypes.Key, addr string, allowed ...string) config.Config {
+		cfg := config.Default()
+		cfg.WireGuard.PrivateKey = key.String()
+		cfg.WireGuard.Addresses = []string{addr}
+		cfg.WireGuard.Peers = []config.Peer{{
+			PublicKey:           serverKey.PublicKey().String(),
+			Endpoint:            fmt.Sprintf("127.0.0.1:%d", serverPort),
+			AllowedIPs:          allowed,
+			PersistentKeepalive: 1,
+		}}
+		return cfg
+	}
+	c1 := mustStart(t, clientCfg(c1Key, "100.64.50.2/32", "100.64.50.3/32"))
+	c2 := mustStart(t, clientCfg(c2Key, "100.64.50.3/32", "100.64.50.2/32", "100.64.50.4/32"))
+	c3 := mustStart(t, clientCfg(c3Key, "100.64.50.4/32", "100.64.50.3/32"))
+
+	ln, err := c2.ListenTCP(netip.MustParseAddrPort("100.64.50.3:18080"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go serveEchoListener(ln)
+
+	conn := retryEngineDial(t, c1, "tcp", "100.64.50.3:18080")
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Write([]byte("relay-conntrack-three-peers")); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len("relay-conntrack-three-peers"))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "relay-conntrack-three-peers" {
+		t.Fatalf("relay conntrack echo mismatch: got %q", got)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	denied, err := c3.DialContext(ctx, "tcp", "100.64.50.3:18080")
+	cancel()
+	if err == nil {
+		_ = denied.Close()
+		t.Fatal("third peer connected even though relay ACL only allows peer one")
+	}
+}
+
 func TestStressImpairedNetworkAndAPIMutation(t *testing.T) {
 	hostIP := nonLoopbackIPv4(t)
 	echo := startEchoServer(t)

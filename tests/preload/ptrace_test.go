@@ -208,6 +208,85 @@ func TestUWGWrapperCurlAcrossTransports(t *testing.T) {
 	}
 }
 
+func TestUWGWrapperMessageSyscallsAcrossTransports(t *testing.T) {
+	requireWrapperToolchain(t)
+	art := buildWrapperArtifacts(t)
+	_, httpSock := setupWrapperNetwork(t)
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "tcp-sendmsg-recvmsg",
+			args: []string{"100.64.94.1", "18080", "tcp-msg", "tcp", "msg"},
+			want: "tcp-msg",
+		},
+		{
+			name: "udp-sendmsg-recvmsg",
+			args: []string{"100.64.94.1", "18081", "udp-msg", "udp", "msg"},
+			want: "udp-msg",
+		},
+		{
+			name: "udp-unconnected-sendmsg-recvmsg",
+			args: []string{"100.64.94.1", "18081", "udp-unconnected-msg", "udp-unconnected", "msg"},
+			want: "udp-unconnected-msg",
+		},
+		{
+			name: "udp-sendmmsg-recvmmsg",
+			args: []string{"100.64.94.1", "18081", "udp-mmsg", "udp", "mmsg"},
+			want: "udp-mmsg",
+		},
+	}
+	transports := []string{"preload", "preload-and-ptrace", "ptrace", "ptrace-seccomp", "ptrace-only"}
+	for _, transport := range transports {
+		for _, tc := range cases {
+			t.Run(transport+"/"+tc.name, func(t *testing.T) {
+				out := runWrappedTargetWithOptions(t, art, httpSock, transport, art.stub, tc.args, wrapperRunOptions{
+					timeout: 60 * time.Second,
+				})
+				if normalizedOutput(out) != tc.want {
+					t.Fatalf("unexpected %s output %q", tc.name, out)
+				}
+			})
+		}
+	}
+}
+
+func TestUWGWrapperPtraceSeccompSocketSyscallSurfaceStats(t *testing.T) {
+	requireWrapperToolchain(t)
+	art := buildWrapperArtifacts(t)
+	_, httpSock := setupWrapperNetwork(t)
+
+	out, stats := runWrappedTargetWithStats(t, art, httpSock, "ptrace-seccomp", art.stub,
+		[]string{"100.64.94.1", "18080", "syscall-surface", "tcp", "syscall-surface"},
+		wrapperRunOptions{timeout: 60 * time.Second})
+	if normalizedOutput(out) != "syscall-surface" {
+		t.Fatalf("unexpected syscall surface output %q", out)
+	}
+	for _, name := range []string{
+		"socket",
+		"connect",
+		"write",
+		"read",
+		"dup",
+		"dup2",
+		"dup3",
+		"getsockname",
+		"getpeername",
+		"shutdown",
+		"fcntl",
+		"getsockopt",
+		"setsockopt",
+		"poll",
+		"ppoll",
+		"close",
+	} {
+		assertSyscallAtLeast(t, stats, name, 1)
+	}
+}
+
 func TestUWGWrapperUDPConnectProbeLazy(t *testing.T) {
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)
@@ -487,7 +566,12 @@ func setupWrapperNetwork(t *testing.T) (*engine.Engine, string) {
 
 func wrappedCommand(t *testing.T, art wrapperArtifacts, httpSock, transport, target string, args []string, opts wrapperRunOptions) *exec.Cmd {
 	t.Helper()
-	listenSock := filepath.Join(t.TempDir(), fmt.Sprintf("fdproxy-%s.sock", strings.ReplaceAll(transport, "/", "_")))
+	listenDir, err := os.MkdirTemp("", "uwgfdproxy-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(listenDir) })
+	listenSock := filepath.Join(listenDir, fmt.Sprintf("fdproxy-%s.sock", strings.ReplaceAll(transport, "/", "_")))
 	cmdArgs := []string{"--transport=" + transport, "--listen", listenSock, "--api", "unix:" + httpSock, "--socket-path", "/uwg/socket"}
 	if os.Getenv("UWGS_TEST_DEBUG") != "" {
 		cmdArgs = append([]string{"-v"}, cmdArgs...)
@@ -657,6 +741,14 @@ func assertSyscallCount(t *testing.T, stats traceStats, name string, want uint64
 	got := stats.Syscalls[name]
 	if got != want {
 		t.Fatalf("expected traced syscall %s=%d, got %d (all=%v)", name, want, got, stats.Syscalls)
+	}
+}
+
+func assertSyscallAtLeast(t *testing.T, stats traceStats, name string, want uint64) {
+	t.Helper()
+	got := stats.Syscalls[name]
+	if got < want {
+		t.Fatalf("expected traced syscall %s>=%d, got %d (all=%v)", name, want, got, stats.Syscalls)
 	}
 }
 

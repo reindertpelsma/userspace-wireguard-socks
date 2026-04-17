@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 /*
  * Copyright (c) 2026 Reindert Pelsma
  * SPDX-License-Identifier: ISC
@@ -5,6 +7,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/ip_icmp.h>
 #include <netinet/icmp6.h>
@@ -197,6 +200,227 @@ static int echo_connected_udp_nopoll(int fd, const char *message) {
         return 1;
     }
     buf[n] = 0;
+    printf("%s", buf);
+    return strcmp(buf, message) == 0 ? 0 : 1;
+}
+
+static int echo_sendmsg_recvmsg(int fd, const char *message, const struct sockaddr *dest, socklen_t destlen) {
+    size_t want = strlen(message);
+    size_t split = want / 2;
+    struct iovec send_iov[2];
+    send_iov[0].iov_base = (void *)message;
+    send_iov[0].iov_len = split;
+    send_iov[1].iov_base = (void *)(message + split);
+    send_iov[1].iov_len = want - split;
+    struct msghdr send_msg;
+    memset(&send_msg, 0, sizeof(send_msg));
+    send_msg.msg_iov = send_iov;
+    send_msg.msg_iovlen = 2;
+    if (dest) {
+        send_msg.msg_name = (void *)dest;
+        send_msg.msg_namelen = destlen;
+    }
+    if (sendmsg(fd, &send_msg, 0) != (ssize_t)want) {
+        perror("sendmsg");
+        return 1;
+    }
+
+    char left[2048];
+    char right[2048];
+    struct sockaddr_storage src;
+    memset(&src, 0, sizeof(src));
+    struct iovec recv_iov[2];
+    recv_iov[0].iov_base = left;
+    recv_iov[0].iov_len = sizeof(left);
+    recv_iov[1].iov_base = right;
+    recv_iov[1].iov_len = sizeof(right) - 1;
+    struct msghdr recv_msg;
+    memset(&recv_msg, 0, sizeof(recv_msg));
+    recv_msg.msg_name = &src;
+    recv_msg.msg_namelen = sizeof(src);
+    recv_msg.msg_iov = recv_iov;
+    recv_msg.msg_iovlen = 2;
+    ssize_t n = recvmsg(fd, &recv_msg, 0);
+    if (n < 0) {
+        perror("recvmsg");
+        return 1;
+    }
+    char combined[4096];
+    if ((size_t)n >= sizeof(combined)) {
+        fprintf(stderr, "recvmsg payload too large\n");
+        return 1;
+    }
+    size_t first = (size_t)n < sizeof(left) ? (size_t)n : sizeof(left);
+    memcpy(combined, left, first);
+    if ((size_t)n > first) {
+        memcpy(combined + first, right, (size_t)n - first);
+    }
+    combined[n] = 0;
+    printf("%s", combined);
+    return strcmp(combined, message) == 0 ? 0 : 1;
+}
+
+static int echo_udp_mmsg(int fd, const char *message) {
+    char first[2048];
+    char second[2048];
+    snprintf(first, sizeof(first), "%s-a", message);
+    snprintf(second, sizeof(second), "%s-b", message);
+
+    struct iovec send_iov[2];
+    send_iov[0].iov_base = first;
+    send_iov[0].iov_len = strlen(first);
+    send_iov[1].iov_base = second;
+    send_iov[1].iov_len = strlen(second);
+    struct mmsghdr send_msgs[2];
+    memset(send_msgs, 0, sizeof(send_msgs));
+    send_msgs[0].msg_hdr.msg_iov = &send_iov[0];
+    send_msgs[0].msg_hdr.msg_iovlen = 1;
+    send_msgs[1].msg_hdr.msg_iov = &send_iov[1];
+    send_msgs[1].msg_hdr.msg_iovlen = 1;
+    if (sendmmsg(fd, send_msgs, 2, 0) != 2) {
+        perror("sendmmsg");
+        return 1;
+    }
+    if (send_msgs[0].msg_len != strlen(first) || send_msgs[1].msg_len != strlen(second)) {
+        fprintf(stderr, "sendmmsg length mismatch\n");
+        return 1;
+    }
+
+    char recv_first[2048];
+    char recv_second[2048];
+    struct iovec recv_iov[2];
+    recv_iov[0].iov_base = recv_first;
+    recv_iov[0].iov_len = sizeof(recv_first) - 1;
+    recv_iov[1].iov_base = recv_second;
+    recv_iov[1].iov_len = sizeof(recv_second) - 1;
+    struct mmsghdr recv_msgs[2];
+    memset(recv_msgs, 0, sizeof(recv_msgs));
+    recv_msgs[0].msg_hdr.msg_iov = &recv_iov[0];
+    recv_msgs[0].msg_hdr.msg_iovlen = 1;
+    recv_msgs[1].msg_hdr.msg_iov = &recv_iov[1];
+    recv_msgs[1].msg_hdr.msg_iovlen = 1;
+    struct timespec timeout;
+    timeout.tv_sec = 3;
+    timeout.tv_nsec = 0;
+    if (recvmmsg(fd, recv_msgs, 2, 0, &timeout) != 2) {
+        perror("recvmmsg");
+        return 1;
+    }
+    recv_first[recv_msgs[0].msg_len] = 0;
+    recv_second[recv_msgs[1].msg_len] = 0;
+    if (strcmp(recv_first, first) != 0 || strcmp(recv_second, second) != 0) {
+        fprintf(stderr, "recvmmsg payload mismatch: %s %s\n", recv_first, recv_second);
+        return 1;
+    }
+    printf("%s", message);
+    return 0;
+}
+
+static int exercise_socket_syscall_surface(int fd, const char *message) {
+    int one = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one)) != 0) {
+        perror("surface setsockopt");
+        return 1;
+    }
+    int opt = 0;
+    socklen_t optlen = sizeof(opt);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &opt, &optlen) != 0 || opt != 0) {
+        perror("surface getsockopt");
+        return 1;
+    }
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags) != 0) {
+        perror("surface fcntl flags");
+        return 1;
+    }
+    int fdflags = fcntl(fd, F_GETFD, 0);
+    if (fdflags < 0 || fcntl(fd, F_SETFD, fdflags | FD_CLOEXEC) != 0) {
+        perror("surface fcntl fdflags");
+        return 1;
+    }
+    struct sockaddr_storage ss;
+    socklen_t sslen = sizeof(ss);
+    if (getsockname(fd, (struct sockaddr *)&ss, &sslen) != 0) {
+        perror("surface getsockname");
+        return 1;
+    }
+    sslen = sizeof(ss);
+    if (getpeername(fd, (struct sockaddr *)&ss, &sslen) != 0) {
+        perror("surface getpeername");
+        return 1;
+    }
+
+    int fd_dup = dup(fd);
+    if (fd_dup < 0) {
+        perror("surface dup");
+        return 1;
+    }
+    int fd_dup2 = dup2(fd_dup, 200);
+    if (fd_dup2 < 0) {
+        perror("surface dup2");
+        close(fd_dup);
+        return 1;
+    }
+    int fd_dup3 = dup3(fd_dup2, 201, O_CLOEXEC);
+    if (fd_dup3 < 0) {
+        perror("surface dup3");
+        close(fd_dup2);
+        close(fd_dup);
+        return 1;
+    }
+
+    struct pollfd pfd;
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.fd = fd_dup3;
+    pfd.events = POLLOUT;
+    if (poll(&pfd, 1, 1000) <= 0 || !(pfd.revents & POLLOUT)) {
+        perror("surface poll");
+        close(fd_dup3);
+        close(fd_dup2);
+        close(fd_dup);
+        return 1;
+    }
+
+    size_t want = strlen(message);
+    if (write(fd_dup3, message, want) != (ssize_t)want) {
+        perror("surface write");
+        close(fd_dup3);
+        close(fd_dup2);
+        close(fd_dup);
+        return 1;
+    }
+
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.fd = fd_dup3;
+    pfd.events = POLLIN;
+    struct timespec timeout;
+    timeout.tv_sec = 3;
+    timeout.tv_nsec = 0;
+    if (ppoll(&pfd, 1, &timeout, NULL) <= 0 || !(pfd.revents & POLLIN)) {
+        perror("surface ppoll");
+        close(fd_dup3);
+        close(fd_dup2);
+        close(fd_dup);
+        return 1;
+    }
+
+    char buf[4096];
+    ssize_t n = read(fd_dup3, buf, sizeof(buf) - 1);
+    if (n < 0) {
+        perror("surface read");
+        close(fd_dup3);
+        close(fd_dup2);
+        close(fd_dup);
+        return 1;
+    }
+    buf[n] = 0;
+    close(fd_dup3);
+    close(fd_dup2);
+    close(fd_dup);
+    if (shutdown(fd, SHUT_RDWR) != 0) {
+        perror("surface shutdown");
+        return 1;
+    }
     printf("%s", buf);
     return strcmp(buf, message) == 0 ? 0 : 1;
 }
@@ -433,6 +657,9 @@ int main(int argc, char **argv) {
     int udp_unconnected_no_poll = 0;
     int udp_connect_probe = 0;
     int use_icmp = 0;
+    int use_sendmsg_recvmsg = 0;
+    int use_mmsg = 0;
+    int use_syscall_surface = 0;
     for (int i = 4; i < argc; i++) {
         if (strcmp(argv[i], "udp") == 0) {
             socktype = SOCK_DGRAM;
@@ -470,6 +697,14 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "icmp") == 0) {
             socktype = SOCK_DGRAM;
             use_icmp = 1;
+        } else if (strcmp(argv[i], "msg") == 0) {
+            use_sendmsg_recvmsg = 1;
+        } else if (strcmp(argv[i], "mmsg") == 0) {
+            socktype = SOCK_DGRAM;
+            use_mmsg = 1;
+        } else if (strcmp(argv[i], "syscall-surface") == 0) {
+            socktype = SOCK_STREAM;
+            use_syscall_surface = 1;
         } else {
             fprintf(stderr, "unknown option: %s\n", argv[i]);
             return 2;
@@ -527,6 +762,11 @@ int main(int argc, char **argv) {
             fprintf(stderr, "ipv6 unconnected udp is not implemented in this stub\n");
             return 2;
         }
+        if (use_sendmsg_recvmsg) {
+            int rc = echo_sendmsg_recvmsg(fd, argv[3], (const struct sockaddr *)&addr, addrlen);
+            close(fd);
+            return rc;
+        }
         int rc = udp_unconnected_no_poll ? echo_unconnected_udp_nopoll(fd, (const struct sockaddr_in *)&addr, argv[3]) : echo_unconnected_udp(fd, (const struct sockaddr_in *)&addr, argv[3]);
         close(fd);
         return rc;
@@ -555,6 +795,21 @@ int main(int argc, char **argv) {
     }
     if (use_icmp) {
         int rc = echo_icmp_connected(fd, argv[3], ipv6);
+        close(fd);
+        return rc;
+    }
+    if (use_mmsg) {
+        int rc = echo_udp_mmsg(fd, argv[3]);
+        close(fd);
+        return rc;
+    }
+    if (use_sendmsg_recvmsg) {
+        int rc = echo_sendmsg_recvmsg(fd, argv[3], NULL, 0);
+        close(fd);
+        return rc;
+    }
+    if (use_syscall_surface) {
+        int rc = exercise_socket_syscall_surface(fd, argv[3]);
         close(fd);
         return rc;
     }
