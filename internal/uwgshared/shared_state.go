@@ -14,10 +14,11 @@ import (
 )
 
 const (
-	MaxTrackedFD  = 65536
-	SharedMagic   = 0x55574753
-	SharedVersion = 5
-	MaxGuardSlots = 256
+	MaxTrackedFD    = 65536
+	MaxTrackedSlots = 65536
+	SharedMagic     = 0x55574753
+	SharedVersion   = 6
+	MaxGuardSlots   = 256
 
 	KindNone         = 0
 	KindTCPStream    = 1
@@ -25,6 +26,8 @@ const (
 	KindUDPListener  = 3
 	KindTCPListener  = 4
 )
+
+const trackedTombstonePID = int32(-1)
 
 type TrackedFD struct {
 	Active       int32
@@ -53,6 +56,12 @@ type rwLock struct {
 	WriterTID int32
 }
 
+type trackedSlot struct {
+	OwnerPID int32
+	FD       int32
+	State    TrackedFD
+}
+
 type guardLock struct {
 	Readers    uint32
 	Writer     uint32
@@ -67,7 +76,7 @@ type sharedState struct {
 	Secret  uint64
 	Lock    rwLock
 	Guard   guardLock
-	Tracked [MaxTrackedFD]TrackedFD
+	Tracked [MaxTrackedSlots]trackedSlot
 }
 
 type GuardDisposition int
@@ -267,33 +276,152 @@ func (t *Table) WithWriteLock(fn func()) {
 	fn()
 }
 
-func (t *Table) Snapshot(fd int) TrackedFD {
+func (t *Table) Snapshot(pid, fd int) TrackedFD {
 	var entry TrackedFD
-	if t == nil || t.state == nil || fd < 0 || fd >= MaxTrackedFD {
+	if t == nil || t.state == nil || pid <= 0 || fd < 0 || fd >= MaxTrackedFD {
 		return entry
 	}
 	t.WithReadLock(func() {
-		entry = t.state.Tracked[fd]
+		if idx, ok := t.findTrackedSlotLocked(int32(pid), int32(fd), false); ok {
+			entry = t.state.Tracked[idx].State
+		}
 	})
 	return entry
 }
 
-func (t *Table) Update(fd int, fn func(entry *TrackedFD)) {
-	if t == nil || t.state == nil || fd < 0 || fd >= MaxTrackedFD {
+func (t *Table) Update(pid, fd int, fn func(entry *TrackedFD)) {
+	if t == nil || t.state == nil || pid <= 0 || fd < 0 || fd >= MaxTrackedFD {
 		return
 	}
 	t.WithWriteLock(func() {
-		fn(&t.state.Tracked[fd])
+		idx, found := t.findTrackedSlotLocked(int32(pid), int32(fd), true)
+		if idx < 0 {
+			return
+		}
+		slot := &t.state.Tracked[idx]
+		if !found {
+			slot.OwnerPID = int32(pid)
+			slot.FD = int32(fd)
+			slot.State = TrackedFD{}
+		}
+		fn(&slot.State)
+		if slot.State == (TrackedFD{}) {
+			slot.OwnerPID = trackedTombstonePID
+			slot.FD = -1
+		}
 	})
 }
 
-func (t *Table) Clear(fd int) {
-	if t == nil || t.state == nil || fd < 0 || fd >= MaxTrackedFD {
+func (t *Table) Clear(pid, fd int) {
+	if t == nil || t.state == nil || pid <= 0 || fd < 0 || fd >= MaxTrackedFD {
 		return
 	}
-	t.Update(fd, func(entry *TrackedFD) {
-		*entry = TrackedFD{}
+	t.WithWriteLock(func() {
+		if idx, ok := t.findTrackedSlotLocked(int32(pid), int32(fd), false); ok {
+			slot := &t.state.Tracked[idx]
+			slot.OwnerPID = trackedTombstonePID
+			slot.FD = -1
+			slot.State = TrackedFD{}
+		}
 	})
+}
+
+func (t *Table) CopyProcess(srcPID, dstPID int) {
+	if t == nil || t.state == nil || srcPID <= 0 || dstPID <= 0 || srcPID == dstPID {
+		return
+	}
+	t.WithWriteLock(func() {
+		for i := range t.state.Tracked {
+			slot := t.state.Tracked[i]
+			if slot.OwnerPID != int32(srcPID) {
+				continue
+			}
+			idx, found := t.findTrackedSlotLocked(int32(dstPID), slot.FD, true)
+			if idx < 0 {
+				continue
+			}
+			dst := &t.state.Tracked[idx]
+			if !found {
+				dst.OwnerPID = int32(dstPID)
+				dst.FD = slot.FD
+			}
+			dst.State = slot.State
+		}
+	})
+}
+
+func (t *Table) ClearProcess(pid int) {
+	if t == nil || t.state == nil || pid <= 0 {
+		return
+	}
+	t.WithWriteLock(func() {
+		for i := range t.state.Tracked {
+			if t.state.Tracked[i].OwnerPID != int32(pid) {
+				continue
+			}
+			t.state.Tracked[i].OwnerPID = trackedTombstonePID
+			t.state.Tracked[i].FD = -1
+			t.state.Tracked[i].State = TrackedFD{}
+		}
+	})
+}
+
+func (t *Table) ProcessFDs(pid int) []int {
+	if t == nil || t.state == nil || pid <= 0 {
+		return nil
+	}
+	fds := make([]int, 0)
+	t.WithReadLock(func() {
+		for i := range t.state.Tracked {
+			if t.state.Tracked[i].OwnerPID != int32(pid) {
+				continue
+			}
+			fds = append(fds, int(t.state.Tracked[i].FD))
+		}
+	})
+	return fds
+}
+
+func trackedHash(pid, fd int32) uint32 {
+	x := uint64(uint32(pid))<<32 | uint64(uint32(fd))
+	x ^= x >> 33
+	x *= 0xff51afd7ed558ccd
+	x ^= x >> 33
+	x *= 0xc4ceb9fe1a85ec53
+	x ^= x >> 33
+	return uint32(x) & (MaxTrackedSlots - 1)
+}
+
+func (t *Table) findTrackedSlotLocked(pid, fd int32, create bool) (int, bool) {
+	if t == nil || t.state == nil || pid <= 0 || fd < 0 || fd >= MaxTrackedFD {
+		return -1, false
+	}
+	firstTombstone := -1
+	start := trackedHash(pid, fd)
+	for probe := 0; probe < MaxTrackedSlots; probe++ {
+		idx := int((start + uint32(probe)) & (MaxTrackedSlots - 1))
+		slot := &t.state.Tracked[idx]
+		switch {
+		case slot.OwnerPID == pid && slot.FD == fd:
+			return idx, true
+		case slot.OwnerPID == 0:
+			if !create {
+				return -1, false
+			}
+			if firstTombstone >= 0 {
+				return firstTombstone, false
+			}
+			return idx, false
+		case slot.OwnerPID == trackedTombstonePID:
+			if firstTombstone < 0 {
+				firstTombstone = idx
+			}
+		}
+	}
+	if create && firstTombstone >= 0 {
+		return firstTombstone, false
+	}
+	return -1, false
 }
 
 func BytesToString(buf []byte) string {
