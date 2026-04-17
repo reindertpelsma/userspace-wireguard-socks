@@ -46,6 +46,11 @@ type Engine struct {
 	net *netstackex.Net
 	dev *device.Device
 
+	hostTun      tun.Device
+	hostTunStack tun.Device
+	hostTunNet   *netstackex.Net
+	hostTunName  string
+
 	// Runtime API updates mutate peers and ACLs while proxy goroutines are
 	// active, so config-derived hot paths use small dedicated locks instead of
 	// a single coarse engine lock.
@@ -190,6 +195,9 @@ func (e *Engine) Start() error {
 	e.localAddrs = localAddrs
 	e.net.SetIngressPacketFilter(e.allowTunnelPacket)
 	e.net.SetPacketFilter(e.allowEgressPacket)
+	if err := e.startHostTUN(localAddrs); err != nil {
+		return err
+	}
 
 	if e.needsPromiscuousNetstack() {
 		if err := e.net.SetPromiscuous(true); err != nil {
@@ -330,11 +338,22 @@ func (e *Engine) Close() error {
 	}
 	e.listenersMu.Unlock()
 	if e.cfg.Scripts.Allow {
+		for _, cmd := range e.cfg.TUN.Down {
+			if err := runShell(cmd); err != nil {
+				e.log.Printf("tun down %q failed: %v", cmd, err)
+			}
+		}
 		for _, cmd := range e.cfg.WireGuard.PostDown {
 			if err := runShell(cmd); err != nil {
 				e.log.Printf("PostDown %q failed: %v", cmd, err)
 			}
 		}
+	}
+	if e.hostTun != nil {
+		_ = e.hostTun.Close()
+	}
+	if e.hostTunStack != nil {
+		_ = e.hostTunStack.Close()
 	}
 	if e.dev != nil {
 		e.dev.Close()
@@ -1960,6 +1979,12 @@ func (e *Engine) proxyHostForwardTarget(dst netip.AddrPort) (netip.AddrPort, boo
 func (e *Engine) hostForwardTarget(dst netip.AddrPort, rule config.HostForwardEndpoint, scope string) (netip.AddrPort, bool, error) {
 	if rule.Enabled == nil || !*rule.Enabled {
 		return dst, true, fmt.Errorf("%s host forwarding is disabled", scope)
+	}
+	if rule.RedirectTUN {
+		if !e.cfg.TUN.Enabled {
+			return dst, true, fmt.Errorf("%s host forwarding redirect_tun requires tun.enabled", scope)
+		}
+		return dst, true, nil
 	}
 	var ip netip.Addr
 	if rule.RedirectIP != "" {

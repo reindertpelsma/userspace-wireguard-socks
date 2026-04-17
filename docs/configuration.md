@@ -244,9 +244,11 @@ host_forward:
   proxy:
     enabled: true
     redirect_ip: 127.0.0.1
+    redirect_tun: false
   inbound:
     enabled: false
     redirect_ip: ""
+    redirect_tun: false
 
 routing:
   enforce_address_subnets: true
@@ -261,11 +263,70 @@ CLI:
 ```bash
 --proxy-host-forward=true
 --proxy-host-forward-redirect 127.0.0.1
+--proxy-host-forward-tun=false
 --inbound-host-forward=false
 --inbound-host-forward-redirect 192.0.2.10
+--inbound-host-forward-tun=false
 --enforce-address-subnets=true
 --drop-ipv4-invalid=true
 --drop-ipv6-link-local-multicast=true
+```
+
+`redirect_tun: true` requires `tun.enabled: true`. It makes host forwarding
+dial the original tunnel IP on the host TUN interface instead of rewriting to
+loopback or `redirect_ip`, which is useful for applications that bind
+specifically to the TUN address.
+
+## Optional Host TUN
+
+Host TUN mode is disabled by default. It exists for applications that need a
+kernel network interface; it is not required for SOCKS5/HTTP, forwards,
+reverse forwards, the raw socket API, or `uwgwrapper`.
+
+```yaml
+tun:
+  enabled: false
+  name: uwgsocks0
+  mtu: 0
+  configure: false
+  route_allowed_ips: true
+  routes: []
+  up: []
+  down: []
+```
+
+When enabled, `uwgsocks` creates a host `/dev/net/tun` interface and connects it
+to a second userspace netstack. TCP, UDP, and ping-style ICMP/ICMPv6 flows from
+that interface are terminated by `uwgsocks` and use the same outbound ACL,
+AllowedIPs, outbound proxy, and `fallback_direct` routing as SOCKS5/HTTP and
+the raw socket API.
+
+`tun.configure` uses Linux netlink to set the MTU, assign the WireGuard
+`Address=` prefixes, bring the link up, and install routes. If
+`route_allowed_ips` is true, peer `AllowedIPs` are routed to the TUN interface;
+`routes` adds extra CIDRs. Overlapping routes are reduced before installation,
+so a broader route such as `172.16.0.0/12` suppresses a contained route such as
+`172.18.0.0/16`.
+
+`tun.up` and `tun.down` are shell commands and run only when `scripts.allow` or
+`--allow-scripts` is enabled.
+
+If you route `0.0.0.0/0` or `::/0` to the host TUN interface, make sure the
+WireGuard peer endpoint itself remains reachable outside that route, for
+example with an explicit host route in `tun.up` or external network manager
+configuration.
+
+CLI:
+
+```bash
+--tun=true
+--tun-name uwgsocks0
+--tun-mtu 1420
+--tun-configure=true
+--tun-route-allowed-ips=true
+--tun-route 10.77.0.0/16
+--tun-up 'echo up'
+--tun-down 'echo down'
 ```
 
 ## ACLs And Relay
@@ -422,4 +483,5 @@ client command. `--api` accepts `http://host:port`, `host:port`, or
 --check
 ```
 
-`--allow-scripts` enables `PostUp` and `PostDown` commands from wg-quick config. Leave it off for untrusted config files.
+`--allow-scripts` enables `PostUp`, `PostDown`, `tun.up`, and `tun.down`
+commands. Leave it off for untrusted config files.

@@ -70,6 +70,16 @@ Use it as a rootless egress peer:
 - let the server process terminate inbound TCP/UDP packets to normal host sockets
 - optionally enable `dns_server.listen` so peers can resolve names using the server host's resolver
 
+Use it with a host TUN interface when an application insists on seeing a normal
+network interface:
+
+- enable `tun.enabled: true`
+- optionally enable `tun.configure: true` to assign WireGuard addresses and
+  install routes with Linux netlink
+- traffic from that interface is still terminated in userspace and follows the
+  same ACL, AllowedIPs, outbound proxy, `fallback_direct`, TCP, UDP, ICMP, and
+  IPv6 behavior as SOCKS/HTTP and the raw socket API
+
 Use it from another Go program:
 
 - import the library
@@ -319,12 +329,24 @@ host_forward:
   proxy:
     enabled: true
     redirect_ip: 127.0.0.1
+    redirect_tun: false
   inbound:
     enabled: false
     redirect_ip: ""
+    redirect_tun: false
 
 routing:
   enforce_address_subnets: true
+
+tun:
+  enabled: false
+  name: uwgsocks0
+  mtu: 0
+  configure: false
+  route_allowed_ips: true
+  routes: []
+  up: []
+  down: []
 
 filtering:
   drop_ipv6_link_local_multicast: true
@@ -370,6 +392,7 @@ host_forward:
   inbound:
     enabled: false
     redirect_ip: ""
+    redirect_tun: false
 
 routing:
   enforce_address_subnets: true
@@ -531,9 +554,11 @@ host_forward:
   proxy:
     enabled: true
     redirect_ip: 127.0.0.1
+    redirect_tun: false
   inbound:
     enabled: false
     redirect_ip: ""
+    redirect_tun: false
 ```
 
 `host_forward.proxy` applies only to SOCKS5/HTTP requests to this peer's tunnel
@@ -541,6 +566,62 @@ IPs, `localhost`, and `127.0.0.0/8`. It defaults on and redirects to loopback.
 `host_forward.inbound` applies only to WireGuard packets addressed to this
 peer's tunnel IPs when no userspace tunnel listener owns the port. It defaults
 off because enabling it can expose loopback-only host services to remote peers.
+Set `redirect_tun: true` when optional host TUN mode is enabled and you want
+host forwarding to dial the original tunnel IP on the host TUN interface rather
+than rewriting to loopback or `redirect_ip`. This is useful for applications
+that bind specifically to the TUN address.
+
+## Optional Host TUN Mode
+
+The default runtime still does not need `/dev/net/tun`. Host TUN mode is an
+explicit compatibility layer for applications that require a kernel network
+interface. It creates a host TUN device and bridges it into a second gVisor
+netstack. TCP, UDP, and ping-style ICMP/ICMPv6 flows from that interface are
+terminated by `uwgsocks`, then routed through the same outbound decision tree as
+SOCKS5/HTTP, the raw socket API, and fdproxy:
+
+```text
+application -> host TUN -> gVisor TCP/UDP/ICMP -> ACL/AllowedIPs/fallback -> WireGuard or host
+```
+
+Example:
+
+```yaml
+tun:
+  enabled: true
+  name: uwgsocks0
+  mtu: 1420
+  configure: true
+  route_allowed_ips: true
+  routes:
+    - 10.77.0.0/16
+  up:
+    - echo tun is up
+  down:
+    - echo tun is down
+```
+
+`tun.configure` uses Linux netlink to set the interface MTU, assign the
+WireGuard `Address=` prefixes, bring the interface up, and install routes.
+Routes are reduced before installation: when one configured CIDR fully covers
+another, only the broader route is added. For example, `172.18.0.0/16` is
+dropped when `172.16.0.0/12` is also present. `tun.up` and `tun.down` run only
+when `scripts.allow` or `--allow-scripts` is enabled.
+
+If you route `0.0.0.0/0` or `::/0` to the host TUN interface, keep the
+WireGuard peer endpoint reachable outside that route, for example with an
+explicit host route in `tun.up` or with your system network manager.
+
+CLI equivalents:
+
+```bash
+./uwgsocks --config ./client.yaml \
+  --tun=true \
+  --tun-name uwgsocks0 \
+  --tun-configure=true \
+  --tun-route-allowed-ips=true \
+  --tun-route 10.77.0.0/16
+```
 
 WireGuard packets to `127.0.0.0/8` are always treated as illegal tunnel traffic
 by the default address filter. Override the filters only for very controlled
@@ -828,14 +909,16 @@ if the connection must stay inside WireGuard.
 
 ## Testing
 
-The test suite is rootless and does not use `/dev/net/tun`:
+The test suite is rootless. Most tests do not use `/dev/net/tun`; host TUN
+logic is exercised with an in-memory fake TUN device so CI does not need root
+or `CAP_NET_ADMIN`:
 
 ```bash
 go test ./...
 go vet ./...
 ```
 
-Coverage includes two-instance WireGuard flows, SOCKS/HTTP/local forward paths, reverse forwards, PROXY protocol v1/v2 handling, SOCKS5 auth, SOCKS5 UDP ASSOCIATE and BIND, BIND default-off behavior, raw socket API TCP/UDP/listen/reconnect/DNS paths, LD_PRELOAD managed-fd TCP/UDP/listen/fork/exec proof, IPv4 and IPv6 tunnel traffic, IPv6 outer endpoints, IPv6 ICMP ping, primary source-address selection with secondary address aliases, TCP RST on rejected transparent TCP, synthetic ICMP unreachable packets for rejected UDP, packet loss transfer, multi-peer relay, configured DNS over WireGuard, hosted DNS over tunnel UDP/TCP, malformed WireGuard/IP/TCP/UDP/ICMP/DNS packets, source-IP enforcement, reserved tunnel-address filtering, virtual `Address=` subnet rejection, host-forward policy, ACL/API runtime updates, Unix-socket API binding, peer refresh after server restart, and connection-table overflow behavior.
+Coverage includes two-instance WireGuard flows, SOCKS/HTTP/local forward paths, reverse forwards, PROXY protocol v1/v2 handling, SOCKS5 auth, SOCKS5 UDP ASSOCIATE and BIND, BIND default-off behavior, raw socket API TCP/UDP/listen/reconnect/DNS paths, optional host TUN TCP over IPv4 and IPv6, LD_PRELOAD managed-fd TCP/UDP/listen/fork/exec proof, IPv4 and IPv6 tunnel traffic, IPv6 outer endpoints, IPv6 ICMP ping, primary source-address selection with secondary address aliases, TCP RST on rejected transparent TCP, synthetic ICMP unreachable packets for rejected UDP, packet loss transfer, multi-peer relay, configured DNS over WireGuard, hosted DNS over tunnel UDP/TCP, malformed WireGuard/IP/TCP/UDP/ICMP/DNS packets, source-IP enforcement, reserved tunnel-address filtering, virtual `Address=` subnet rejection, host-forward policy, ACL/API runtime updates, Unix-socket API binding, peer refresh after server restart, and connection-table overflow behavior.
 
 Run the loopback throughput benchmark:
 

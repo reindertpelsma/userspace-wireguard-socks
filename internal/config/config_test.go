@@ -121,8 +121,22 @@ host_forward:
     redirect_ip: 127.0.0.1
   inbound:
     enabled: false
+    redirect_tun: true
 routing:
   enforce_address_subnets: true
+tun:
+  enabled: true
+  name: wgapps0
+  mtu: 1280
+  configure: true
+  route_allowed_ips: false
+  routes:
+    - 10.77.0.0/16
+    - fd00:77::/64
+  up:
+    - echo tun-up
+  down:
+    - echo tun-down
 filtering:
   drop_ipv6_link_local_multicast: true
   drop_ipv4_invalid: true
@@ -186,8 +200,11 @@ dns_server:
 	if cfg.TURN.Server != "127.0.0.1:3478" || cfg.TURN.Username != "turn-user" || cfg.TURN.Password != "turn-pass" || cfg.TURN.Realm != "turn-realm" || len(cfg.TURN.Permissions) != 1 || !cfg.TURN.IncludeWGPublicKey {
 		t.Fatalf("TURN options mismatch: %+v", cfg.TURN)
 	}
-	if !*cfg.HostForward.Proxy.Enabled || *cfg.HostForward.Inbound.Enabled || cfg.HostForward.Proxy.RedirectIP != "127.0.0.1" || !*cfg.Routing.EnforceAddressSubnets || !*cfg.Filtering.DropIPv4Invalid {
+	if !*cfg.HostForward.Proxy.Enabled || *cfg.HostForward.Inbound.Enabled || cfg.HostForward.Proxy.RedirectIP != "127.0.0.1" || !cfg.HostForward.Inbound.RedirectTUN || !*cfg.Routing.EnforceAddressSubnets || !*cfg.Filtering.DropIPv4Invalid {
 		t.Fatalf("routing/filter/host-forward options mismatch: host=%+v routing=%+v filtering=%+v", cfg.HostForward, cfg.Routing, cfg.Filtering)
+	}
+	if !cfg.TUN.Enabled || cfg.TUN.Name != "wgapps0" || cfg.TUN.MTU != 1280 || !cfg.TUN.Configure || *cfg.TUN.RouteAllowedIPs || strings.Join(cfg.TUN.Routes, ",") != "10.77.0.0/16,fd00:77::/64" || strings.Join(cfg.TUN.Up, ",") != "echo tun-up" || strings.Join(cfg.TUN.Down, ",") != "echo tun-down" {
+		t.Fatalf("tun options mismatch: %+v", cfg.TUN)
 	}
 	if cfg.ACL.OutboundDefault != acl.Deny || len(cfg.ACL.Outbound) != 1 {
 		t.Fatalf("ACL options mismatch: %+v", cfg.ACL)
@@ -226,6 +243,15 @@ wireguard:
 	}
 	if cfg.WireGuard.PrivateKey != priv.String() || len(cfg.WireGuard.Peers) != 1 {
 		t.Fatalf("inline WireGuard config did not merge: %+v", cfg.WireGuard)
+	}
+}
+
+func TestNormalizeRejectsHostForwardRedirectIPAndTUN(t *testing.T) {
+	cfg := Default()
+	cfg.HostForward.Proxy.RedirectIP = "127.0.0.1"
+	cfg.HostForward.Proxy.RedirectTUN = true
+	if err := cfg.Normalize(); err == nil || !strings.Contains(err.Error(), "redirect_ip and redirect_tun") {
+		t.Fatalf("Normalize err=%v, want redirect conflict", err)
 	}
 }
 

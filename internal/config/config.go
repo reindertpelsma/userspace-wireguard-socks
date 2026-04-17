@@ -26,6 +26,7 @@ type Config struct {
 	Inbound       Inbound       `yaml:"inbound"`
 	HostForward   HostForward   `yaml:"host_forward"`
 	Routing       Routing       `yaml:"routing"`
+	TUN           TUN           `yaml:"tun"`
 	Filtering     Filtering     `yaml:"filtering"`
 	TrafficShaper TrafficShaper `yaml:"traffic_shaper"`
 	Relay         Relay         `yaml:"relay"`
@@ -162,8 +163,9 @@ type HostForward struct {
 }
 
 type HostForwardEndpoint struct {
-	Enabled    *bool  `yaml:"enabled"`
-	RedirectIP string `yaml:"redirect_ip"`
+	Enabled     *bool  `yaml:"enabled"`
+	RedirectIP  string `yaml:"redirect_ip"`
+	RedirectTUN bool   `yaml:"redirect_tun"`
 }
 
 type Routing struct {
@@ -171,6 +173,30 @@ type Routing struct {
 	// interface route: other addresses in 10.10.10.0/24 must be routed by
 	// AllowedIPs or they are rejected instead of falling back to the Internet.
 	EnforceAddressSubnets *bool `yaml:"enforce_address_subnets"`
+}
+
+type TUN struct {
+	// Enabled creates a host OS TUN interface and terminates traffic from that
+	// interface in a second userspace netstack. The main no-/dev/net/tun mode
+	// remains the default.
+	Enabled bool `yaml:"enabled"`
+	// Name is the requested host interface name. The kernel may still return a
+	// concrete name when patterns such as "uwgsocks%d" are used.
+	Name string `yaml:"name"`
+	// MTU defaults to wireguard.mtu.
+	MTU int `yaml:"mtu"`
+	// Configure asks uwgsocks to configure addresses/routes with netlink. When
+	// false, external scripts or an operator may configure the interface.
+	Configure bool `yaml:"configure"`
+	// RouteAllowedIPs installs peer AllowedIPs as kernel routes when Configure
+	// is true. Extra Routes are always added when Configure is true.
+	RouteAllowedIPs *bool `yaml:"route_allowed_ips"`
+	// Routes are additional CIDRs routed to the TUN interface.
+	Routes []string `yaml:"routes"`
+	// Up and Down are optional shell snippets run after interface creation and
+	// before teardown when scripts.allow is true.
+	Up   []string `yaml:"up"`
+	Down []string `yaml:"down"`
 }
 
 type Filtering struct {
@@ -283,6 +309,7 @@ func Default() Config {
 			Proxy:   HostForwardEndpoint{Enabled: boolPtr(true)},
 			Inbound: HostForwardEndpoint{Enabled: boolPtr(false)},
 		},
+		TUN:       TUN{Name: "uwgsocks0", RouteAllowedIPs: boolPtr(true)},
 		Routing:   Routing{EnforceAddressSubnets: boolPtr(true)},
 		Filtering: Filtering{DropIPv6LinkLocalMulticast: boolPtr(true), DropIPv4Invalid: boolPtr(true)},
 		Relay: Relay{
@@ -411,10 +438,31 @@ func (c *Config) Normalize() error {
 		"host_forward.proxy":   c.HostForward.Proxy,
 		"host_forward.inbound": c.HostForward.Inbound,
 	} {
+		if ep.RedirectIP != "" && ep.RedirectTUN {
+			return fmt.Errorf("%s cannot set both redirect_ip and redirect_tun", name)
+		}
 		if ep.RedirectIP != "" {
 			if _, err := netip.ParseAddr(ep.RedirectIP); err != nil {
 				return fmt.Errorf("%s.redirect_ip %q: %w", name, ep.RedirectIP, err)
 			}
+		}
+	}
+	if c.TUN.Name == "" {
+		c.TUN.Name = "uwgsocks0"
+	}
+	if c.TUN.MTU == 0 {
+		c.TUN.MTU = c.WireGuard.MTU
+	}
+	if c.TUN.MTU < 0 {
+		return fmt.Errorf("tun.mtu must be >= 0")
+	}
+	if c.TUN.RouteAllowedIPs == nil {
+		t := true
+		c.TUN.RouteAllowedIPs = &t
+	}
+	for _, route := range c.TUN.Routes {
+		if _, err := netip.ParsePrefix(route); err != nil {
+			return fmt.Errorf("tun.routes %q: %w", route, err)
 		}
 	}
 	if c.Inbound.HostDialBindAddress != "" {

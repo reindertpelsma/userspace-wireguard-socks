@@ -48,6 +48,12 @@ does not have tunnel IPv6 configured, raw socket API/fdproxy IPv6 connects are
 rejected immediately so applications can fall back to IPv4 instead of waiting
 for a host-level timeout.
 
+Optional host TUN mode uses this same outbound model too. Packets from the host
+TUN interface are terminated in a second userspace netstack; TCP, UDP, and
+ping-style ICMP/ICMPv6 flows then pass through outbound ACLs, reverse-forward
+matching, peer `AllowedIPs`, outbound proxy fallbacks, and `fallback_direct` in
+the same order as raw socket/fdproxy traffic.
+
 Outbound proxy fallback rules are useful when the process running `uwgsocks`
 must itself reach the Internet through another proxy:
 

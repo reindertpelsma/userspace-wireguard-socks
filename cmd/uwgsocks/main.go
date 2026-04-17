@@ -65,71 +65,81 @@ func main() {
 	}
 
 	var (
-		configPath            string
-		wgConfigPath          string
-		wgInline              string
-		privateKey            string
-		listenPort            int
-		mtu                   int
-		addresses             listFlag
-		listenAddrs           listFlag
-		dnsServers            listFlag
-		peers                 listFlag
-		forwards              listFlag
-		reverseForwards       listFlag
-		outboundProxies       listFlag
-		inRules               listFlag
-		outRules              listFlag
-		relayRules            listFlag
-		inDefault             string
-		outDefault            string
-		relayDefault          string
-		socksAddr             string
-		httpAddr              string
-		mixedAddr             string
-		proxyUsername         string
-		proxyPassword         string
-		fallbackSOCKS         string
-		dnsListen             string
-		apiListen             string
-		apiToken              string
-		apiAllowUnixNoToken   bool
-		consistent            string
-		maxConns              int
-		maxConnsPerPeer       int
-		connGrace             int
-		tcpWindow             int
-		tcpMaxBuffered        int
-		tcpIdle               int
-		udpIdle               int
-		trafficUploadBps      int64
-		trafficDownloadBps    int64
-		trafficLatencyMs      int
-		dnsMaxInflight        int
-		roamFallback          int
-		checkOnly             bool
-		allowScripts          bool
-		verbose               bool
-		fallback              optionalBool
-		honorProxyEnv         optionalBool
-		transparent           optionalBool
-		relay                 optionalBool
-		disableLow            optionalBool
-		proxyIPv6             optionalBool
-		socksUDP              optionalBool
-		socksBind             optionalBool
-		preferUDP6            optionalBool
-		proxyHostForward      optionalBool
-		inboundHostForward    optionalBool
-		dropIPv4Invalid       optionalBool
-		dropIPv6LLMulticast   optionalBool
-		enforceAddressSubnets optionalBool
-		relayConntrack        optionalBool
-		proxyHostRedirect     string
-		inboundHostRedirect   string
-		hostDialBindAddress   string
-		relayConntrackMax     int
-		relayConntrackPeerMax int
+		configPath             string
+		wgConfigPath           string
+		wgInline               string
+		privateKey             string
+		listenPort             int
+		mtu                    int
+		addresses              listFlag
+		listenAddrs            listFlag
+		dnsServers             listFlag
+		peers                  listFlag
+		forwards               listFlag
+		reverseForwards        listFlag
+		outboundProxies        listFlag
+		tunRoutes              listFlag
+		tunUp                  listFlag
+		tunDown                listFlag
+		inRules                listFlag
+		outRules               listFlag
+		relayRules             listFlag
+		inDefault              string
+		outDefault             string
+		relayDefault           string
+		socksAddr              string
+		httpAddr               string
+		mixedAddr              string
+		proxyUsername          string
+		proxyPassword          string
+		fallbackSOCKS          string
+		dnsListen              string
+		apiListen              string
+		apiToken               string
+		apiAllowUnixNoToken    bool
+		consistent             string
+		maxConns               int
+		maxConnsPerPeer        int
+		connGrace              int
+		tcpWindow              int
+		tcpMaxBuffered         int
+		tcpIdle                int
+		udpIdle                int
+		trafficUploadBps       int64
+		trafficDownloadBps     int64
+		trafficLatencyMs       int
+		dnsMaxInflight         int
+		roamFallback           int
+		tunName                string
+		tunMTU                 int
+		checkOnly              bool
+		allowScripts           bool
+		verbose                bool
+		fallback               optionalBool
+		honorProxyEnv          optionalBool
+		transparent            optionalBool
+		relay                  optionalBool
+		disableLow             optionalBool
+		proxyIPv6              optionalBool
+		socksUDP               optionalBool
+		socksBind              optionalBool
+		preferUDP6             optionalBool
+		proxyHostForward       optionalBool
+		proxyHostRedirectTun   optionalBool
+		inboundHostForward     optionalBool
+		inboundHostRedirectTun optionalBool
+		dropIPv4Invalid        optionalBool
+		dropIPv6LLMulticast    optionalBool
+		enforceAddressSubnets  optionalBool
+		tunEnabled             optionalBool
+		tunConfigure           optionalBool
+		tunRouteAllowed        optionalBool
+		relayConntrack         optionalBool
+		proxyHostRedirect      string
+		inboundHostRedirect    string
+		hostDialBindAddress    string
+		relayConntrackMax      int
+		relayConntrackPeerMax  int
 	)
 	flag.StringVar(&configPath, "config", "", "YAML config file")
 	flag.StringVar(&wgConfigPath, "wg-config", "", "WireGuard wg-quick config file")
@@ -157,12 +167,22 @@ func main() {
 	flag.Var(&preferUDP6, "prefer-ipv6-for-udp-over-socks", "prefer IPv6 for remotely-resolved SOCKS5 UDP ASSOCIATE hostnames")
 	flag.Var(&proxyHostForward, "proxy-host-forward", "allow SOCKS5/HTTP requests to this peer's tunnel IPs, localhost, and 127.0.0.0/8 to reach a host address")
 	flag.StringVar(&proxyHostRedirect, "proxy-host-forward-redirect", "", "host IP used for proxy host forwarding; default is loopback")
+	flag.Var(&proxyHostRedirectTun, "proxy-host-forward-tun", "proxy host forwarding dials the original tunnel IP on the host TUN interface instead of loopback/redirect_ip")
 	flag.Var(&inboundHostForward, "inbound-host-forward", "allow WireGuard packets to this peer's tunnel IPs to reach a host address when no tunnel listener owns the port")
 	flag.StringVar(&inboundHostRedirect, "inbound-host-forward-redirect", "", "host IP used for inbound host forwarding; default is loopback")
+	flag.Var(&inboundHostRedirectTun, "inbound-host-forward-tun", "transparent inbound host forwarding dials the original tunnel IP on the host TUN interface instead of loopback/redirect_ip")
 	flag.StringVar(&hostDialBindAddress, "host-dial-bind-address", "", "local host IP to bind for transparent inbound egress dials, e.g. 192.0.2.10 or 0.0.0.0")
 	flag.Var(&dropIPv4Invalid, "drop-ipv4-invalid", "drop tunnel packets with 0.0.0.0/8, 127.0.0.0/8, 224.0.0.0/4, or 255.255.255.255")
 	flag.Var(&dropIPv6LLMulticast, "drop-ipv6-link-local-multicast", "drop tunnel packets with IPv6 link-local or multicast addresses")
 	flag.Var(&enforceAddressSubnets, "enforce-address-subnets", "reject destinations inside Address= subnets unless routed by peer AllowedIPs")
+	flag.Var(&tunEnabled, "tun", "create an optional host /dev/net/tun interface for applications that need a kernel interface")
+	flag.StringVar(&tunName, "tun-name", "", "host TUN interface name; default uwgsocks0")
+	flag.IntVar(&tunMTU, "tun-mtu", 0, "host TUN MTU; default wireguard.mtu")
+	flag.Var(&tunConfigure, "tun-configure", "configure host TUN addresses/routes with netlink")
+	flag.Var(&tunRouteAllowed, "tun-route-allowed-ips", "when tun-configure is enabled, install peer AllowedIPs as host routes")
+	flag.Var(&tunRoutes, "tun-route", "extra CIDR routed to the host TUN interface; repeatable")
+	flag.Var(&tunUp, "tun-up", "shell command run after host TUN creation when --allow-scripts is enabled; repeatable")
+	flag.Var(&tunDown, "tun-down", "shell command run before host TUN teardown when --allow-scripts is enabled; repeatable")
 	flag.Var(&forwards, "forward", "local forward: tcp://127.0.0.1:8080=10.0.0.2:80 or udp://127.0.0.1:5353=10.0.0.53:53; repeatable")
 	flag.Var(&reverseForwards, "reverse-forward", "tunnel reverse forward: tcp://100.64.1.1:8443=127.0.0.1:443 or udp://100.64.1.1:5353=127.0.0.1:53; repeatable")
 	flag.Var(&inRules, "acl-inbound", "inbound ACL rule, e.g. 'allow src=10.0.0.0/24 dst=0.0.0.0/0 dport=80-443'; repeatable")
@@ -335,12 +355,18 @@ func main() {
 	if proxyHostRedirect != "" {
 		cfg.HostForward.Proxy.RedirectIP = proxyHostRedirect
 	}
+	if proxyHostRedirectTun.set {
+		cfg.HostForward.Proxy.RedirectTUN = proxyHostRedirectTun.value
+	}
 	if inboundHostForward.set {
 		v := inboundHostForward.value
 		cfg.HostForward.Inbound.Enabled = &v
 	}
 	if inboundHostRedirect != "" {
 		cfg.HostForward.Inbound.RedirectIP = inboundHostRedirect
+	}
+	if inboundHostRedirectTun.set {
+		cfg.HostForward.Inbound.RedirectTUN = inboundHostRedirectTun.value
 	}
 	if hostDialBindAddress != "" {
 		cfg.Inbound.HostDialBindAddress = hostDialBindAddress
@@ -357,6 +383,25 @@ func main() {
 		v := enforceAddressSubnets.value
 		cfg.Routing.EnforceAddressSubnets = &v
 	}
+	if tunEnabled.set {
+		cfg.TUN.Enabled = tunEnabled.value
+	}
+	if tunName != "" {
+		cfg.TUN.Name = tunName
+	}
+	if tunMTU != 0 {
+		cfg.TUN.MTU = tunMTU
+	}
+	if tunConfigure.set {
+		cfg.TUN.Configure = tunConfigure.value
+	}
+	if tunRouteAllowed.set {
+		v := tunRouteAllowed.value
+		cfg.TUN.RouteAllowedIPs = &v
+	}
+	cfg.TUN.Routes = append(cfg.TUN.Routes, tunRoutes...)
+	cfg.TUN.Up = append(cfg.TUN.Up, tunUp...)
+	cfg.TUN.Down = append(cfg.TUN.Down, tunDown...)
 	if transparent.set {
 		v := transparent.value
 		cfg.Inbound.Transparent = &v

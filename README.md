@@ -1,7 +1,9 @@
 # Userspace WireGuard Gateway
 
 Run WireGuard networking without root, without `/dev/net/tun`, without routing
-table changes, and without a system VPN interface.
+table changes, and without a system VPN interface by default. When you do want
+a normal host interface, `uwgsocks` can also create an explicit optional
+`/dev/net/tun` interface.
 
 `uwgsocks` embeds WireGuard and a userspace TCP/IP stack in one process. Apps can
 enter that stack through HTTP/SOCKS proxies, local forwards, the raw socket API,
@@ -50,6 +52,10 @@ For a complete local two-peer demo, start `examples/exit-server.yaml` and
 - HTTP proxy, SOCKS5 CONNECT, SOCKS5 UDP ASSOCIATE, and SOCKS5 BIND.
 - Local forwards and tunnel-side reverse forwards with optional PROXY protocol.
 - Transparent inbound termination from WireGuard peers to host sockets.
+- Optional host TUN mode for applications that require a kernel network
+  interface; traffic from that interface is terminated in userspace and follows
+  the same ACL, AllowedIPs, fallback, TCP, UDP, ICMP, and IPv6 routing model as
+  proxy/raw-socket traffic.
 - Peer-to-peer relay forwarding with ACLs and stateful conntrack.
 - Runtime API for status, ping, peer updates, ACL updates, forwards, and
   WireGuard config replacement.
@@ -70,6 +76,10 @@ addresses and reverse forwards, then peer `AllowedIPs`, then configured
 outbound proxy fallbacks, then direct fallback if `proxy.fallback_direct` is
 enabled. Destinations inside local `Address=` subnets but not routed by peer
 `AllowedIPs` are rejected instead of leaking to the host network.
+
+Optional host TUN traffic uses the same outbound decision tree. The interface is
+disabled unless `tun.enabled: true` or `--tun=true` is set; automatic host
+address and route configuration is disabled unless `tun.configure: true`.
 
 See [docs/proxy-routing.md](docs/proxy-routing.md) for the detailed order.
 

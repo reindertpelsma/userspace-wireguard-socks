@@ -3,7 +3,11 @@
 
 # Testing And Security Plan
 
-This project is intentionally tested without root, `/dev/net/tun`, public Internet dependencies, or container privileges. The tests run WireGuard, gVisor netstack, SOCKS5/HTTP proxy paths, transparent forwarding, DNS, relay, and API behavior as normal Go processes.
+This project is intentionally tested without root, real `/dev/net/tun`, public
+Internet dependencies, or container privileges. The tests run WireGuard, gVisor
+netstack, SOCKS5/HTTP proxy paths, transparent forwarding, optional host TUN
+logic through a fake TUN device, DNS, relay, and API behavior as normal Go
+processes.
 
 ## Threat Model
 
@@ -34,6 +38,8 @@ The main suite covers:
 - SOCKS5 CONNECT, UDP ASSOCIATE, and BIND.
 - HTTP proxy GET and CONNECT.
 - IPv4 and IPv6 tunnel traffic, IPv6 outer endpoints, and ICMP/ICMPv6 ping.
+- Optional host TUN TCP flows over IPv4 and IPv6 using an in-memory fake TUN
+  device instead of requiring `CAP_NET_ADMIN`.
 - Local forwards and reverse forwards for TCP/UDP.
 - PROXY protocol v1/v2 parsing, stripping, and injection.
 - Reverse-forward reachability from SOCKS clients.
