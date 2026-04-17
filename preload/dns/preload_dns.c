@@ -15,6 +15,13 @@
 
 extern int dns_tcp_connect(void);
 
+#if defined(__ANDROID__)
+typedef void *res_state;
+typedef size_t uwg_gni_len_t;
+#else
+typedef socklen_t uwg_gni_len_t;
+#endif
+
 #define DNS_MAX_NAME 255
 #define DNS_MAX_ADDRS 8
 #define DNS_LABEL_MAX 63
@@ -772,7 +779,8 @@ int gethostbyaddr_r(const void *addr, socklen_t len, int type,
 }
 
 int getnameinfo(const struct sockaddr *sa, socklen_t salen, char *host,
-                socklen_t hostlen, char *serv, socklen_t servlen, int flags) {
+                uwg_gni_len_t hostlen, char *serv, uwg_gni_len_t servlen,
+                int flags) {
   int af = sa ? sa->sa_family : 0, port = 0;
   const void *addr = NULL;
   if (!sa)
@@ -793,7 +801,7 @@ int getnameinfo(const struct sockaddr *sa, socklen_t salen, char *host,
     return EAI_FAMILY;
   if (serv && servlen) {
     int n = snprintf(serv, servlen, "%u", (unsigned)port);
-    if (n < 0 || n >= servlen)
+    if (n < 0 || (uwg_gni_len_t)n >= servlen)
       return EAI_OVERFLOW;
   }
   if (host && hostlen) {

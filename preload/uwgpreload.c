@@ -10,8 +10,10 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -24,10 +26,21 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "shared_state.h"
 #include "dns/preload_dns.c"
+
+#if defined(__ANDROID__)
+#define UWG_HAS_FOPENCOOKIE 0
+#define UWG_SENDMMSG_CONST const
+#define UWG_RECVMMSG_TIMEOUT_CONST const
+#else
+#define UWG_HAS_FOPENCOOKIE 1
+#define UWG_SENDMMSG_CONST
+#define UWG_RECVMMSG_TIMEOUT_CONST
+#endif
 
 /* DNS routing mode helpers */
 static int dns_mode_full(void);
@@ -82,9 +95,10 @@ static ssize_t (*real_readv_fn)(int, const struct iovec *, int);
 static ssize_t (*real_writev_fn)(int, const struct iovec *, int);
 static ssize_t (*real_sendmsg_fn)(int, const struct msghdr *, int) = NULL;
 static ssize_t (*real_recvmsg_fn)(int, struct msghdr *, int) = NULL;
-static int (*real_sendmmsg_fn)(int, struct mmsghdr *, unsigned int, int);
+static int (*real_sendmmsg_fn)(int, UWG_SENDMMSG_CONST struct mmsghdr *,
+                               unsigned int, int);
 static int (*real_recvmmsg_fn)(int, struct mmsghdr *, unsigned int, int,
-                               struct timespec *);
+                               UWG_RECVMMSG_TIMEOUT_CONST struct timespec *);
 static int (*real_dup_fn)(int);
 static int (*real_dup2_fn)(int, int);
 static int (*real_dup3_fn)(int, int, int);
@@ -94,6 +108,9 @@ static int (*real_shutdown_fn)(int, int);
 static int (*real_fcntl_fn)(int, int, ...);
 static int (*real_getsockopt_fn)(int, int, int, void *, socklen_t *);
 static int (*real_setsockopt_fn)(int, int, int, const void *, socklen_t);
+static int (*real_poll_fn)(struct pollfd *, nfds_t, int);
+static int (*real_ppoll_fn)(struct pollfd *, nfds_t, const struct timespec *,
+                            const sigset_t *);
 static FILE *(*real_fdopen_fn)(int, const char *);
 
 static int fill_sockaddr_from_text(int family, const char *ip, uint16_t port,
@@ -176,6 +193,8 @@ static void init_real(void) {
   real_fcntl_fn = dlsym(RTLD_NEXT, "fcntl");
   real_getsockopt_fn = dlsym(RTLD_NEXT, "getsockopt");
   real_setsockopt_fn = dlsym(RTLD_NEXT, "setsockopt");
+  real_poll_fn = dlsym(RTLD_NEXT, "poll");
+  real_ppoll_fn = dlsym(RTLD_NEXT, "ppoll");
   real_fdopen_fn = dlsym(RTLD_NEXT, "fdopen");
 }
 
@@ -268,7 +287,7 @@ static ssize_t real_recvmsg_call(int sockfd, struct msghdr *msg, int flags) {
   return real_recvmsg_fn(sockfd, msg, flags);
 }
 
-static int real_sendmmsg_call(int sockfd, struct mmsghdr *msgvec,
+static int real_sendmmsg_call(int sockfd, UWG_SENDMMSG_CONST struct mmsghdr *msgvec,
                               unsigned int vlen, int flags) {
   if (use_passthrough_secret())
     return (int)passthrough_syscall(SYS_sendmmsg, sockfd, (long)msgvec, vlen,
@@ -278,7 +297,7 @@ static int real_sendmmsg_call(int sockfd, struct mmsghdr *msgvec,
 
 static int real_recvmmsg_call(int sockfd, struct mmsghdr *msgvec,
                               unsigned int vlen, int flags,
-                              struct timespec *timeout) {
+                              UWG_RECVMMSG_TIMEOUT_CONST struct timespec *timeout) {
   if (use_passthrough_secret())
     return (int)syscall(SYS_recvmmsg, sockfd, msgvec, vlen, flags, timeout,
                         syscall_passthrough_secret);
@@ -475,11 +494,24 @@ static int real_dup_call(int fd) {
 }
 
 static int real_dup2_call(int oldfd, int newfd) {
+#ifdef SYS_dup2
   if (use_passthrough_secret())
     return (int)passthrough_syscall(SYS_dup2, oldfd, newfd, 0, 0, 0);
   if (real_dup2_fn)
     return real_dup2_fn(oldfd, newfd);
   return (int)syscall(SYS_dup2, oldfd, newfd);
+#else
+  if (oldfd == newfd) {
+    if (fcntl(oldfd, F_GETFD) < 0)
+      return -1;
+    return newfd;
+  }
+  if (use_passthrough_secret())
+    return (int)passthrough_syscall(SYS_dup3, oldfd, newfd, 0, 0, 0);
+  if (real_dup2_fn)
+    return real_dup2_fn(oldfd, newfd);
+  return (int)syscall(SYS_dup3, oldfd, newfd, 0);
+#endif
 }
 
 static int real_dup3_call(int oldfd, int newfd, int flags) {
@@ -544,6 +576,62 @@ static int real_setsockopt_call(int fd, int level, int optname,
   if (real_setsockopt_fn)
     return real_setsockopt_fn(fd, level, optname, optval, optlen);
   return (int)syscall(SYS_setsockopt, fd, level, optname, optval, optlen);
+}
+
+#ifndef UWG_KERNEL_SIGSET_SIZE
+#ifdef _NSIG
+#define UWG_KERNEL_SIGSET_SIZE (_NSIG / 8)
+#else
+#define UWG_KERNEL_SIGSET_SIZE (sizeof(sigset_t))
+#endif
+#endif
+
+static int real_poll_call(struct pollfd *fds, nfds_t nfds, int timeout) {
+  if (use_passthrough_secret()) {
+#ifdef SYS_poll
+    return (int)passthrough_syscall(SYS_poll, (long)fds, nfds, timeout, 0, 0);
+#elif defined(SYS_ppoll)
+    struct timespec ts;
+    struct timespec *tsp = NULL;
+    if (timeout >= 0) {
+      ts.tv_sec = timeout / 1000;
+      ts.tv_nsec = (long)(timeout % 1000) * 1000000L;
+      tsp = &ts;
+    }
+    return (int)passthrough_syscall(SYS_ppoll, (long)fds, nfds, (long)tsp, 0,
+                                    UWG_KERNEL_SIGSET_SIZE);
+#endif
+  }
+  if (real_poll_fn)
+    return real_poll_fn(fds, nfds, timeout);
+#ifdef SYS_poll
+  return (int)syscall(SYS_poll, fds, nfds, timeout);
+#elif defined(SYS_ppoll)
+  struct timespec ts;
+  struct timespec *tsp = NULL;
+  if (timeout >= 0) {
+    ts.tv_sec = timeout / 1000;
+    ts.tv_nsec = (long)(timeout % 1000) * 1000000L;
+    tsp = &ts;
+  }
+  return (int)syscall(SYS_ppoll, fds, nfds, tsp, NULL,
+                      UWG_KERNEL_SIGSET_SIZE);
+#else
+  errno = ENOSYS;
+  return -1;
+#endif
+}
+
+static int real_ppoll_call(struct pollfd *fds, nfds_t nfds,
+                           const struct timespec *timeout,
+                           const sigset_t *sigmask) {
+  if (use_passthrough_secret())
+    return (int)passthrough_syscall(SYS_ppoll, (long)fds, nfds, (long)timeout,
+                                    (long)sigmask, UWG_KERNEL_SIGSET_SIZE);
+  if (real_ppoll_fn)
+    return real_ppoll_fn(fds, nfds, timeout, sigmask);
+  return (int)syscall(SYS_ppoll, fds, nfds, timeout, sigmask,
+                      UWG_KERNEL_SIGSET_SIZE);
 }
 
 
@@ -1902,6 +1990,7 @@ int __connect(int fd, const struct sockaddr *addr, socklen_t len) {
   return connect(fd, addr, len);
 }
 
+#if UWG_HAS_FOPENCOOKIE
 FILE *fdopen(int fd, const char *mode) {
   init_real();
   if (tracked_reentrant_socket_fd(fd))
@@ -1936,6 +2025,18 @@ FILE *fdopen(int fd, const char *mode) {
 }
 
 FILE *fdopen64(int fd, const char *mode) { return fdopen(fd, mode); }
+#endif
+
+int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
+  init_real();
+  return real_poll_call(fds, nfds, timeout);
+}
+
+int ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
+          const sigset_t *sigmask) {
+  init_real();
+  return real_ppoll_call(fds, nfds, timeout, sigmask);
+}
 
 ssize_t send(int fd, const void *buf, size_t len, int flags) {
   init_real();
@@ -2457,7 +2558,11 @@ int dup2(int oldfd, int newfd) {
   int cold = fd_ok(oldfd) && should_cold_path(&state);
   hot_path_rdunlock();
   if (cold)
+#ifdef SYS_dup2
     return (int)cold_syscall(SYS_dup2, oldfd, newfd, 0, 0, 0, 0);
+#else
+    return (int)cold_syscall(SYS_dup3, oldfd, newfd, 0, 0, 0, 0);
+#endif
   int fd = real_dup2_call(oldfd, newfd);
   if (fd >= 0)
     copy_tracking(newfd, oldfd);
@@ -2884,7 +2989,8 @@ ssize_t recvmsg(int fd, struct msghdr *msg, int flags) {
   return real_recvmsg_call(fd, msg, flags);
 }
 
-int sendmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags) {
+int sendmmsg(int fd, UWG_SENDMMSG_CONST struct mmsghdr *vmessages,
+             unsigned int vlen, int flags) {
   init_real();
   if (tracked_reentrant_socket_fd(fd))
     return -1;
@@ -2895,7 +3001,7 @@ int sendmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags) {
       ssize_t n = sendmsg(fd, &vmessages[i].msg_hdr, flags);
       if (n < 0)
         return i ? (int)i : -1;
-      vmessages[i].msg_len = (unsigned int)n;
+      ((struct mmsghdr *)vmessages)[i].msg_len = (unsigned int)n;
     }
     return (int)i;
   }
@@ -2903,7 +3009,7 @@ int sendmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags) {
 }
 
 int recvmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags,
-             struct timespec *timeout) {
+             UWG_RECVMMSG_TIMEOUT_CONST struct timespec *timeout) {
   init_real();
   if (tracked_reentrant_socket_fd(fd))
     return -1;

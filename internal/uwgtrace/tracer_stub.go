@@ -1,11 +1,17 @@
 // Copyright (c) 2026 Reindert Pelsma
 // SPDX-License-Identifier: ISC
 
-//go:build !linux || !amd64
+//go:build (!linux || (!amd64 && !arm64)) && (!android || !arm64)
 
 package uwgtrace
 
-import "errors"
+import (
+	"errors"
+	"runtime"
+
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/uwgshared"
+	"golang.org/x/sys/unix"
+)
 
 var (
 	ErrPtraceUnavailable  = errors.New("ptrace tracing unavailable")
@@ -19,6 +25,7 @@ type Options struct {
 	SeccompMode     SeccompMode
 	NoNewPrivileges bool
 	Verbose         bool
+	Shared          *uwgshared.Table
 	StatsPath       string
 }
 
@@ -41,5 +48,8 @@ func RunTraceeHelper(args []string) error {
 }
 
 func SetNoNewPrivileges() error {
+	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
+		return unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+	}
 	return ErrPtraceUnavailable
 }
