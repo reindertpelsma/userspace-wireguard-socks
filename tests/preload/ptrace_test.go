@@ -122,6 +122,27 @@ func TestUWGWrapperBothMixedInterop(t *testing.T) {
 	}
 }
 
+func TestUWGWrapperPtraceOnlyAccidentalPreloadUsesSecretPassthrough(t *testing.T) {
+	requireWrapperToolchain(t)
+	art := buildWrapperArtifacts(t)
+	_, httpSock := setupWrapperNetwork(t)
+
+	out, stats := runWrappedTargetWithStats(t, art, httpSock, "ptrace-only", art.stub,
+		[]string{"100.64.94.1", "18080", "accidental-preload", "tcp-no-poll"},
+		wrapperRunOptions{
+			timeout: 60 * time.Second,
+			env: map[string]string{
+				"LD_PRELOAD": art.preload,
+			},
+		})
+	if normalizedOutput(out) != "accidental-preload" {
+		t.Fatalf("unexpected accidental preload output %q", out)
+	}
+	for _, name := range []string{"socket", "connect"} {
+		assertSyscallCount(t, stats, name, 0)
+	}
+}
+
 func TestUWGWrapperBothStress(t *testing.T) {
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)
