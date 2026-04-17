@@ -55,6 +55,7 @@ type Options struct {
 
 type tracer struct {
 	seccompMode SeccompMode
+	secret      uint64
 	verbose     bool
 	fdproxy     string
 	shared      *uwgshared.Table
@@ -181,6 +182,7 @@ func Run(opts Options) (int, error) {
 
 	t := &tracer{
 		seccompMode: opts.SeccompMode,
+		secret:      traceSecret(opts.Shared, opts.Env),
 		verbose:     opts.Verbose,
 		fdproxy:     opts.FDProxy,
 		shared:      opts.Shared,
@@ -472,6 +474,9 @@ func (t *tracer) dispatchInterceptedSyscall(tid int, regs unix.PtraceRegs, secco
 	if nr < 0 {
 		return t.resume(tid)
 	}
+	if t.hasPassthroughSecret(nr, regs) {
+		return t.resumeDefault(tid, seccompStop)
+	}
 	t.countSyscall(nr)
 	if t.verbose {
 		fmt.Fprintf(os.Stderr, "uwgwrapper: tid=%d syscall=%d seccomp=%t rax=%d\n", tid, nr, seccompStop, int64(regs.Rax))
@@ -527,6 +532,43 @@ func (t *tracer) dispatchInterceptedSyscall(tid int, regs unix.PtraceRegs, secco
 		return t.handlePoll(tid, regs, true, seccompStop)
 	default:
 		return t.resumeDefault(tid, seccompStop)
+	}
+}
+
+func (t *tracer) hasPassthroughSecret(nr int64, regs unix.PtraceRegs) bool {
+	if t.secret == 0 || regs.R9 != t.secret {
+		return false
+	}
+	switch nr {
+	case unix.SYS_SENDTO, unix.SYS_RECVFROM:
+		return false
+	case unix.SYS_SOCKET,
+		unix.SYS_CONNECT,
+		unix.SYS_BIND,
+		unix.SYS_LISTEN,
+		unix.SYS_ACCEPT,
+		unix.SYS_ACCEPT4,
+		unix.SYS_CLOSE,
+		unix.SYS_READ,
+		unix.SYS_WRITE,
+		unix.SYS_SENDMSG,
+		unix.SYS_RECVMSG,
+		unix.SYS_SENDMMSG,
+		unix.SYS_RECVMMSG,
+		unix.SYS_DUP,
+		unix.SYS_DUP2,
+		unix.SYS_DUP3,
+		unix.SYS_GETSOCKNAME,
+		unix.SYS_GETPEERNAME,
+		unix.SYS_SHUTDOWN,
+		unix.SYS_FCNTL,
+		unix.SYS_GETSOCKOPT,
+		unix.SYS_SETSOCKOPT,
+		unix.SYS_POLL,
+		unix.SYS_PPOLL:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -2982,6 +3024,19 @@ func parseSecret(raw string) uint64 {
 	}
 	secret, _ := strconv.ParseUint(raw, 10, 64)
 	return secret
+}
+
+func traceSecret(shared *uwgshared.Table, env []string) uint64 {
+	if secret := shared.Secret(); secret != 0 {
+		return secret
+	}
+	prefix := envTraceSecret + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return parseSecret(strings.TrimPrefix(entry, prefix))
+		}
+	}
+	return 0
 }
 
 func boolString(v bool) string {
