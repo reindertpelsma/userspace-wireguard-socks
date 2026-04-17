@@ -63,13 +63,28 @@ static void install_stubs(void) {
     real_write_fn = stub_write; real_dup_fn = stub_dup; real_dup2_fn = stub_dup2; real_dup3_fn = stub_dup3;
     real_getsockname_fn = stub_getsockname; real_getpeername_fn = stub_getpeername; real_shutdown_fn = stub_shutdown;
 }
-static void reset_tracking(void) { memset(tracked, 0, sizeof(tracked)); fallback_getsockname_called = 0; fallback_getpeername_called = 0; fallback_shutdown_called = 0; }
+static void reset_tracking(void) {
+    memset(tracked, 0, sizeof(tracked));
+    memset(&local_tracked_lock, 0, sizeof(local_tracked_lock));
+    fallback_getsockname_called = 0;
+    fallback_getpeername_called = 0;
+    fallback_shutdown_called = 0;
+}
+
+static void set_tracked_fd(int fd, const struct tracked_fd *state) {
+    tracked_store(fd, state);
+}
+
 int main(void) {
     install_stubs();
-    reset_tracking(); tracked[42].proxied = 1; tracked[42].kind = KIND_UDP_LISTENER; tracked[42].domain = AF_INET; tracked[42].bound = 1; tracked[42].bind_family = AF_INET; tracked[42].bind_port = 5353; snprintf(tracked[42].bind_ip, sizeof(tracked[42].bind_ip), "%s", "10.1.2.3");
+    struct tracked_fd state;
+    memset(&state, 0, sizeof(state));
+    reset_tracking(); state.proxied = 1; state.kind = KIND_UDP_LISTENER; state.domain = AF_INET; state.bound = 1; state.bind_family = AF_INET; state.bind_port = 5353; snprintf(state.bind_ip, sizeof(state.bind_ip), "%s", "10.1.2.3"); set_tracked_fd(42, &state);
     struct sockaddr_in in; socklen_t len = sizeof(in); assert(getsockname(42, (struct sockaddr *)&in, &len) == 0); assert(fallback_getsockname_called == 0); assert(ntohs(in.sin_port) == 5353);
-    reset_tracking(); tracked[42].proxied = 1; tracked[42].kind = KIND_TCP_STREAM; tracked[42].domain = AF_INET6; tracked[42].remote_family = AF_INET; tracked[42].remote_port = 443; snprintf(tracked[42].remote_ip, sizeof(tracked[42].remote_ip), "%s", "93.184.216.34"); len = sizeof(in); assert(getpeername(42, (struct sockaddr *)&in, &len) == 0); assert(fallback_getpeername_called == 0); assert(ntohs(in.sin_port) == 443);
-    reset_tracking(); tracked[42].proxied = 1; tracked[42].kind = KIND_UDP_CONNECTED; assert(shutdown(42, SHUT_RDWR) == 0); assert(fallback_shutdown_called == 0);
+    memset(&state, 0, sizeof(state));
+    reset_tracking(); state.proxied = 1; state.kind = KIND_TCP_STREAM; state.domain = AF_INET6; state.remote_family = AF_INET; state.remote_port = 443; snprintf(state.remote_ip, sizeof(state.remote_ip), "%s", "93.184.216.34"); set_tracked_fd(42, &state); len = sizeof(in); assert(getpeername(42, (struct sockaddr *)&in, &len) == 0); assert(fallback_getpeername_called == 0); assert(ntohs(in.sin_port) == 443);
+    memset(&state, 0, sizeof(state));
+    reset_tracking(); state.proxied = 1; state.kind = KIND_UDP_CONNECTED; set_tracked_fd(42, &state); assert(shutdown(42, SHUT_RDWR) == 0); assert(fallback_shutdown_called == 0);
     reset_tracking(); len = sizeof(in); assert(getsockname(43, (struct sockaddr *)&in, &len) == 0); assert(fallback_getsockname_called == 1); len = sizeof(in); assert(getpeername(43, (struct sockaddr *)&in, &len) == 0); assert(fallback_getpeername_called == 1); assert(shutdown(43, SHUT_RDWR) == 0); assert(fallback_shutdown_called == 1);
     puts("ok");
     return 0;

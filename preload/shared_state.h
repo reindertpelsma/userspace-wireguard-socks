@@ -15,6 +15,10 @@
 #define MAX_TRACKED_FD 65536
 #endif
 
+#ifndef MAX_TRACKED_SLOTS
+#define MAX_TRACKED_SLOTS 65536
+#endif
+
 #ifndef UWG_GUARD_SLOTS
 #define UWG_GUARD_SLOTS 256
 #endif
@@ -46,6 +50,12 @@ struct tracked_fd {
   char remote_ip[46];
   int saved_fl;
   int saved_fdfl;
+};
+
+struct tracked_slot {
+  int32_t owner_pid;
+  int32_t fd;
+  struct tracked_fd state;
 };
 
 struct uwg_rwlock {
@@ -110,7 +120,7 @@ static inline void uwg_rwlock_wrunlock(struct uwg_rwlock *lock) {
 }
 
 #define UWG_SHARED_MAGIC 0x55574753u
-#define UWG_SHARED_VERSION 5u
+#define UWG_SHARED_VERSION 6u
 
 static inline int uwg_guard_hold_slot(struct uwg_guardlock *lock, int32_t tid) {
   for (size_t i = 0; i < UWG_GUARD_SLOTS; i++) {
@@ -186,7 +196,7 @@ struct uwg_shared_state {
   uint64_t syscall_passthrough_secret;
   struct uwg_rwlock lock;
   struct uwg_guardlock guard;
-  struct tracked_fd tracked[MAX_TRACKED_FD];
+  struct tracked_slot tracked[MAX_TRACKED_SLOTS];
 };
 
 #endif

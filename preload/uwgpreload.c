@@ -50,11 +50,12 @@ static int force_dns_dgram_fd(int fd);
 
 #define MAX_PACKET (1u << 20)
 
-static struct tracked_fd tracked[MAX_TRACKED_FD];
+static struct tracked_slot tracked[MAX_TRACKED_SLOTS];
 static struct uwg_rwlock local_tracked_lock;
 static struct uwg_guardlock local_hot_path_guard;
 static struct uwg_shared_state *shared_state;
 static uint64_t syscall_passthrough_secret;
+static int reconciled_pid;
 static pthread_once_t shared_state_once = PTHREAD_ONCE_INIT;
 static pthread_once_t atfork_once = PTHREAD_ONCE_INIT;
 static __thread int tracked_read_depth;
@@ -98,14 +99,18 @@ static int tracked_rdlock(void);
 static int tracked_wrlock(void);
 static void tracked_rdunlock(void);
 static void tracked_wrunlock(void);
-static struct tracked_fd *tracked_table(void);
+static struct tracked_slot *tracked_slots(void);
 static struct tracked_fd tracked_snapshot(int fd);
+static struct tracked_fd tracked_peek(int fd);
 static void tracked_store(int fd, const struct tracked_fd *state);
 static void tracked_clear_fd(int fd);
+static void tracked_clear_process(int32_t pid);
 static void tracked_map_if_needed(void);
 static void tracked_map_once(void);
+static void tracked_reconcile_current_process(void);
 static void install_atfork_once(void);
 static void atfork_child_reset(void);
+static int current_pid_key(void);
 static int current_tid(void);
 static int tracked_lock_reentrant(void);
 static int tracked_reentrant_socket_fd(int fd);
@@ -122,6 +127,15 @@ static long cold_syscall(long nr, long a1, long a2, long a3, long a4, long a5,
 static int use_passthrough_secret(void);
 static int fd_ok(int fd);
 static int should_cold_path(const struct tracked_fd *state);
+static uint32_t tracked_hash(int32_t pid, int fd);
+static int tracked_find_slot_locked(int32_t pid, int fd, int create,
+                                    size_t *idx_out);
+static void tracked_copy_process_entries(int32_t src_pid, int32_t dst_pid);
+static int tracked_fd_is_zero(const struct tracked_fd *state);
+
+__attribute__((destructor)) static void tracked_process_cleanup(void) {
+  tracked_clear_process(current_pid_key());
+}
 
 struct uwg_stdio_cookie {
   int fd;
@@ -165,12 +179,16 @@ static void install_atfork_once(void) {
 }
 
 static void atfork_child_reset(void) {
+  int parent_pid = (int)syscall(SYS_getppid);
+  int child_pid = current_pid_key();
   tracked_read_depth = 0;
   tracked_write_depth = 0;
   hot_path_read_depth = 0;
   hot_path_write_depth = 0;
+  reconciled_pid = 0;
   memset(&local_tracked_lock, 0, sizeof(local_tracked_lock));
   memset(&local_hot_path_guard, 0, sizeof(local_hot_path_guard));
+  tracked_copy_process_entries(parent_pid, child_pid);
 }
 
 static int real_socket_call(int domain, int type, int protocol) {
@@ -535,7 +553,7 @@ static void debugf(const char *fmt, ...) {
   }
 }
 
-static struct tracked_fd *tracked_table(void) {
+static struct tracked_slot *tracked_slots(void) {
   if (shared_state)
     return shared_state->tracked;
   return tracked;
@@ -565,7 +583,56 @@ static void tracked_map_once(void) {
 
 static void tracked_map_if_needed(void) {
   (void)pthread_once(&shared_state_once, tracked_map_once);
+  tracked_reconcile_current_process();
 }
+
+static void tracked_reconcile_current_process(void) {
+  int32_t pid = current_pid_key();
+  struct uwg_rwlock *lock = NULL;
+  int *fds = NULL;
+  size_t count = 0;
+  size_t cap = 0;
+
+  if (!shared_state || pid <= 0 || reconciled_pid == pid)
+    return;
+  lock = &shared_state->lock;
+  if (uwg_rwlock_wrlock(lock, current_tid()) != 0)
+    return;
+  for (size_t i = 0; i < MAX_TRACKED_SLOTS; i++) {
+    struct tracked_slot *slot = &shared_state->tracked[i];
+    int *next = NULL;
+    if (slot->owner_pid != pid || slot->fd < 0)
+      continue;
+    if (count == cap) {
+      size_t new_cap = cap ? cap * 2 : 16;
+      next = realloc(fds, new_cap * sizeof(*fds));
+      if (!next)
+        break;
+      fds = next;
+      cap = new_cap;
+    }
+    fds[count++] = slot->fd;
+  }
+  uwg_rwlock_wrunlock(lock);
+  for (size_t i = 0; i < count; i++) {
+    size_t idx = 0;
+    if (syscall(SYS_fcntl, fds[i], F_GETFD) >= 0 || errno != EBADF)
+      continue;
+    if (uwg_rwlock_wrlock(lock, current_tid()) != 0)
+      break;
+    if (tracked_find_slot_locked(pid, fds[i], 0, &idx) == 0) {
+      shared_state->tracked[idx].owner_pid = -1;
+      shared_state->tracked[idx].fd = -1;
+      memset(&shared_state->tracked[idx].state, 0,
+             sizeof(shared_state->tracked[idx].state));
+    }
+    uwg_rwlock_wrunlock(lock);
+  }
+  free(fds);
+  reconciled_pid = pid;
+}
+
+static int current_pid_key(void) { return (int)syscall(SYS_getpid); }
 
 static int current_tid(void) { return (int)syscall(SYS_gettid); }
 
@@ -614,14 +681,15 @@ static struct uwg_rwlock *tracked_lock(void) {
 static int tracked_lock_reentrant(void) {
   struct uwg_rwlock *lock = tracked_lock();
   int tid = current_tid();
-  return tracked_read_depth > 0 || tracked_write_depth > 0 ||
+  return hot_path_read_depth > 0 || hot_path_write_depth > 0 ||
+         tracked_read_depth > 0 || tracked_write_depth > 0 ||
          uwg_rwlock_writer_owned_by(lock, tid);
 }
 
 static int tracked_reentrant_socket_fd(int fd) {
   if (!tracked_lock_reentrant() || !fd_ok(fd))
     return 0;
-  struct tracked_fd state = tracked_table()[fd];
+  struct tracked_fd state = tracked_peek(fd);
   if (!state.active && !state.proxied)
     return 0;
   errno = EDEADLK;
@@ -691,35 +759,152 @@ static void tracked_wrunlock(void) {
   uwg_rwlock_wrunlock(tracked_lock());
 }
 
+static uint32_t tracked_hash(int32_t pid, int fd) {
+  uint64_t x = ((uint64_t)(uint32_t)pid << 32) | (uint32_t)fd;
+  x ^= x >> 33;
+  x *= 0xff51afd7ed558ccdULL;
+  x ^= x >> 33;
+  x *= 0xc4ceb9fe1a85ec53ULL;
+  x ^= x >> 33;
+  return (uint32_t)x & (MAX_TRACKED_SLOTS - 1);
+}
+
+static int tracked_find_slot_locked(int32_t pid, int fd, int create,
+                                    size_t *idx_out) {
+  size_t first_tombstone = SIZE_MAX;
+
+  if (!idx_out || pid <= 0 || !fd_ok(fd))
+    return -1;
+  for (size_t probe = 0; probe < MAX_TRACKED_SLOTS; probe++) {
+    size_t idx = (tracked_hash(pid, fd) + probe) & (MAX_TRACKED_SLOTS - 1);
+    struct tracked_slot *slot = &tracked_slots()[idx];
+    if (slot->owner_pid == pid && slot->fd == fd) {
+      *idx_out = idx;
+      return 0;
+    }
+    if (slot->owner_pid == 0) {
+      if (!create)
+        return -1;
+      if (first_tombstone != SIZE_MAX) {
+        *idx_out = first_tombstone;
+        return 1;
+      }
+      *idx_out = idx;
+      return 1;
+    }
+    if (slot->owner_pid == -1 && first_tombstone == SIZE_MAX)
+      first_tombstone = idx;
+  }
+  if (create && first_tombstone != SIZE_MAX) {
+    *idx_out = first_tombstone;
+    return 1;
+  }
+  return -1;
+}
+
+static int tracked_fd_is_zero(const struct tracked_fd *state) {
+  static const struct tracked_fd zero;
+  return state && memcmp(state, &zero, sizeof(zero)) == 0;
+}
+
+static void tracked_copy_process_entries(int32_t src_pid, int32_t dst_pid) {
+  if (src_pid <= 0 || dst_pid <= 0 || src_pid == dst_pid)
+    return;
+  if (tracked_wrlock() != 0)
+    return;
+  for (size_t i = 0; i < MAX_TRACKED_SLOTS; i++) {
+    struct tracked_slot slot = tracked_slots()[i];
+    size_t dst = 0;
+    if (slot.owner_pid != src_pid)
+      continue;
+    if (tracked_find_slot_locked(dst_pid, slot.fd, 1, &dst) < 0)
+      continue;
+    tracked_slots()[dst].owner_pid = dst_pid;
+    tracked_slots()[dst].fd = slot.fd;
+    tracked_slots()[dst].state = slot.state;
+  }
+  tracked_wrunlock();
+}
+
 static struct tracked_fd tracked_snapshot(int fd) {
   struct tracked_fd out;
+  size_t idx = 0;
   memset(&out, 0, sizeof(out));
   if (!fd_ok(fd))
     return out;
   if (tracked_rdlock() != 0)
     return out;
-  out = tracked_table()[fd];
+  if (tracked_find_slot_locked(current_pid_key(), fd, 0, &idx) == 0)
+    out = tracked_slots()[idx].state;
   tracked_rdunlock();
   return out;
 }
 
+static struct tracked_fd tracked_peek(int fd) {
+  struct tracked_fd out;
+  size_t idx = 0;
+
+  memset(&out, 0, sizeof(out));
+  if (!fd_ok(fd))
+    return out;
+  if (tracked_find_slot_locked(current_pid_key(), fd, 0, &idx) == 0)
+    out = tracked_slots()[idx].state;
+  return out;
+}
+
 static void tracked_store(int fd, const struct tracked_fd *state) {
+  size_t idx = 0;
+  int32_t pid = current_pid_key();
   if (!fd_ok(fd) || !state)
     return;
   if (tracked_wrlock() != 0)
     return;
+  if (tracked_find_slot_locked(pid, fd, 1, &idx) < 0) {
+    tracked_wrunlock();
+    return;
+  }
   tracked_test_delay();
-  tracked_table()[fd] = *state;
+  if (tracked_fd_is_zero(state)) {
+    tracked_slots()[idx].owner_pid = -1;
+    tracked_slots()[idx].fd = -1;
+    memset(&tracked_slots()[idx].state, 0, sizeof(tracked_slots()[idx].state));
+  } else {
+    tracked_slots()[idx].owner_pid = pid;
+    tracked_slots()[idx].fd = fd;
+    tracked_slots()[idx].state = *state;
+  }
   tracked_wrunlock();
 }
 
 static void tracked_clear_fd(int fd) {
+  size_t idx = 0;
   if (!fd_ok(fd))
     return;
   if (tracked_wrlock() != 0)
     return;
+  if (tracked_find_slot_locked(current_pid_key(), fd, 0, &idx) != 0) {
+    tracked_wrunlock();
+    return;
+  }
   tracked_test_delay();
-  memset(&tracked_table()[fd], 0, sizeof(tracked_table()[fd]));
+  tracked_slots()[idx].owner_pid = -1;
+  tracked_slots()[idx].fd = -1;
+  memset(&tracked_slots()[idx].state, 0, sizeof(tracked_slots()[idx].state));
+  tracked_wrunlock();
+}
+
+static void tracked_clear_process(int32_t pid) {
+  if (pid <= 0)
+    return;
+  if (tracked_wrlock() != 0)
+    return;
+  for (size_t i = 0; i < MAX_TRACKED_SLOTS; i++) {
+    if (tracked_slots()[i].owner_pid != pid)
+      continue;
+    tracked_slots()[i].owner_pid = -1;
+    tracked_slots()[i].fd = -1;
+    memset(&tracked_slots()[i].state, 0, sizeof(tracked_slots()[i].state));
+  }
   tracked_wrunlock();
 }
 
@@ -1752,7 +1937,7 @@ ssize_t send(int fd, const void *buf, size_t len, int flags) {
     errno = EDESTADDRREQ;
     return -1;
   }
-  return real_write_call(fd, buf, len);
+  return real_send_call(fd, buf, len, flags);
 }
 
 ssize_t __send(int fd, const void *buf, size_t len, int flags) {
@@ -1818,7 +2003,7 @@ ssize_t recv(int fd, void *buf, size_t len, int flags) {
   if (fd_ok(fd) && state.proxied && state.kind == KIND_UDP_LISTENER) {
     return recvfrom(fd, buf, len, flags, NULL, NULL);
   }
-  return real_read_call(fd, buf, len);
+  return real_recv_call(fd, buf, len, flags);
 }
 
 ssize_t __recv(int fd, void *buf, size_t len, int flags) {

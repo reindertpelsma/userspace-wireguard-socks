@@ -5,11 +5,13 @@ package preload_test
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -52,7 +54,7 @@ func TestUWGWrapperNodeHeadlessChromeSmoke(t *testing.T) {
 		<-serverDone
 	}()
 
-	out := runWrappedTargetWithOptions(t, art, pair.clientHTTPSock, transport, chromeBin,
+	out, stderr := runWrappedTargetBrowser(t, art, pair.clientHTTPSock, transport, chromeBin,
 		[]string{
 			"--headless",
 			"--no-sandbox",
@@ -60,10 +62,9 @@ func TestUWGWrapperNodeHeadlessChromeSmoke(t *testing.T) {
 			"--virtual-time-budget=5000",
 			"--dump-dom",
 			"http://100.64.94.1:18090/",
-		},
-		wrapperRunOptions{timeout: 45 * time.Second})
+		})
 	if !strings.Contains(string(out), "script-ok:204") {
-		t.Fatalf("unexpected headless chrome output %q\nserver stderr=%s", out, serverStderr.String())
+		t.Fatalf("unexpected headless chrome output %q\nbrowser stderr=%s\nserver stderr=%s", out, stderr, serverStderr.String())
 	}
 	waitForFileContent(t, markFile, "chrome-post-ok")
 }
@@ -129,4 +130,46 @@ func waitForFileContent(t *testing.T, path, want string) {
 	}
 	data, _ := os.ReadFile(path)
 	t.Fatalf("timed out waiting for %s to contain %q, got %q", path, want, data)
+}
+
+func runWrappedTargetBrowser(t *testing.T, art wrapperArtifacts, httpSock, transport, target string, args []string) ([]byte, []byte) {
+	t.Helper()
+
+	base := wrappedCommand(t, art, httpSock, transport, target, args, wrapperRunOptions{timeout: 45 * time.Second})
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, base.Path, base.Args[1:]...)
+	cmd.Env = append([]string{}, base.Env...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	stdoutPath := filepath.Join(t.TempDir(), "browser.out")
+	stderrPath := filepath.Join(t.TempDir(), "browser.err")
+	stdoutFile, err := os.Create(stdoutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdoutFile.Close()
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderrFile.Close()
+	cmd.Stdout = stdoutFile
+	cmd.Stderr = stderrFile
+
+	runErr := cmd.Run()
+	_ = stdoutFile.Close()
+	_ = stderrFile.Close()
+	stdout, _ := os.ReadFile(stdoutPath)
+	stderr, _ := os.ReadFile(stderrPath)
+	killProcessGroup(cmd)
+
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("wrapped browser %s %v timed out\n%s", target, args, stderr)
+	}
+	if runErr != nil {
+		t.Fatalf("wrapped browser %s %v failed: %v\nstdout=%s\nstderr=%s", target, args, runErr, stdout, stderr)
+	}
+	return stdout, stderr
 }
