@@ -536,6 +536,10 @@ func (t *tracer) dispatchInterceptedSyscall(tid int, regs unix.PtraceRegs, secco
 		return t.handleRead(tid, regs, seccompStop)
 	case unix.SYS_WRITE:
 		return t.handleWrite(tid, regs, seccompStop)
+	case unix.SYS_READV:
+		return t.handleReadv(tid, regs, seccompStop)
+	case unix.SYS_WRITEV:
+		return t.handleWritev(tid, regs, seccompStop)
 	case unix.SYS_DUP:
 		return t.handleDup(tid, regs, seccompStop)
 	case unix.SYS_DUP2, unix.SYS_DUP3:
@@ -577,6 +581,8 @@ func (t *tracer) hasPassthroughSecret(nr int64, regs unix.PtraceRegs) bool {
 		unix.SYS_CLOSE,
 		unix.SYS_READ,
 		unix.SYS_WRITE,
+		unix.SYS_READV,
+		unix.SYS_WRITEV,
 		unix.SYS_SENDMSG,
 		unix.SYS_RECVMSG,
 		unix.SYS_SENDMMSG,
@@ -942,6 +948,57 @@ func (t *tracer) handleWrite(tid int, regs unix.PtraceRegs, seccompStop bool) er
 		return t.handleSendto(tid, regs, seccompStop)
 	}
 	return t.resumeDefault(tid, seccompStop)
+}
+
+func (t *tracer) handleReadv(tid int, regs unix.PtraceRegs, seccompStop bool) error {
+	fd := int(int32(regs.Rdi))
+	iovPtr := uintptr(regs.Rsi)
+	iovLen := uint64(regs.Rdx)
+	state := t.trackedSnapshot(tid, fd)
+	if state.Active == 0 && state.Proxied == 0 {
+		return t.resumeDefault(tid, seccompStop)
+	}
+	iov, total, err := t.readTraceIovecs(tid, iovPtr, iovLen)
+	if err != nil {
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+	}
+	result, _, _, _, handled, err := t.emulateRecvBuffer(tid, fd, total)
+	if !handled {
+		return t.resumeDefault(tid, seccompStop)
+	}
+	if err != nil {
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+	}
+	if len(result) > 0 {
+		if err := t.writeTraceIovecPayload(tid, iov, result); err != nil {
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+		}
+	}
+	return t.finishEmulated(tid, regs, int64(len(result)), seccompStop)
+}
+
+func (t *tracer) handleWritev(tid int, regs unix.PtraceRegs, seccompStop bool) error {
+	fd := int(int32(regs.Rdi))
+	iovPtr := uintptr(regs.Rsi)
+	iovLen := uint64(regs.Rdx)
+	state := t.trackedSnapshot(tid, fd)
+	if state.Active == 0 && state.Proxied == 0 {
+		return t.resumeDefault(tid, seccompStop)
+	}
+	iov, total, err := t.readTraceIovecs(tid, iovPtr, iovLen)
+	if err != nil {
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+	}
+	result, handled, err := t.emulateSendBuffer(tid, fd, func() ([]byte, error) {
+		return t.readTraceIovecPayload(tid, iov, total)
+	}, 0, 0)
+	if !handled {
+		return t.resumeDefault(tid, seccompStop)
+	}
+	if err != nil {
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+	}
+	return t.finishEmulated(tid, regs, result, seccompStop)
 }
 
 func (t *tracer) handleSendto(tid int, regs unix.PtraceRegs, seccompStop bool) error {
@@ -3016,6 +3073,10 @@ func syscallName(nr int64) string {
 		return "write"
 	case unix.SYS_READ:
 		return "read"
+	case unix.SYS_WRITEV:
+		return "writev"
+	case unix.SYS_READV:
+		return "readv"
 	case unix.SYS_DUP:
 		return "dup"
 	case unix.SYS_DUP2:

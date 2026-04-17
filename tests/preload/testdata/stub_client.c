@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -248,6 +249,46 @@ static int echo_sendmsg_recvmsg(int fd, const char *message, const struct sockad
     char combined[4096];
     if ((size_t)n >= sizeof(combined)) {
         fprintf(stderr, "recvmsg payload too large\n");
+        return 1;
+    }
+    size_t first = (size_t)n < sizeof(left) ? (size_t)n : sizeof(left);
+    memcpy(combined, left, first);
+    if ((size_t)n > first) {
+        memcpy(combined + first, right, (size_t)n - first);
+    }
+    combined[n] = 0;
+    printf("%s", combined);
+    return strcmp(combined, message) == 0 ? 0 : 1;
+}
+
+static int echo_readv_writev(int fd, const char *message) {
+    size_t want = strlen(message);
+    size_t split = want / 2;
+    struct iovec send_iov[2];
+    send_iov[0].iov_base = (void *)message;
+    send_iov[0].iov_len = split;
+    send_iov[1].iov_base = (void *)(message + split);
+    send_iov[1].iov_len = want - split;
+    if (writev(fd, send_iov, 2) != (ssize_t)want) {
+        perror("writev");
+        return 1;
+    }
+
+    char left[2048];
+    char right[2048];
+    struct iovec recv_iov[2];
+    recv_iov[0].iov_base = left;
+    recv_iov[0].iov_len = sizeof(left);
+    recv_iov[1].iov_base = right;
+    recv_iov[1].iov_len = sizeof(right) - 1;
+    ssize_t n = readv(fd, recv_iov, 2);
+    if (n < 0) {
+        perror("readv");
+        return 1;
+    }
+    char combined[4096];
+    if ((size_t)n >= sizeof(combined)) {
+        fprintf(stderr, "readv payload too large\n");
         return 1;
     }
     size_t first = (size_t)n < sizeof(left) ? (size_t)n : sizeof(left);
@@ -640,7 +681,7 @@ static int bind_from_env(int fd) {
 
 int main(int argc, char **argv) {
     if (argc < 4) {
-        fprintf(stderr, "usage: %s <ip> <port> <message> [tcp|udp|udp-unconnected|dup|fork|exec|exec-child|listen-tcp]\n", argv[0]);
+        fprintf(stderr, "usage: %s <ip> <port> <message> [tcp|udp|udp-unconnected|dup|fork|exec|exec-child|listen-tcp|msg|mmsg|iov]\n", argv[0]);
         return 2;
     }
     int socktype = SOCK_STREAM;
@@ -659,6 +700,7 @@ int main(int argc, char **argv) {
     int use_icmp = 0;
     int use_sendmsg_recvmsg = 0;
     int use_mmsg = 0;
+    int use_readv_writev = 0;
     int use_syscall_surface = 0;
     for (int i = 4; i < argc; i++) {
         if (strcmp(argv[i], "udp") == 0) {
@@ -702,6 +744,8 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "mmsg") == 0) {
             socktype = SOCK_DGRAM;
             use_mmsg = 1;
+        } else if (strcmp(argv[i], "iov") == 0) {
+            use_readv_writev = 1;
         } else if (strcmp(argv[i], "syscall-surface") == 0) {
             socktype = SOCK_STREAM;
             use_syscall_surface = 1;
@@ -805,6 +849,11 @@ int main(int argc, char **argv) {
     }
     if (use_sendmsg_recvmsg) {
         int rc = echo_sendmsg_recvmsg(fd, argv[3], NULL, 0);
+        close(fd);
+        return rc;
+    }
+    if (use_readv_writev) {
+        int rc = echo_readv_writev(fd, argv[3]);
         close(fd);
         return rc;
     }

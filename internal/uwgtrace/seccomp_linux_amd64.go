@@ -78,6 +78,8 @@ func buildSeccompProgram(mode SeccompMode, secret uint64) ([]unix.SockFilter, er
 		unix.SYS_CLOSE,
 		unix.SYS_READ,
 		unix.SYS_WRITE,
+		unix.SYS_READV,
+		unix.SYS_WRITEV,
 		unix.SYS_SENDMSG,
 		unix.SYS_RECVMSG,
 		unix.SYS_SENDMMSG,

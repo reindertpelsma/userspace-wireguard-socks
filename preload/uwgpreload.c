@@ -8,6 +8,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <sched.h>
@@ -77,6 +78,8 @@ static ssize_t (*real_send_fn)(int, const void *, size_t, int);
 static ssize_t (*real_recv_fn)(int, void *, size_t, int);
 static ssize_t (*real_read_fn)(int, void *, size_t);
 static ssize_t (*real_write_fn)(int, void *, size_t);
+static ssize_t (*real_readv_fn)(int, const struct iovec *, int);
+static ssize_t (*real_writev_fn)(int, const struct iovec *, int);
 static ssize_t (*real_sendmsg_fn)(int, const struct msghdr *, int) = NULL;
 static ssize_t (*real_recvmsg_fn)(int, struct msghdr *, int) = NULL;
 static int (*real_sendmmsg_fn)(int, struct mmsghdr *, unsigned int, int);
@@ -162,6 +165,8 @@ static void init_real(void) {
   real_recv_fn = dlsym(RTLD_NEXT, "recv");
   real_write_fn = dlsym(RTLD_NEXT, "write");
   real_read_fn = dlsym(RTLD_NEXT, "read");
+  real_writev_fn = dlsym(RTLD_NEXT, "writev");
+  real_readv_fn = dlsym(RTLD_NEXT, "readv");
   real_dup_fn = dlsym(RTLD_NEXT, "dup");
   real_dup2_fn = dlsym(RTLD_NEXT, "dup2");
   real_dup3_fn = dlsym(RTLD_NEXT, "dup3");
@@ -443,6 +448,22 @@ static ssize_t real_write_call(int fd, const void *buf, size_t len) {
   if (real_write_fn)
     return real_write_fn(fd, (void *)buf, len);
   return (ssize_t)syscall(SYS_write, fd, buf, len);
+}
+
+static ssize_t real_readv_call(int fd, const struct iovec *iov, int iovcnt) {
+  if (use_passthrough_secret())
+    return (ssize_t)passthrough_syscall(SYS_readv, fd, (long)iov, iovcnt, 0, 0);
+  if (real_readv_fn)
+    return real_readv_fn(fd, iov, iovcnt);
+  return (ssize_t)syscall(SYS_readv, fd, iov, iovcnt);
+}
+
+static ssize_t real_writev_call(int fd, const struct iovec *iov, int iovcnt) {
+  if (use_passthrough_secret())
+    return (ssize_t)passthrough_syscall(SYS_writev, fd, (long)iov, iovcnt, 0, 0);
+  if (real_writev_fn)
+    return real_writev_fn(fd, iov, iovcnt);
+  return (ssize_t)syscall(SYS_writev, fd, iov, iovcnt);
 }
 
 static int real_dup_call(int fd) {
@@ -2046,6 +2067,151 @@ ssize_t __read(int fd, void *buf, size_t len) {
 
 ssize_t __read_nocancel(int fd, void *buf, size_t len) {
   return read(fd, buf, len);
+}
+
+static int iovec_total_len(const struct iovec *iov, int iovcnt,
+                           size_t *total) {
+  if (iovcnt < 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (iovcnt > 0 && !iov) {
+    errno = EFAULT;
+    return -1;
+  }
+  *total = 0;
+  for (int i = 0; i < iovcnt; i++) {
+    if (iov[i].iov_len > (size_t)SSIZE_MAX - *total) {
+      errno = EINVAL;
+      return -1;
+    }
+    *total += iov[i].iov_len;
+  }
+  return 0;
+}
+
+static int gather_iovec_payload(const struct iovec *iov, int iovcnt,
+                                void **out, size_t *out_len) {
+  size_t total = 0;
+  if (iovec_total_len(iov, iovcnt, &total) != 0)
+    return -1;
+  char *buf = malloc(total ? total : 1);
+  if (!buf) {
+    errno = ENOMEM;
+    return -1;
+  }
+  size_t off = 0;
+  for (int i = 0; i < iovcnt; i++) {
+    if (iov[i].iov_len == 0)
+      continue;
+    memcpy(buf + off, iov[i].iov_base, iov[i].iov_len);
+    off += iov[i].iov_len;
+  }
+  *out = buf;
+  *out_len = total;
+  return 0;
+}
+
+static ssize_t scatter_iovec_payload(const struct iovec *iov, int iovcnt,
+                                     const void *data, size_t len) {
+  size_t total = 0;
+  if (iovec_total_len(iov, iovcnt, &total) != 0)
+    return -1;
+  (void)total;
+  size_t off = 0;
+  const char *src = data;
+  for (int i = 0; i < iovcnt && off < len; i++) {
+    size_t copy = iov[i].iov_len;
+    if (copy > len - off)
+      copy = len - off;
+    if (copy) {
+      memcpy(iov[i].iov_base, src + off, copy);
+      off += copy;
+    }
+  }
+  return (ssize_t)off;
+}
+
+ssize_t readv(int fd, const struct iovec *iov, int iovcnt) {
+  init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
+  hot_path_rdlock();
+  struct tracked_fd state = tracked_snapshot(fd);
+  int cold = fd_ok(fd) && should_cold_path(&state);
+  hot_path_rdunlock();
+  if (cold)
+    return (ssize_t)cold_syscall(SYS_readv, fd, (long)iov, iovcnt, 0, 0, 0);
+  if (!fd_ok(fd) || !state.proxied)
+    return real_readv_call(fd, iov, iovcnt);
+  if (state.kind != KIND_UDP_CONNECTED && state.kind != KIND_UDP_LISTENER)
+    return real_readv_call(fd, iov, iovcnt);
+
+  size_t total = 0;
+  if (iovec_total_len(iov, iovcnt, &total) != 0)
+    return -1;
+  if (total == 0)
+    return 0;
+
+  void *packet = NULL;
+  ssize_t n = read_packet(fd, &packet);
+  if (n < 0)
+    return -1;
+
+  ssize_t out = -1;
+  if (state.kind == KIND_UDP_CONNECTED) {
+    size_t copy = (size_t)n < total ? (size_t)n : total;
+    out = scatter_iovec_payload(iov, iovcnt, packet, copy);
+  } else {
+    char *payload = malloc(total ? total : 1);
+    if (!payload) {
+      errno = ENOMEM;
+    } else {
+      ssize_t decoded =
+          decode_udp_datagram(packet, (size_t)n, payload, total, NULL, NULL);
+      if (decoded >= 0)
+        out = scatter_iovec_payload(iov, iovcnt, payload, (size_t)decoded);
+      free(payload);
+    }
+  }
+  free(packet);
+  return out;
+}
+
+ssize_t __readv(int fd, const struct iovec *iov, int iovcnt) {
+  return readv(fd, iov, iovcnt);
+}
+
+ssize_t writev(int fd, const struct iovec *iov, int iovcnt) {
+  init_real();
+  if (tracked_reentrant_socket_fd(fd))
+    return -1;
+  hot_path_rdlock();
+  struct tracked_fd state = tracked_snapshot(fd);
+  int cold = fd_ok(fd) && should_cold_path(&state);
+  hot_path_rdunlock();
+  if (cold)
+    return (ssize_t)cold_syscall(SYS_writev, fd, (long)iov, iovcnt, 0, 0, 0);
+  if (!fd_ok(fd) || !state.proxied)
+    return real_writev_call(fd, iov, iovcnt);
+  if (state.kind == KIND_UDP_LISTENER) {
+    errno = EDESTADDRREQ;
+    return -1;
+  }
+  if (state.kind != KIND_UDP_CONNECTED)
+    return real_writev_call(fd, iov, iovcnt);
+
+  void *buf = NULL;
+  size_t len = 0;
+  if (gather_iovec_payload(iov, iovcnt, &buf, &len) != 0)
+    return -1;
+  int err = write_packet(fd, buf, len);
+  free(buf);
+  return err == 0 ? (ssize_t)len : -1;
+}
+
+ssize_t __writev(int fd, const struct iovec *iov, int iovcnt) {
+  return writev(fd, iov, iovcnt);
 }
 
 ssize_t sendto(int fd, const void *buf, size_t len, int flags,

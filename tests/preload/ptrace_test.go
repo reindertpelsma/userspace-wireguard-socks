@@ -282,6 +282,16 @@ func TestUWGWrapperMessageSyscallsAcrossTransports(t *testing.T) {
 			want: "udp-unconnected-msg",
 		},
 		{
+			name: "tcp-readv-writev",
+			args: []string{"100.64.94.1", "18080", "tcp-iov", "tcp", "iov"},
+			want: "tcp-iov",
+		},
+		{
+			name: "udp-readv-writev",
+			args: []string{"100.64.94.1", "18081", "udp-iov", "udp", "iov"},
+			want: "udp-iov",
+		},
+		{
 			name: "udp-sendmmsg-recvmmsg",
 			args: []string{"100.64.94.1", "18081", "udp-mmsg", "udp", "mmsg"},
 			want: "udp-mmsg",
@@ -652,6 +662,31 @@ func killProcessGroup(cmd *exec.Cmd) {
 	_ = cmd.Process.Kill()
 }
 
+func runCommandCombinedFileBacked(t *testing.T, cmd *exec.Cmd) ([]byte, error) {
+	t.Helper()
+	dir := t.TempDir()
+	stdoutPath := filepath.Join(dir, "stdout.log")
+	stderrPath := filepath.Join(dir, "stderr.log")
+	stdoutFile, err := os.Create(stdoutPath)
+	if err != nil {
+		t.Fatalf("create stdout log: %v", err)
+	}
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		_ = stdoutFile.Close()
+		t.Fatalf("create stderr log: %v", err)
+	}
+	cmd.Stdout = stdoutFile
+	cmd.Stderr = stderrFile
+	runErr := cmd.Run()
+	_ = stdoutFile.Close()
+	_ = stderrFile.Close()
+	stdout, _ := os.ReadFile(stdoutPath)
+	stderr, _ := os.ReadFile(stderrPath)
+	out := append(append([]byte{}, stdout...), stderr...)
+	return out, runErr
+}
+
 func startWrappedListenerProcess(t *testing.T, art wrapperArtifacts, httpSock, transport, target string, args []string, opts wrapperRunOptions) (*exec.Cmd, *bytes.Buffer, chan error) {
 	t.Helper()
 	var lastErr error
@@ -729,7 +764,7 @@ func runWrappedTargetWithOptions(t *testing.T, art wrapperArtifacts, httpSock, t
 		cmd := exec.CommandContext(ctx, base.Path, base.Args[1:]...)
 		cmd.Env = append([]string{}, base.Env...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		out, err := cmd.CombinedOutput()
+		out, err := runCommandCombinedFileBacked(t, cmd)
 		cancel()
 		if err == nil {
 			return out
