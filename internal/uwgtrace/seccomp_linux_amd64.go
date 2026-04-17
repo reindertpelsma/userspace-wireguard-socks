@@ -48,6 +48,14 @@ func buildSeccompProgram(mode SeccompMode, secret uint64) ([]unix.SockFilter, er
 	jeq := func(k uint32, jt, jf uint8) unix.SockFilter {
 		return unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: jt, Jf: jf, K: k}
 	}
+	jeqTarget := func(k uint32, target int) error {
+		skip := target - len(out) - 1
+		if skip < 0 || skip > 255 {
+			return syscall.EINVAL
+		}
+		out = append(out, jeq(k, uint8(skip), 0))
+		return nil
+	}
 	ret := func(v uint32) unix.SockFilter {
 		return unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: v}
 	}
@@ -96,41 +104,48 @@ func buildSeccompProgram(mode SeccompMode, secret uint64) ([]unix.SockFilter, er
 
 	switch mode {
 	case SeccompSimple:
-		for _, nr := range append(append([]uint32{}, secretBypassSyscalls...), alwaysTraceSyscalls...) {
-			out = append(out,
-				jeq(nr, 0, 1),
-				trace,
-			)
+		traceSyscalls := append(append([]uint32{}, secretBypassSyscalls...), alwaysTraceSyscalls...)
+		traceIndex := len(out) + len(traceSyscalls) + 1
+		for _, nr := range traceSyscalls {
+			if err := jeqTarget(nr, traceIndex); err != nil {
+				return nil, err
+			}
 		}
+		out = append(out, allow, trace)
 	case SeccompSecret:
 		if secret == 0 {
 			return nil, syscall.EINVAL
 		}
 		low := uint32(secret)
 		high := uint32(secret >> 32)
+		secretIndex := len(out) + len(secretBypassSyscalls) + len(alwaysTraceSyscalls) + 1
+		traceIndex := secretIndex + 6
 		for _, nr := range secretBypassSyscalls {
-			out = append(out,
-				jeq(nr, 0, 6),
-				ldAbs(seccompOffsetArg5Lo),
-				jeq(low, 0, 2),
-				ldAbs(seccompOffsetArg5Hi),
-				jeq(high, 1, 0),
-				trace,
-				allow,
-			)
+			if err := jeqTarget(nr, secretIndex); err != nil {
+				return nil, err
+			}
 		}
 		for _, nr := range alwaysTraceSyscalls {
-			out = append(out,
-				jeq(nr, 0, 1),
-				trace,
-			)
+			if err := jeqTarget(nr, traceIndex); err != nil {
+				return nil, err
+			}
 		}
+		out = append(out,
+			allow,
+			ldAbs(seccompOffsetArg5Lo),
+			jeq(low, 0, 2),
+			ldAbs(seccompOffsetArg5Hi),
+			jeq(high, 1, 0),
+			trace,
+			allow,
+			trace,
+		)
 	case SeccompNone:
 		// No filter should be installed in this mode.
+		out = append(out, allow)
 	default:
 		return nil, syscall.EINVAL
 	}
-	out = append(out, allow)
 
 	return out, nil
 }
