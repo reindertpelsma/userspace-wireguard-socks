@@ -236,7 +236,7 @@ func (t *QUICTransport) openPacketConn(ctx context.Context, target string) (net.
 }
 
 func (t *QUICTransport) resolveRemoteUDPAddr(target string) (net.Addr, error) {
-	if d, ok := t.dialer.(*DirectDialer); ok {
+	if d, ok := t.dialer.(*DirectDialer); ok && d.IPv6Translate {
 		target = d.translateAddr(target)
 	}
 	addr, err := net.ResolveUDPAddr("udp", target)

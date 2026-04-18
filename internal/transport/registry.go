@@ -44,6 +44,13 @@ func BuildRegistry(
 			return nil, fmt.Errorf("transport %q: %w", cfg.Name, err)
 		}
 
+		// Validate UDP listen address count.
+		if (cfg.Base == "" || cfg.Base == "udp") && cfg.Proxy.Type != "turn" {
+			if len(cfg.ListenAddresses) > 1 {
+				return nil, fmt.Errorf("transport %q: udp transport only supports a single listen address", cfg.Name)
+			}
+		}
+
 		// Resolve listen port.
 		listenPort := defaultListenPort
 		if cfg.ListenPort != nil {
@@ -67,7 +74,36 @@ func BuildRegistry(
 			bind.AddListenTransportWithPort(t, listenPort)
 		}
 	}
+
+	// Set the deterministic default transport for ParseEndpoint.
+	defaultName := resolveDefaultTransportName(configs, "")
+	if defaultName != "" {
+		bind.SetDefaultTransport(defaultName)
+	}
+
 	return bind, nil
+}
+
+// ResolveDefaultTransportName picks the default transport name from a list of
+// configs.  If override is non-empty it is returned directly.  Otherwise the
+// first NCO transport is used; if none exist the first transport is used.
+func ResolveDefaultTransportName(configs []Config, override string) string {
+	return resolveDefaultTransportName(configs, override)
+}
+
+func resolveDefaultTransportName(configs []Config, override string) string {
+	if override != "" {
+		return override
+	}
+	for _, tc := range configs {
+		if !IsConnectionOriented(tc) {
+			return tc.Name
+		}
+	}
+	if len(configs) > 0 {
+		return configs[0].Name
+	}
+	return ""
 }
 
 // buildDialer creates the ProxyDialer for a transport config.

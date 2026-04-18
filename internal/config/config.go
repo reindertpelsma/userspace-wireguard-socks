@@ -78,6 +78,11 @@ type WireGuard struct {
 	PostDown            []string `yaml:"post_down"`
 	Peers               []Peer   `yaml:"peers"`
 
+	// DefaultTransport is the name of the transport used for peers that do not
+	// specify an explicit Transport field.  When empty the first NCO transport
+	// in the Transports list is used; if none exist the first transport is used.
+	DefaultTransport string `yaml:"default_transport,omitempty"`
+
 	// Fields synthesized from #! directives in wg-quick config files.
 	// TURNDirectives holds raw TURN URLs from #!TURN= lines, e.g. "turn+tls://user:pass@host:port".
 	TURNDirectives []string `yaml:"turn_directives,omitempty"`

@@ -428,10 +428,33 @@ func wireGuardUAPI(wg config.WireGuard, transports []transport.Config) (string, 
 		return "", fmt.Errorf("private key: %w", err)
 	}
 	fmt.Fprintf(&b, "private_key=%s\n", hex.EncodeToString(key[:]))
-	if wg.ListenPort != nil {
-		fmt.Fprintf(&b, "listen_port=%d\n", *wg.ListenPort)
+
+	if len(transports) == 0 {
+		// Legacy path: emit listen_port from wg config directly.
+		if wg.ListenPort != nil {
+			fmt.Fprintf(&b, "listen_port=%d\n", *wg.ListenPort)
+		}
+	} else {
+		// Transport path: derive listen_port from the first listen transport.
+		emitted := false
+		for _, tc := range transports {
+			if tc.Listen {
+				if tc.ListenPort != nil {
+					fmt.Fprintf(&b, "listen_port=%d\n", *tc.ListenPort)
+				} else if wg.ListenPort != nil {
+					fmt.Fprintf(&b, "listen_port=%d\n", *wg.ListenPort)
+				}
+				emitted = true
+				break
+			}
+		}
+		_ = emitted // if no listen transport, omit listen_port entirely
 	}
+
 	b.WriteString("replace_peers=true\n")
+
+	defaultTName := transport.ResolveDefaultTransportName(transports, wg.DefaultTransport)
+
 	for _, peer := range wg.Peers {
 		pub, err := wgtypes.ParseKey(peer.PublicKey)
 		if err != nil {
@@ -447,14 +470,14 @@ func wireGuardUAPI(wg config.WireGuard, transports []transport.Config) (string, 
 		}
 		if peer.Endpoint != "" {
 			ep := peer.Endpoint
-			// Prepend "transportName@" so ParseEndpoint creates a DialEndpoint
-			// for connection-oriented transports rather than a plain UDP endpoint.
-			if peer.Transport != "" {
-				for _, tc := range transports {
-					if tc.Name == peer.Transport && transport.IsConnectionOriented(tc) {
-						ep = peer.Transport + "@" + peer.Endpoint
-						break
-					}
+			if len(transports) > 0 {
+				// Determine which transport name to prefix.
+				tName := peer.Transport
+				if tName == "" {
+					tName = defaultTName
+				}
+				if tName != "" {
+					ep = tName + "@" + peer.Endpoint
 				}
 			}
 			fmt.Fprintf(&b, "endpoint=%s\n", ep)
@@ -522,7 +545,17 @@ func (e *Engine) restoreStaticPeerEndpoints(now time.Time, fallback time.Duratio
 	}
 	for _, live := range status.Peers {
 		configuredPeer, ok := byKey[live.PublicKey]
-		if !ok || live.Endpoint == "" || live.Endpoint == configuredPeer.Endpoint {
+		if !ok || live.Endpoint == "" {
+			continue
+		}
+		// Strip any transport prefix (e.g. "quic-client@") from the live
+		// endpoint before comparing it to the configured endpoint, which never
+		// contains a prefix.
+		liveAddr := live.Endpoint
+		if idx := strings.Index(liveAddr, "@"); idx > 0 {
+			liveAddr = liveAddr[idx+1:]
+		}
+		if liveAddr == configuredPeer.Endpoint {
 			continue
 		}
 		if live.HasHandshake {
@@ -531,7 +564,7 @@ func (e *Engine) restoreStaticPeerEndpoints(now time.Time, fallback time.Duratio
 				continue
 			}
 		}
-		uapi, err := peerUAPI(configuredPeer, false)
+		uapi, err := peerUAPI(configuredPeer, false, e.cfg.Transports, transport.ResolveDefaultTransportName(e.cfg.Transports, e.cfg.WireGuard.DefaultTransport))
 		if err != nil {
 			continue
 		}
