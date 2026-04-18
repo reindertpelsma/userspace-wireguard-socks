@@ -1,0 +1,104 @@
+Add ptrace capability to the uwgwrapper, as its missing now.
+Here is the idea:
+- uwgwrapper allows userspace applications to connect to the uwgsocks client/server for both TCP/UDP and binding ports, without them supporting SOCKS or doing a port forward
+- currently uwgwrapper only supports libc build applications like curl and bash. This is a limitation as there are many applications not built against libc like GO binaries are. These are often statically linked
+- Therefore I want to add ptrace to uwgwrapper so it can intercept raw system calls and perform the correct proxying for static linked executables AND also importantly not all libc functions and other libraries use the libc syscall functions, sometimes syscall assembly instructions are inlined from macro in the library. this ptrace fixes that gap.
+
+however the ptrace has a problem in that its slower since it needs an additional roundtrip to the ptracer to intercept syscall, see if its for a emulated TCP/UDP/connect through the Wireguard, if so then tunnel it appropiately using fdproxy or otherwise passthrough, requiring switching overhead.
+
+This means that they work together. The preload does the hot path, it opens fdproxy sockets for wireguard but directly passthrough calls to non-socket operations like filesystem or IPC requiring much higher bandwidth and performance, by overloading libc functions and directly connecting to fdproxy.sock for socket calls. Whilst the ptrace catches all statically linked syscalls even in semi-dynamic linked applications ensuring correctnes..
+
+Its then important to share the
+
+struct tracked_fd {
+  int active;
+  int domain;
+  int type;
+  int protocol;
+  int proxied;
+  int kind;
+  int bound;
+  int bind_family;
+  uint16_t bind_port;
+  char bind_ip[INET6_ADDRSTRLEN];
+  int remote_family;
+  uint16_t remote_port;
+  char remote_ip[INET6_ADDRSTRLEN];
+  int saved_fl;
+  int saved_fdfl;
+};
+
+static struct tracked_fd tracked[MAX_TRACKED_FD];
+
+with both the ptracer go application and with the C preload. It might happen that a write happpens through preload and catched, and later the program invokes a function using a syscall fallback that needs to use ptracer. If they share the same state, then it does not matter when which reads/writes
+
+For you its relevant if you also share the mutex across them, and that in the ptracer go a seperate GO routine is atleast started per thread of what's being intercepted.
+
+Okay so the only clue left is not to intercept all syscalls but only the relevant ones. My idea is to use seccomp in front of it, that says either ALLOW syscall or TRACE syscall.
+First you know a whole bunch of syscalls not relevant to sockets, such as gettimeofday and such. For these, you can immediately return ALLOW since its absolutely unnecessary to make a ptrace roundtrip for them. 
+
+Then the trick is to use the sixth argument of a syscall, by most syscalls we use this one is ignored/undefined/not part of it but the register still exists in CPU, to a fixed value to disable TRACE. So what you do if the syscall is one of that needs intercepting like send(2)/write(2)/recv(2)/connect(2)/recvfrom(2) etc, you check if the sixth argument is equal to a predefined value using the BPF in seccomp. If true: you know okay this syscall was called by the preload.so in the hot path, it already checked if the fd needs to be intercepted or not, so I can already passthrough. If false: you know that the syscall is probably invoked by the application. If the sixth argument is a 64 bit predefined random value, then the chance even if the sixth register is undefined that the chance it matches this exact random value is very very slim to let a non-preload hot path catched syscall slip through for that thread. This also means that this 6th argument register needs to be constantly cleared after the preload.so executes a syscall fallthrough.
+
+So instead in uwgpreload.c you call real_fn you call real_syscall(2) directly and always give 6 arguments. the 6th argument is the predefined, do not trace me value, and the other arguments between 5 and 1 that are unused are just NULL.
+
+For security what the value of this sixth argument is must be different per traced process to prevent network applicatons or data guess this value (for exploit resistance). The ptracer commmunicates the static struct tracked_fd tracked[MAX_TRACKED_FD]; and also communicates a mutex for tracked table modifications (with multiple read supprot on that mutex) and also a static uint64_t syscall_passthrough_secret that's also give by the ptracer.
+
+On top of that, some restricted envrionments is seccomp/ptrace disabled. For them, you still need to support that the preload.so alone is sufficient to intercept applications that are built on libc. So if static struct tracked_fd tracked[MAX_TRACKED_FD]; is not given by a ptracer then it should just use its own table.
+
+Remember that static struct tracked_fd tracked[MAX_TRACKED_FD]; should keep across execve boundaries and forks. (and use CLOSE_ON_EXEC to also close fds in this table)
+If there is a ptracer, then it will manage the tracked state across executable boundaries and forks anyways.
+
+If ptrace is supported but seccomp is disabled then its useless to combine the preload.so with ptrace, since you cannot determine when a syscall is intercepted or not so for all socket related syscalls a round trip to the ptracer needs to be made, making the hot path optimalization useless. Since ptrace has better support, we then use only ptrace and skip the preload.so in the default settings.
+
+This means that the default order of trying for the wrapper:
+- ptrace + seccomp + preload.so hot path + cold path combination.
+- ptrace only
+- preload.so only, since above are blocked
+
+The user can also select a mode specifically. A flag needs to be added that hot path is preferred maybe because the user already knows its application only uses libc, in that case the order is
+- ptrace + seccomp + preload.so hot path + cold path combination.
+- preload.so
+
+The user can also disable ptrace altogether and only use preload.so, or only use trace and no preload.so when launching the wrapper
+
+The final architecture:
+(usually fdproxy is merged in the uwgwrapper for ease of use):
+
+The application -> 
+prelod.so hot path -> 
+Seccomp in kernel checking socket eligbility and if hot path did not catch it:
+   -> Yes eligible syscall and hot path did not catch it: intercept the syscall. 
+       -> ugwrapper is now a ptracer daemon
+         -> is the file descritpor in the syscall something to intercept: yes: intercept and exeucte against fdproxy socket
+         -> no: ptrace lets passthrough
+   -> No: passthrough syscall
+   
+The ptracer in ugwrapper also uses fdproxy, the same socket, so that if a socket is opened to the fdproxy.sock that it can be used by preload.so and the ptracer (executign I/O syscalsl behalf of the process) interchangeably, this is why the fd track table is also shared.
+
+Tihs means that the ptracer.go largely needs to implement the same functionality as uwgpreload.c, only this time instead of a override/real fn its more like what happens when syscall connect(2)/sendto(2) is intercepted, what kind of actual syscalls should I let the process call (as if I was preload) so that it connects to fdproxy.sock and connects through Wireguard.
+
+Ensure you test it, make a test where you test the preload.so and ptrace hot paths, that some syscalls of the same fd go through some do not, test if executables switch, test with a dummy wireguard server and execute a system util like curl everyone has through it to test. The stub client is now the exact mix thats hard; a mix of inlined static syscalls and dynamic syscalls linked to libc. Test that if a call happens through hot path the cold path does not intercept it. 
+
+Also ensures that you test since the fd table can be shared/modified by multiple threads, test safety of it by making simultenously stress test conenct attempts or modifications ot the same socket seeing if no corruption occurs.
+
+here are all syscalls as also in ugwrapper.c you need to support:
+socket
+connect
+bind
+listen
+accept
+accept4
+close
+sendto
+recvfrom
+write
+read
+dup
+dup2
+dup3
+getsockname
+getpeername
+shutdown
+fcntl
+getsockopt
+setsockopt

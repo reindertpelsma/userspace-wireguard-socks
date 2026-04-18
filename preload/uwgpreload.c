@@ -2808,6 +2808,11 @@ int getsockopt(int fd, int level, int optname, void *optval,
   struct tracked_fd state = tracked_snapshot(fd);
   int managed = fd_ok(fd) && (state.active || state.proxied) && optval && optlen;
   hot_path_rdunlock();
+  if (debug_enabled() && managed) {
+    debugf("getsockopt fd=%d level=%d opt=%d active=%d proxied=%d kind=%d hot=%d",
+           fd, level, optname, state.active, state.proxied, state.kind,
+           state.hot_ready);
+  }
   if (managed) {
     if (level == SOL_SOCKET) {
       if (optname == SO_ERROR && *optlen >= sizeof(int)) {
@@ -2878,6 +2883,11 @@ int setsockopt(int fd, int level, int optname, const void *optval,
   int tracked_socket = fd_ok(fd) && (state.active || state.proxied);
   int proxied = fd_ok(fd) && state.proxied;
   hot_path_rdunlock();
+  if (debug_enabled() && tracked_socket) {
+    debugf("setsockopt fd=%d level=%d opt=%d active=%d proxied=%d kind=%d hot=%d optlen=%u",
+           fd, level, optname, state.active, state.proxied, state.kind,
+           state.hot_ready, (unsigned)optlen);
+  }
   if (tracked_socket && level == SOL_SOCKET && optval && optlen >= sizeof(int)) {
     int value = *(const int *)optval;
     if (optname == SO_REUSEADDR) {

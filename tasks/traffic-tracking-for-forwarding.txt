@@ -1,0 +1,41 @@
+Init new git repo if not already and commit current feat. There is no connection state tracking in RELAY firewall rules right?
+
+Currently the relay ACLs are connection tracking in userspace wireguard socks, make them track connection states when peers reach other peers when the ACL is enabled.
+Established flows should be allowed by default, new flows go through the relay ACL firewall rules.
+Check if netstack can do connection tracking for forwarded traffic, otherwise you can make something yourself as it isn't that hard:
+
+Connection flow is based on 5 tuple: protocol, source IP (initiator IP), source port, destination IP (responder IP), destination port. A five tuple must exact match may it become the same flow for relayed traffic (they can match reverse, so the source IP/source port is is usually here called the 'initiator' of the connection). In the flow you record the last timestamp used.
+For UDP: if a flow is not found, you create one. The last timestamp is now the last time you relayed a UDP packet. If older than 30 seconds kill the flow (UDP idle timeout)
+For TCP: usually a firewall has these states (for a flow)
+- NEW / SYN sent by one IP. Within a short time a SYN must be received by the other.  Timeouts are short still
+- SYN_RECV, Packet seen: SYN+ACK. ACK completing the handshake. Timeouts are short still
+- SYN_RECV + ACK -> ESTABLISHED after ACK acknowledging SYN/ACK. Timeout is now 15 minutes
+- ESTABLISHED + FIN -> FIN_WAIT (one side sends FIN, you must track who sent FIN). Like `fin_from_initiator, fin_from_responder`. 
+- FIN_WAIT + opposite FIN -> TIME_WAIT. Why? TIME_WAIT exists because the endpoint that sends the final ACK cannot know whether the peer received it. The state is therefore a safety window that absorbs late or duplicate packets from the previous connection instance.
+
+Support IPv6 as well.
+Also support ICMP ping through the stateful firewall. For this track the ICMP ID, and only allow for 30 seconds like UDP (ping sessions often have one ICMP ID and multiple sequenes).
+
+Allow forwarding of ICMP error packets when they match against any of the flows, in the embedded IP packet. Also the thing needs to strictly validate that the destination IP of the ICMP error packet is either the source/initiator IP of the flow or the destination/responder IP of the flow. (the source IP can be anything since also routers on the path can send ICMP errors like TTL or refused connections). But do validate that the ICMP error comes from one of the peers, cause its bullshit if a third peer sends an ICMP error for a connection between 2 peers. Its always a router on the path of the connection between 2 devices behind 2 peers (like peers can also be a router routing entire subnets)
+
+This completely replaced in func (e *Engine) allowRelayPacket(packet []byte) bool {
+	src, dst, ok := packetAddrPorts(packet)
+	if !ok || e.localAddrContains(src.Addr()) {
+		return true
+	}
+	if e.localPrefixContainsUnrouted(dst.Addr()) {
+		return false
+	}
+	return e.relayAllowed(src, dst)
+}
+
+in internal/engine/engine.go
+
+there is no 'closed' state, since the entry should then not exist in the table. Maybe an unoccupied state.
+Test the connection tracking of the relay firewall. 
+Add a flag that the connection tracking can be disabled for this RELAY.
+
+Even if I above give extensive implementation detail, if the netstack library allows stateful tracking in forwarding, then you should use that and their implementation. 
+
+You should let the table dynamically grow/decrease after many states, but there should be a maximum be able to put, and a maximum per peer what it can initiate
+

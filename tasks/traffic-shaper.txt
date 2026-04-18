@@ -1,0 +1,26 @@
+Commit the current feat in the repos then
+   FIRST init a git REPO and commit and backup the current repo. Very important. Save the current work before continuing
+   I want to add the following:
+   - You should be able to set a table limit per turn user/port and a full table limit globally. This means that if one wireguard server gets the session table full it has no
+   effect on others
+   - I want in the uwgsocks a bandwidth limiter, that you can apply per peer (per peer setting or globally)
+     You can then limit download bps and upload bps. Test this as well in a test. This then applies for the entire peer.
+     For UDP: you just tail drop packets, keep the buffer short to prevent bufferbloat and too much bursty tail dropping to ensure packet loss stays low. You can use ECN to notify
+   that the buffer is too high and need slow down. for TCP: you control the stream so backpressuring here is easy
+     For the traffic shaper, all UDP + TCP connections of one peer are in the same traffic shaping, i.e here you track how many bytes already sent in a window and when to
+     backpresssure equally among all TCP/UDP states comming or going to a peer. What you should do: connection flows belong to a limiter, in the limiter you put a token bucket but
+   keep it short. Here you add tokens when passing through packets, you delete tokens over time, if overflow you discard packets. Okay maybe instead of Tail Dropping can you
+   implement both CAKE and CoDel, making mini queues and doing the packet dropping for UDP properly. Since on TCP you sometimes have the original data streams, you need to ensure
+   that you backpressure normally before forwarding your TCP data.  Idea is that you first make shaper.go that is a file under internal that implements the traffic shaper. Here
+   every peer thats shaped gets a traffic shaper, you have functions like add this packet to the queue (can be abritary) indicated by queue hash as part of cake (mini queue index),
+   then invoke when packet needs to be sent from the queue. And also the shaper needs to support STREAMS (not only packets and drops, so this is new). when a opaque stream enters
+   the shaper should tell when to forward the data of the stream. If CAKE would have dropped packets, you would simulate backpressure on the stream (since on a stream you can't
+   drop packets). Also you support ECN, when forwarding packets the shaper can tell to add ECN. The shaper needs to remember that ECN is not always supported so the dropping should
+   remain but then ECN is first. What the user eventually needs to configure per peer (or a global traffic shaper) is very simple: 1. allowed bitrate and 2. allowed added latency
+   due to buffering (by default 15ms). This means that you should configure the algorithm so that traffic gets through the traffic shaper in no less than 15ms more delay
+   
+   due to buffering (by default 15ms). This means that you should configure the algorithm so that traffic gets through the traffic shaper in no less than 15ms more delay
+   (approximately, its not a hard limit), so then you would go drop earlier. So EVERY shaper has both a way for handling packets and buffering them with its drops and ECN, and also
+   to handle multiple TCP stream data belonging to a shaper. This makes configuration easy. Now when a traffic shaper is active on a Wireguard peer you implement at 2 stages: for
+   UDP flows you always just implement the packet ones. For TCP for INBOUND and OUTBOUND connections since they need to be converted to a TCP stream of data (so userspace
+   write/read can be called or from SOCKS5) you backpressure using the shaper. For relayed packets, so between Wireguard peers, you always just use the packet variant.

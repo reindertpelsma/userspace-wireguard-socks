@@ -1,0 +1,18 @@
+I want the following smaller additions
+- On the UI server I want the ability to see graphs of traffic of a client. Since there is a status endpoint on the uwgsocks
+you can use that status endpoint to track traffic. First store only the latest usage graph in-memory, and only for a short
+period. Later you can store it on db if a flag is enabled (not by default). The usage graph is mostly just amount of traffic transferred
+- remove the default persistentkeepalive since most wireguard clients not needing inbound connections don't need that
+- if the UI server starts, instead of using admin/admin, generate a random password for admin and print it on the terminal during first start
+- add option --generate-config which when start will immediately generate a config and store it under the admin account. The config is pritned to the terminal.
+  (if e2e storage is enabled, do not store private key). This makes it easier to connect to setup the UI server on a SSH connectionm, get a initial wireguard config,
+  connect to it, access the UI server through that wireguard to add more configs.
+
+  This config is by default true on the first startup (so bootstrap), in addition to generating a random admin password.
+
+- add dark and light mode for the site and make it mobile friendly. Very important
+- Allow me sharing Wireguard configs through end-to-end encrypted links. When sharing, the link contains the nonce to decrypt the config on the server,
+and is also self-authenticating. The nonce should be placed in the URL after # as it must not be send to the backend. 
+Like http://ui-server-addres/config/<authentication token for backend here for single config>#<nonce to decrypt config if e2e is enabled>
+The link can have an expiration date or a one-use only. The authentication token should be stored on the db, encrypted by the server's secret (just like psk is).
+- ensure I can download configs as .conf files.

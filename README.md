@@ -97,6 +97,9 @@ require `proxy.lowbind`.
 
 Start with [docs/configuration.md](docs/configuration.md). The raw socket
 protocol is documented in [docs/socket-protocol.md](docs/socket-protocol.md).
+The configuration reference now lists the current YAML schema exhaustively,
+including `transports`, shared TLS settings, SOCKS5 UDP relay port ranges, and
+absolute-form HTTPS proxy verification controls.
 
 ## Build And Test
 

@@ -9,6 +9,8 @@ package engine
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -27,6 +30,7 @@ import (
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/netstackex"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/transport"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/wgbind"
 	"golang.org/x/net/proxy"
 	"golang.zx2c4.com/wireguard/conn"
@@ -79,6 +83,9 @@ type Engine struct {
 	forwardNext  int
 	forwardNames map[string]forwardRuntime
 
+	socksUDPMu         sync.Mutex
+	socksUDPRelayPorts map[string]map[int]struct{}
+
 	// connTable is the transparent inbound backpressure guard. It tracks only
 	// connections that consume host-side sockets; SOCKS/HTTP client sessions are
 	// controlled by listener backpressure and per-connection idle timers.
@@ -93,7 +100,7 @@ type Engine struct {
 	localAddrs     []netip.Addr
 	localPrefixes  []netip.Prefix
 	dnsSem         chan struct{}
-	turnBind       *wgbind.TURNBind
+	transportBind  *transport.MultiTransportBind
 }
 
 type trackedConn struct {
@@ -129,23 +136,24 @@ func New(cfg config.Config, logger *log.Logger) (*Engine, error) {
 		}
 	}
 	e := &Engine{
-		cfg:            cfg,
-		log:            logger,
-		allowed:        allowed,
-		peerRoutes:     peerRoutes,
-		peerTraffic:    peerTraffic,
-		inACL:          acl.List{Default: cfg.ACL.InboundDefault, Rules: cfg.ACL.Inbound},
-		outACL:         acl.List{Default: cfg.ACL.OutboundDefault, Rules: cfg.ACL.Outbound},
-		relACL:         acl.List{Default: cfg.ACL.RelayDefault, Rules: cfg.ACL.Relay},
-		relayFlows:     make(map[relayFlowKey]*relayFlow),
-		addrs:          make(map[string]string),
-		listenerMap:    make(map[string]net.Listener),
-		pconnMap:       make(map[string]net.PacketConn),
-		forwardNames:   make(map[string]forwardRuntime),
-		connTable:      make(map[int64]*trackedConn),
-		closed:         make(chan struct{}),
-		fallbackDialer: fallback,
-		localPrefixes:  localPrefixes,
+		cfg:                cfg,
+		log:                logger,
+		allowed:            allowed,
+		peerRoutes:         peerRoutes,
+		peerTraffic:        peerTraffic,
+		inACL:              acl.List{Default: cfg.ACL.InboundDefault, Rules: cfg.ACL.Inbound},
+		outACL:             acl.List{Default: cfg.ACL.OutboundDefault, Rules: cfg.ACL.Outbound},
+		relACL:             acl.List{Default: cfg.ACL.RelayDefault, Rules: cfg.ACL.Relay},
+		relayFlows:         make(map[relayFlowKey]*relayFlow),
+		addrs:              make(map[string]string),
+		listenerMap:        make(map[string]net.Listener),
+		pconnMap:           make(map[string]net.PacketConn),
+		forwardNames:       make(map[string]forwardRuntime),
+		socksUDPRelayPorts: make(map[string]map[int]struct{}),
+		connTable:          make(map[int64]*trackedConn),
+		closed:             make(chan struct{}),
+		fallbackDialer:     fallback,
+		localPrefixes:      localPrefixes,
 	}
 	if cfg.DNSServer.MaxInflight > 0 {
 		e.dnsSem = make(chan struct{}, cfg.DNSServer.MaxInflight)
@@ -223,18 +231,46 @@ func (e *Engine) Start() error {
 		e.net.SetICMPForwarder(e.handleICMPForward)
 	}
 
-	// With no ListenPort we avoid binding a UDP port at all. OutboundOnlyBind
-	// opens one connected UDP socket per peer endpoint only when WireGuard has
-	// traffic to send.
+	// Build the WireGuard bind layer. When transports are configured in the
+	// config use the pluggable transport system; otherwise fall back to the
+	// legacy UDP bind path or the compatibility TURN transport wrapper.
 	var bind conn.Bind
-	if e.cfg.TURN.Server != "" {
-		turnBind, err := newTURNBind(e.cfg)
+	if len(e.cfg.Transports) > 0 {
+		wgPubKey, err := e.wgPublicKey()
+		if err != nil {
+			return fmt.Errorf("transport: resolve wg public key: %w", err)
+		}
+		listenPort := 0
+		if e.cfg.WireGuard.ListenPort != nil {
+			listenPort = *e.cfg.WireGuard.ListenPort
+		}
+		tb, err := transport.BuildRegistry(
+			e.cfg.Transports,
+			wgPubKey,
+			listenPort,
+			e.transportPeerLookup,
+			e.onTransportEndpointReset,
+			false,
+		)
+		if err != nil {
+			return fmt.Errorf("transport registry: %w", err)
+		}
+		e.transportBind = tb
+		// Configure per-peer static transport endpoints.
+		e.initPeerTransportEndpoints()
+		e.updateTURNPermissions()
+		bind = tb
+	} else if e.cfg.TURN.Server != "" {
+		turnTransport, err := newTURNTransport(e.cfg)
 		if err != nil {
 			return err
 		}
-		e.turnBind = turnBind
+		tb := transport.NewMultiTransportBind(e.transportPeerLookup, e.onTransportEndpointReset)
+		tb.AddTransport(turnTransport)
+		tb.AddListenTransport(turnTransport)
+		e.transportBind = tb
 		e.updateTURNPermissions()
-		bind = turnBind
+		bind = tb
 	} else if e.cfg.WireGuard.ListenPort == nil {
 		bind = wgbind.NewOutboundOnlyBind()
 	} else if len(e.cfg.WireGuard.ListenAddresses) > 0 {
@@ -286,28 +322,31 @@ func (e *Engine) Start() error {
 	return nil
 }
 
-func newTURNBind(cfg config.Config) (*wgbind.TURNBind, error) {
-	turnBind := &wgbind.TURNBind{
+func newTURNTransport(cfg config.Config) (*transport.TURNTransport, error) {
+	turnCfg := transport.TURNProxyConfig{
 		Server:             cfg.TURN.Server,
+		Protocol:           cfg.TURN.Protocol,
 		Username:           cfg.TURN.Username,
 		Password:           cfg.TURN.Password,
 		Realm:              cfg.TURN.Realm,
-		AllowedPeers:       append([]string(nil), cfg.TURN.Permissions...),
 		IncludeWGPublicKey: cfg.TURN.IncludeWGPublicKey,
+		Permissions:        append([]string(nil), cfg.TURN.Permissions...),
+		TLS:                cfg.TURN.TLS,
 	}
+	var wgPubKey [32]byte
 	if cfg.TURN.IncludeWGPublicKey {
 		privateKey, err := wgtypes.ParseKey(cfg.WireGuard.PrivateKey)
 		if err != nil {
 			return nil, fmt.Errorf("turn.include_wg_public_key private key: %w", err)
 		}
 		publicKey := privateKey.PublicKey()
-		copy(turnBind.WGPublicKey[:], publicKey[:])
+		copy(wgPubKey[:], publicKey[:])
 	}
-	return turnBind, nil
+	return transport.NewTURNTransport("turn", turnCfg, wgPubKey)
 }
 
 func (e *Engine) updateTURNPermissions() {
-	if e.turnBind == nil {
+	if e.transportBind == nil {
 		return
 	}
 
@@ -319,7 +358,14 @@ func (e *Engine) updateTURNPermissions() {
 		}
 	}
 	e.cfgMu.RUnlock()
-	e.turnBind.UpdatePermissions(ips)
+	for _, name := range e.transportBind.TransportNames() {
+		t := e.transportBind.GetTransport(name)
+		turnTransport, ok := t.(*transport.TURNTransport)
+		if !ok {
+			continue
+		}
+		turnTransport.UpdatePermissions(ips)
+	}
 }
 
 func (e *Engine) Close() error {
@@ -636,13 +682,12 @@ func (e *Engine) serveMixed(ln net.Listener, handler http.Handler) {
 }
 
 func (e *Engine) httpProxyHandler() http.Handler {
-	tr := &http.Transport{
-		Proxy: nil,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return e.proxyDial(ctx, network, addr)
-		},
-	}
+	tr, trErr := e.httpProxyTransport()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if trErr != nil {
+			http.Error(w, trErr.Error(), http.StatusInternalServerError)
+			return
+		}
 		if !e.proxyHTTPAuthOK(r) {
 			w.Header().Set("Proxy-Authenticate", `Basic realm="uwgsocks"`)
 			http.Error(w, "proxy authentication required", http.StatusProxyAuthRequired)
@@ -660,10 +705,25 @@ func (e *Engine) httpProxyHandler() http.Handler {
 		if r.URL.Scheme == "" {
 			r.URL.Scheme = "http"
 		}
+		switch strings.ToLower(r.URL.Scheme) {
+		case "http":
+		case "https":
+			if !*e.cfg.Proxy.HTTPSProxying {
+				http.Error(w, "HTTPS proxying is disabled", http.StatusForbidden)
+				return
+			}
+		default:
+			http.Error(w, "unsupported proxy scheme", http.StatusBadRequest)
+			return
+		}
 		if r.URL.Host == "" {
 			r.URL.Host = r.Host
 		}
-		dst, err := e.resolveAddrPort(r.Context(), canonicalHostPort(r.URL.Host, "80"))
+		defaultPort := "80"
+		if strings.EqualFold(r.URL.Scheme, "https") {
+			defaultPort = "443"
+		}
+		dst, err := e.resolveAddrPort(r.Context(), canonicalHostPort(r.URL.Host, defaultPort))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -675,6 +735,7 @@ func (e *Engine) httpProxyHandler() http.Handler {
 		outReq := r.Clone(r.Context())
 		outReq.RequestURI = ""
 		outReq.Header.Del("Proxy-Connection")
+		outReq.Header.Del("Proxy-Authorization")
 		resp, err := tr.RoundTrip(outReq)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
@@ -685,6 +746,78 @@ func (e *Engine) httpProxyHandler() http.Handler {
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
 	})
+}
+
+func (e *Engine) httpProxyTransport() (*http.Transport, error) {
+	tlsCfg, err := e.httpProxyTLSClientConfig()
+	if err != nil {
+		return nil, err
+	}
+	return &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return e.proxyDial(ctx, network, addr)
+		},
+		TLSClientConfig: tlsCfg,
+	}, nil
+}
+
+func (e *Engine) httpProxyTLSClientConfig() (*tls.Config, error) {
+	mode := e.cfg.Proxy.HTTPSProxyVerify
+	if mode == "" {
+		mode = "pki"
+	}
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	switch mode {
+	case "none":
+		cfg.InsecureSkipVerify = true //nolint:gosec
+		return cfg, nil
+	case "pki":
+		return cfg, nil
+	case "ca":
+		roots, err := loadProxyCertPool(e.cfg.Proxy.HTTPSProxyCAFile, false)
+		if err != nil {
+			return nil, err
+		}
+		cfg.RootCAs = roots
+		return cfg, nil
+	case "both":
+		roots, err := loadProxyCertPool(e.cfg.Proxy.HTTPSProxyCAFile, true)
+		if err != nil {
+			return nil, err
+		}
+		cfg.RootCAs = roots
+		return cfg, nil
+	default:
+		return nil, fmt.Errorf("invalid proxy.https_proxy_verify %q", mode)
+	}
+}
+
+func loadProxyCertPool(path string, includeSystem bool) (*x509.CertPool, error) {
+	var pool *x509.CertPool
+	if includeSystem {
+		systemPool, err := x509.SystemCertPool()
+		if err != nil {
+			return nil, fmt.Errorf("load system cert pool: %w", err)
+		}
+		if systemPool != nil {
+			pool = systemPool
+		}
+	}
+	if pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if path == "" {
+		return pool, nil
+	}
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read proxy.https_proxy_ca_file: %w", err)
+	}
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("parse proxy.https_proxy_ca_file: no certificates found")
+	}
+	return pool, nil
 }
 
 func (e *Engine) handleHTTPConnect(w http.ResponseWriter, r *http.Request, src netip.AddrPort) {

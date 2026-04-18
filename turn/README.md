@@ -5,7 +5,13 @@ This TURN server is tuned for UDP relay use cases where relay ports, WireGuard f
 It is built on Pion TURN and adds:
 - fixed relay ports per user
 - username-as-port range mode
+<<<<<<< HEAD
 - per-user dynamic port ranges, for outbound clients and for clients not needing a fixed port.
+=======
+- per-user dynamic port ranges
+- multiple TURN listeners: UDP, TCP, TLS, and DTLS
+- auto-generated TLS/DTLS certs when no files are configured, plus hot reload for certificate files
+>>>>>>> droplet/master
 - optional mapped/public relay addresses
 - internal relay-to-relay routing optimization
 - `outbound_only` users that may only receive replies after they send first
@@ -48,9 +54,37 @@ Top-level fields:
 - `allocation_ttl`
 - `nonce_ttl`
 - `preopen_single_ports`
-- `listen.turn_listen`
 - `listen.relay_ip`
+- `listeners`
 - `max_sessions`
+
+### Listeners
+
+At least one listener is required. Each listener declares:
+- `type`: `udp`, `tcp`, `tls`, or `dtls`
+- `listen`: bind address, for example `0.0.0.0:3478`
+- `cert_file` and `key_file` for `tls` or `dtls` listeners
+- `reload_interval` to periodically reload renewed certificate files
+
+If a `tls` or `dtls` listener is configured without certificate files, the server generates a self-signed certificate automatically at startup.
+
+```yaml
+listen:
+  relay_ip: "203.0.113.10"
+
+listeners:
+  - type: "udp"
+    listen: "0.0.0.0:3478"
+  - type: "tcp"
+    listen: "0.0.0.0:3478"
+  - type: "tls"
+    listen: "0.0.0.0:5349"
+    cert_file: "/etc/letsencrypt/live/example/fullchain.pem"
+    key_file: "/etc/letsencrypt/live/example/privkey.pem"
+    reload_interval: "1m"
+  - type: "dtls"
+    listen: "0.0.0.0:5349"
+```
 
 ### Fixed User
 
@@ -138,6 +172,7 @@ Behavior:
 - packets to external UDP endpoints are suppressed
 - packets from external UDP endpoints are suppressed
 - traffic to other live TURN relay addresses on the same server still works
+- the advertised relay port is reserved logically inside the TURN server, but no host UDP socket is bound for that public relay port
 
 `internal_only` can be combined with `outbound_only`.
 

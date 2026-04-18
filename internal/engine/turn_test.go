@@ -11,7 +11,7 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-func TestNewTURNBindIncludesWireGuardPublicKeyWhenConfigured(t *testing.T) {
+func TestNewTURNTransportIncludesWireGuardPublicKeyWhenConfigured(t *testing.T) {
 	key, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -23,15 +23,19 @@ func TestNewTURNBindIncludesWireGuardPublicKeyWhenConfigured(t *testing.T) {
 	cfg.TURN.Password = "pass"
 	cfg.TURN.IncludeWGPublicKey = true
 
-	bind, err := newTURNBind(cfg)
+	turnTransport, err := newTURNTransport(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bind.IncludeWGPublicKey {
-		t.Fatal("expected IncludeWGPublicKey to be enabled")
+	if turnTransport == nil {
+		t.Fatal("expected non-nil TURN transport")
 	}
 	publicKey := key.PublicKey()
-	if !bytes.Equal(bind.WGPublicKey[:], publicKey[:]) {
-		t.Fatalf("TURN bind public key mismatch")
+	if turnTransport.RelayAddr() != "" {
+		t.Fatal("unexpected allocated relay address before listen")
+	}
+	got := turnTransport.WGPublicKeyForTest()
+	if !bytes.Equal(got[:], publicKey[:]) {
+		t.Fatalf("TURN transport public key mismatch")
 	}
 }

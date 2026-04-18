@@ -10,18 +10,6 @@ listen:
 listeners:
   - type: "udp"
     listen: "0.0.0.0:3478"
-  - type: "tcp"
-    listen: "0.0.0.0:3478"
-  - type: "tls"
-    listen: "0.0.0.0:5349"
-    # cert_file: "/etc/letsencrypt/live/example/fullchain.pem"
-    # key_file: "/etc/letsencrypt/live/example/privkey.pem"
-    # reload_interval: "1m"
-  - type: "dtls"
-    listen: "0.0.0.0:5349"
-    # cert_file: "/etc/letsencrypt/live/example/fullchain.pem"
-    # key_file: "/etc/letsencrypt/live/example/privkey.pem"
-    # reload_interval: "1m"
 
 users:
   - username: "alice"
@@ -31,9 +19,6 @@ users:
     source_networks:
       - "0.0.0.0/0"
     mapped_address: "203.0.113.10:40000"
-    # Optional WireGuard filtering:
-    # wireguard_mode: server-only
-    # wireguard_public_key: BASE64_PUBLIC_KEY_HERE
 
   - username: "bob"
     password: "bob-pass"
@@ -43,24 +28,6 @@ users:
       - "192.168.0.0/16"
       - "10.0.0.0/8"
     mapped_address: "203.0.113.10:50001"
-    outbound_only: true
-
-  - username: "batch-worker"
-    password: "batch-pass"
-    port_range_start: 45000
-    port_range_end: 45007
-    source_networks:
-      - "10.0.0.0/8"
-    mapped_range:
-      ip: "203.0.113.10"
-      start_port: 55000
-
-  - username: "mesh-node"
-    password: "mesh-pass"
-    port: 40050
-    source_networks:
-      - "127.0.0.0/8"
-    internal_only: true
 
 port_ranges:
   - start: 41000
@@ -83,4 +50,3 @@ port_ranges:
     mapped_range:
       ip: "198.51.100.25"
       start_port: 62000
-    internal_only: true

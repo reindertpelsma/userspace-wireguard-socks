@@ -97,6 +97,7 @@ proxy:
   username: alice
   password: secret
   fallback_direct: false
+  udp_associate_ports: 41000-41010
   honor_environment: false
   outbound_proxies:
     - type: http
@@ -182,7 +183,7 @@ dns_server:
 	if cfg.WireGuard.PrivateKey != priv.String() || len(cfg.WireGuard.Peers) != 1 || cfg.WireGuard.Peers[0].PublicKey != peer.PublicKey().String() {
 		t.Fatalf("WireGuard config did not merge: %+v", cfg.WireGuard)
 	}
-	if cfg.Proxy.SOCKS5 != "127.0.0.1:1080" || cfg.Proxy.HTTP != "127.0.0.1:8081" || len(cfg.Proxy.HTTPListeners) != 1 || cfg.Proxy.HTTPListeners[0] != "unix:/tmp/uwgsocks-http.sock" || cfg.Proxy.Username != "alice" || cfg.Proxy.Password != "secret" || *cfg.Proxy.FallbackDirect || *cfg.Proxy.HonorEnvironment {
+	if cfg.Proxy.SOCKS5 != "127.0.0.1:1080" || cfg.Proxy.HTTP != "127.0.0.1:8081" || len(cfg.Proxy.HTTPListeners) != 1 || cfg.Proxy.HTTPListeners[0] != "unix:/tmp/uwgsocks-http.sock" || cfg.Proxy.Username != "alice" || cfg.Proxy.Password != "secret" || cfg.Proxy.UDPAssociatePorts != "41000-41010" || *cfg.Proxy.FallbackDirect || *cfg.Proxy.HonorEnvironment {
 		t.Fatalf("proxy options mismatch: %+v", cfg.Proxy)
 	}
 	if len(cfg.Proxy.OutboundProxies) != 1 || cfg.Proxy.OutboundProxies[0].Type != "http" || cfg.Proxy.OutboundProxies[0].Address != "127.0.0.1:3128" || len(cfg.Proxy.OutboundProxies[0].Subnets) != 1 {

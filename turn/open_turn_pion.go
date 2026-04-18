@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -18,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	piondtls "github.com/pion/dtls/v3"
 	turn "github.com/pion/turn/v4"
 	yaml "gopkg.in/yaml.v3"
 )
@@ -25,15 +27,16 @@ import (
 type Behavior int
 
 type Config struct {
-	Realm              string        `yaml:"realm"`
-	Software           string        `yaml:"software"`
-	AllocationTTL      string        `yaml:"allocation_ttl"`
-	NonceTTL           string        `yaml:"nonce_ttl"`
-	PreopenSinglePorts bool          `yaml:"preopen_single_ports"`
-	Listen             ListenConfig  `yaml:"listen"`
-	Users              []UserConfig  `yaml:"users"`
-	PortRanges         []RangeConfig `yaml:"port_ranges"`
-	MaxSessions        int           `yaml:"max_sessions"`
+	Realm              string               `yaml:"realm"`
+	Software           string               `yaml:"software"`
+	AllocationTTL      string               `yaml:"allocation_ttl"`
+	NonceTTL           string               `yaml:"nonce_ttl"`
+	PreopenSinglePorts bool                 `yaml:"preopen_single_ports"`
+	Listen             ListenConfig         `yaml:"listen"`
+	Listeners          []TURNListenerConfig `yaml:"listeners"`
+	Users              []UserConfig         `yaml:"users"`
+	PortRanges         []RangeConfig        `yaml:"port_ranges"`
+	MaxSessions        int                  `yaml:"max_sessions"`
 }
 
 type RangeConfig struct {
@@ -75,6 +78,16 @@ type UserConfig struct {
 type ListenConfig struct {
 	TurnListen string `yaml:"turn_listen"`
 	RelayIP    string `yaml:"relay_ip"`
+}
+
+type TURNListenerConfig struct {
+	Type           string `yaml:"type"`
+	Listen         string `yaml:"listen"`
+	CertFile       string `yaml:"cert_file,omitempty"`
+	KeyFile        string `yaml:"key_file,omitempty"`
+	VerifyPeer     bool   `yaml:"verify_peer,omitempty"`
+	ReloadInterval string `yaml:"reload_interval,omitempty"`
+	CAFile         string `yaml:"ca_file,omitempty"`
 }
 
 type turnAuthRule struct {
@@ -180,17 +193,25 @@ type openRelayPion struct {
 	userRules  map[string]*turnAuthRule
 	rangeRules []turnRangeRule
 
-	mu                 sync.RWMutex
-	reservations       map[string]*relayReservation
-	clientReservations map[string]*relayReservation
-	pendingAllocations []*relayReservation
-	activeRelays       map[string]*relayPacketConn
-	servers            []*turn.Server
-	listenAddr         *net.UDPAddr
+	mu                  sync.RWMutex
+	reservations        map[string]*relayReservation
+	clientReservations  map[string]*relayReservation
+	pendingAllocations  []*relayReservation
+	activeRelays        map[string]*relayPacketConn
+	reservedPublicAddrs map[string]struct{}
+	servers             []*turn.Server
+	listenAddr          *net.UDPAddr
+	boundListeners      []boundListener
+	certManagers        []*turnCertManager
 
 	globalSessions  int64
 	internalPackets int64
 	externalPackets int64
+}
+
+type boundListener struct {
+	Type string
+	Addr net.Addr
 }
 
 func loadConfig(path string) (Config, error) {
@@ -201,9 +222,6 @@ func loadConfig(path string) (Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return Config{}, err
-	}
-	if cfg.Listen.TurnListen == "" {
-		cfg.Listen.TurnListen = "0.0.0.0:3478"
 	}
 	if cfg.Listen.RelayIP == "" {
 		cfg.Listen.RelayIP = "0.0.0.0"
@@ -220,16 +238,51 @@ func loadConfig(path string) (Config, error) {
 	if cfg.NonceTTL == "" {
 		cfg.NonceTTL = "10m"
 	}
+	listeners, err := normalizedTURNListeners(cfg)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Listeners = listeners
 	return cfg, nil
+}
+
+func normalizedTURNListeners(cfg Config) ([]TURNListenerConfig, error) {
+	listeners := append([]TURNListenerConfig(nil), cfg.Listeners...)
+	if len(listeners) == 0 && strings.TrimSpace(cfg.Listen.TurnListen) != "" {
+		listeners = append(listeners, TURNListenerConfig{
+			Type:   "udp",
+			Listen: cfg.Listen.TurnListen,
+		})
+	}
+	if len(listeners) == 0 {
+		return nil, errors.New("at least one TURN listener must be configured")
+	}
+	for i := range listeners {
+		listeners[i].Type = strings.ToLower(strings.TrimSpace(listeners[i].Type))
+		if listeners[i].Type == "" {
+			listeners[i].Type = "udp"
+		}
+		listeners[i].Listen = strings.TrimSpace(listeners[i].Listen)
+		if listeners[i].Listen == "" {
+			return nil, fmt.Errorf("listener %d: listen is required", i)
+		}
+		switch listeners[i].Type {
+		case "udp", "tcp", "tls", "dtls":
+		default:
+			return nil, fmt.Errorf("listener %d: unknown type %q", i, listeners[i].Type)
+		}
+	}
+	return listeners, nil
 }
 
 func newOpenRelayPion(cfg Config) (*openRelayPion, error) {
 	o := &openRelayPion{
-		cfg:                cfg,
-		userRules:          map[string]*turnAuthRule{},
-		reservations:       map[string]*relayReservation{},
-		clientReservations: map[string]*relayReservation{},
-		activeRelays:       map[string]*relayPacketConn{},
+		cfg:                 cfg,
+		userRules:           map[string]*turnAuthRule{},
+		reservations:        map[string]*relayReservation{},
+		clientReservations:  map[string]*relayReservation{},
+		activeRelays:        map[string]*relayPacketConn{},
+		reservedPublicAddrs: map[string]struct{}{},
 	}
 	for _, u := range cfg.Users {
 		if err := validateUserConfig(u); err != nil {
@@ -347,7 +400,7 @@ func validateRangeConfig(cfg RangeConfig) error {
 }
 
 func (o *openRelayPion) authHandler(username, realm string, srcAddr net.Addr) ([]byte, bool) {
-	udpSrc, ok := srcAddr.(*net.UDPAddr)
+	srcIP, ok := addrIP(srcAddr)
 	if !ok {
 		return nil, false
 	}
@@ -363,7 +416,7 @@ func (o *openRelayPion) authHandler(username, realm string, srcAddr net.Addr) ([
 	if err != nil {
 		return nil, false
 	}
-	if !sourceAllowed(udpSrc.IP, rule.SourceNetworks) {
+	if !sourceAllowed(srcIP, rule.SourceNetworks) {
 		return nil, false
 	}
 
@@ -387,7 +440,7 @@ func (o *openRelayPion) authHandler(username, realm string, srcAddr net.Addr) ([
 	res := &relayReservation{
 		AuthUsername:     username,
 		Username:         baseUsername,
-		ClientAddr:       udpSrc.String(),
+		ClientAddr:       srcAddr.String(),
 		RequestedPort:    rule.RequestedPort,
 		PortRangeStart:   rule.PortRangeStart,
 		PortRangeEnd:     rule.PortRangeEnd,
@@ -402,8 +455,8 @@ func (o *openRelayPion) authHandler(username, realm string, srcAddr net.Addr) ([
 	}
 
 	o.mu.Lock()
-	o.reservations[o.reservationKey(username, udpSrc)] = res
-	o.clientReservations[udpSrc.String()] = res
+	o.reservations[o.reservationKey(username, srcAddr)] = res
+	o.clientReservations[srcAddr.String()] = res
 	o.mu.Unlock()
 
 	key := turn.GenerateAuthKey(baseUsername, realm, rule.Password)
@@ -457,27 +510,25 @@ func (o *openRelayPion) lookup(username string) (*authLookup, error) {
 }
 
 func (o *openRelayPion) reservation(username string, src net.Addr) *relayReservation {
-	udpSrc, ok := src.(*net.UDPAddr)
-	if !ok {
+	if src == nil {
 		return nil
 	}
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	return o.reservations[o.reservationKey(username, udpSrc)]
+	return o.reservations[o.reservationKey(username, src)]
 }
 
-func (o *openRelayPion) reservationKey(username string, src *net.UDPAddr) string {
+func (o *openRelayPion) reservationKey(username string, src net.Addr) string {
 	return username + "|" + src.String()
 }
 
 func (o *openRelayPion) clientReservation(src net.Addr) *relayReservation {
-	udpSrc, ok := src.(*net.UDPAddr)
-	if !ok {
+	if src == nil {
 		return nil
 	}
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	return o.clientReservations[udpSrc.String()]
+	return o.clientReservations[src.String()]
 }
 
 func (o *openRelayPion) onAuth(srcAddr, dstAddr net.Addr, protocol, username, realm string, method string, verdict bool) {
@@ -512,7 +563,7 @@ func (o *openRelayPion) allowPeer(clientAddr net.Addr, peerIP net.IP) bool {
 	return sourceAllowed(peerIP, res.Sources)
 }
 
-func newRelayPacketConn(base net.PacketConn, wrapper *openRelayPion, res *relayReservation, publicAddr net.Addr) (*relayPacketConn, error) {
+func newRelayPacketConn(base net.PacketConn, wrapper *openRelayPion, res *relayReservation, publicAddr net.Addr, preReserved bool) (*relayPacketConn, error) {
 	actualUDP, ok := base.LocalAddr().(*net.UDPAddr)
 	if !ok {
 		return nil, errors.New("relay packet conn requires UDP local address")
@@ -531,7 +582,12 @@ func newRelayPacketConn(base net.PacketConn, wrapper *openRelayPion, res *relayR
 		closedCh:      make(chan struct{}),
 		outboundPeers: map[string]struct{}{},
 	}
-	wrapper.registerRelay(c)
+	if err := wrapper.registerRelay(c, preReserved); err != nil {
+		if preReserved {
+			wrapper.releaseReservedPublicAddr(c.publicAddr)
+		}
+		return nil, err
+	}
 	go c.pumpReads()
 	return c, nil
 }
@@ -704,17 +760,56 @@ func (c *relayPacketConn) readDeadlineValue() time.Time {
 	return c.readDeadline
 }
 
-func (o *openRelayPion) registerRelay(conn *relayPacketConn) {
+func (o *openRelayPion) registerRelay(conn *relayPacketConn, preReserved bool) error {
+	key := conn.publicAddr.String()
 	o.mu.Lock()
-	o.activeRelays[conn.publicAddr.String()] = conn
-	o.mu.Unlock()
+	defer o.mu.Unlock()
+	if current, ok := o.activeRelays[key]; ok && current != nil && current != conn {
+		return fmt.Errorf("relay address %s already active", key)
+	}
+	_, reserved := o.reservedPublicAddrs[key]
+	if preReserved {
+		if !reserved {
+			return fmt.Errorf("relay address %s was not reserved", key)
+		}
+	} else if reserved {
+		return fmt.Errorf("relay address %s already reserved", key)
+	}
+	o.reservedPublicAddrs[key] = struct{}{}
+	o.activeRelays[key] = conn
+	return nil
 }
 
 func (o *openRelayPion) unregisterRelay(conn *relayPacketConn) {
+	key := conn.publicAddr.String()
 	o.mu.Lock()
-	if current := o.activeRelays[conn.publicAddr.String()]; current == conn {
-		delete(o.activeRelays, conn.publicAddr.String())
+	if current := o.activeRelays[key]; current == conn {
+		delete(o.activeRelays, key)
+		delete(o.reservedPublicAddrs, key)
 	}
+	o.mu.Unlock()
+}
+
+func (o *openRelayPion) reservePublicAddr(addr *net.UDPAddr) error {
+	key := addr.String()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if _, ok := o.activeRelays[key]; ok {
+		return fmt.Errorf("relay address %s already active", key)
+	}
+	if _, ok := o.reservedPublicAddrs[key]; ok {
+		return fmt.Errorf("relay address %s already reserved", key)
+	}
+	o.reservedPublicAddrs[key] = struct{}{}
+	return nil
+}
+
+func (o *openRelayPion) releaseReservedPublicAddr(addr *net.UDPAddr) {
+	if addr == nil {
+		return
+	}
+	o.mu.Lock()
+	delete(o.reservedPublicAddrs, addr.String())
 	o.mu.Unlock()
 }
 
@@ -737,7 +832,7 @@ func (g *guardedRelayAddressGenerator) AllocatePacketConn(network string, reques
 	}
 
 	res := g.wrapper.consumePendingAllocation()
-	conn, relayAddr, err := g.allocatePacketConn(network, requestedPort, res)
+	conn, relayAddr, preReserved, err := g.allocatePacketConn(network, requestedPort, res)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -745,12 +840,19 @@ func (g *guardedRelayAddressGenerator) AllocatePacketConn(network string, reques
 	if res != nil {
 		if actual, ok := conn.LocalAddr().(*net.UDPAddr); ok {
 			res.AllocatedPort = actual.Port
-			relayAddr = res.publicRelayAddr(actual)
+			if basePublic, ok := relayAddr.(*net.UDPAddr); ok {
+				relayAddr = res.publicRelayAddr(basePublic, actual)
+			}
 		}
 	}
 
-	wrapped, err := newRelayPacketConn(conn, g.wrapper, res, relayAddr)
+	wrapped, err := newRelayPacketConn(conn, g.wrapper, res, relayAddr, preReserved)
 	if err != nil {
+		if preReserved {
+			if udpAddr, ok := relayAddr.(*net.UDPAddr); ok {
+				g.wrapper.releaseReservedPublicAddr(udpAddr)
+			}
+		}
 		_ = conn.Close()
 		return nil, nil, err
 	}
@@ -763,20 +865,87 @@ func (g *guardedRelayAddressGenerator) AllocatePacketConn(network string, reques
 	return wrapped, relayAddr, nil
 }
 
-func (g *guardedRelayAddressGenerator) allocatePacketConn(network string, requestedPort int, res *relayReservation) (net.PacketConn, net.Addr, error) {
+func (g *guardedRelayAddressGenerator) allocatePacketConn(network string, requestedPort int, res *relayReservation) (net.PacketConn, net.Addr, bool, error) {
+	if res != nil && res.InternalOnly {
+		return g.allocateInternalOnlyPacketConn(network, requestedPort, res)
+	}
 	switch {
 	case res != nil && res.PortRangeStart > 0 && res.PortRangeEnd >= res.PortRangeStart:
 		base, ok := g.RelayAddressGenerator.(*turn.RelayAddressGeneratorPortRange)
 		if !ok {
-			return nil, nil, errors.New("user port ranges require RelayAddressGeneratorPortRange")
+			return nil, nil, false, errors.New("user port ranges require RelayAddressGeneratorPortRange")
 		}
-		return allocateFromPortRange(base, network, res.PortRangeStart, res.PortRangeEnd)
+		conn, relayAddr, err := allocateFromPortRange(base, network, res.PortRangeStart, res.PortRangeEnd)
+		return conn, relayAddr, false, err
 	case res != nil && res.RequestedPort > 0:
-		return g.RelayAddressGenerator.AllocatePacketConn(network, res.RequestedPort)
+		conn, relayAddr, err := g.RelayAddressGenerator.AllocatePacketConn(network, res.RequestedPort)
+		return conn, relayAddr, false, err
 	case requestedPort > 0:
-		return g.RelayAddressGenerator.AllocatePacketConn(network, requestedPort)
+		conn, relayAddr, err := g.RelayAddressGenerator.AllocatePacketConn(network, requestedPort)
+		return conn, relayAddr, false, err
 	default:
-		return g.RelayAddressGenerator.AllocatePacketConn(network, 0)
+		conn, relayAddr, err := g.RelayAddressGenerator.AllocatePacketConn(network, 0)
+		return conn, relayAddr, false, err
+	}
+}
+
+func (g *guardedRelayAddressGenerator) allocateInternalOnlyPacketConn(network string, requestedPort int, res *relayReservation) (net.PacketConn, net.Addr, bool, error) {
+	conn, relayAddr, err := g.RelayAddressGenerator.AllocatePacketConn(network, 0)
+	if err != nil {
+		return nil, nil, false, err
+	}
+
+	actual, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		_ = conn.Close()
+		return nil, nil, false, errors.New("relay listen did not return UDP address")
+	}
+	basePublic, ok := relayAddr.(*net.UDPAddr)
+	if !ok {
+		_ = conn.Close()
+		return nil, nil, false, errors.New("relay allocation did not return UDP address")
+	}
+
+	publicPort, err := g.chooseInternalOnlyPublicPort(res, requestedPort, basePublic)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, false, err
+	}
+	if publicPort == 0 {
+		publicPort = actual.Port
+	}
+	publicAddr := res.publicRelayAddrWithPort(basePublic, actual, publicPort)
+	publicUDP, ok := publicAddr.(*net.UDPAddr)
+	if !ok {
+		_ = conn.Close()
+		return nil, nil, false, errors.New("internal-only public relay address was not UDP")
+	}
+	if err := g.wrapper.reservePublicAddr(publicUDP); err != nil {
+		_ = conn.Close()
+		return nil, nil, false, err
+	}
+	return conn, publicUDP, true, nil
+}
+
+func (g *guardedRelayAddressGenerator) chooseInternalOnlyPublicPort(res *relayReservation, requestedPort int, basePublic *net.UDPAddr) (int, error) {
+	switch {
+	case res.RequestedPort > 0:
+		return res.RequestedPort, nil
+	case res.PortRangeStart > 0 && res.PortRangeEnd >= res.PortRangeStart:
+		ports := rand.New(rand.NewSource(time.Now().UnixNano())).Perm(res.PortRangeEnd - res.PortRangeStart + 1)
+		for _, offset := range ports {
+			port := res.PortRangeStart + offset
+			addr := &net.UDPAddr{IP: res.publicRelayIP(basePublic.IP), Port: port}
+			if err := g.wrapper.reservePublicAddr(addr); err == nil {
+				g.wrapper.releaseReservedPublicAddr(addr)
+				return port, nil
+			}
+		}
+		return 0, errors.New("failed to allocate internal-only relay port from range")
+	case requestedPort > 0:
+		return requestedPort, nil
+	default:
+		return 0, nil
 	}
 }
 
@@ -817,20 +986,119 @@ func buildPionServer(cfg Config) (*openRelayPion, error) {
 	if err != nil {
 		return nil, err
 	}
-	listenAddr, err := net.ResolveUDPAddr("udp", cfg.Listen.TurnListen)
+	listeners, err := normalizedTURNListeners(cfg)
 	if err != nil {
 		return nil, err
-	}
-	pc, err := net.ListenUDP("udp", listenAddr)
-	if err != nil {
-		return nil, err
-	}
-	if actual, ok := pc.LocalAddr().(*net.UDPAddr); ok {
-		wrapper.listenAddr = cloneUDPAddr(actual)
 	}
 	relayIP := cfg.Listen.RelayIP
 	if strings.TrimSpace(relayIP) == "" {
 		relayIP = "0.0.0.0"
+	}
+	var packetConnConfigs []turn.PacketConnConfig
+	var listenerConfigs []turn.ListenerConfig
+	cleanup := func() {
+		for _, cfg := range packetConnConfigs {
+			_ = cfg.PacketConn.Close()
+		}
+		for _, cfg := range listenerConfigs {
+			_ = cfg.Listener.Close()
+		}
+		for _, certMgr := range wrapper.certManagers {
+			certMgr.Close()
+		}
+	}
+	for _, listener := range listeners {
+		relayGen, err := newRelayAddressGenerator(relayIP, listener.Listen, wrapper)
+		if err != nil {
+			cleanup()
+			return nil, err
+		}
+		permissionHandler := func(clientAddr net.Addr, peerIP net.IP) bool {
+			return wrapper.allowPeer(clientAddr, peerIP)
+		}
+		switch listener.Type {
+		case "udp":
+			listenAddr, err := net.ResolveUDPAddr("udp", listener.Listen)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			pc, err := net.ListenUDP("udp", listenAddr)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			packetConnConfigs = append(packetConnConfigs, turn.PacketConnConfig{
+				PacketConn:            pc,
+				RelayAddressGenerator: relayGen,
+				PermissionHandler:     permissionHandler,
+			})
+			wrapper.recordListener(listener.Type, pc.LocalAddr())
+		case "tcp":
+			ln, err := net.Listen("tcp", listener.Listen)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			listenerConfigs = append(listenerConfigs, turn.ListenerConfig{
+				Listener:              ln,
+				RelayAddressGenerator: relayGen,
+				PermissionHandler:     permissionHandler,
+			})
+			wrapper.recordListener(listener.Type, ln.Addr())
+		case "tls":
+			certMgr, err := newTurnCertManager(listener)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			wrapper.certManagers = append(wrapper.certManagers, certMgr)
+			rawListener, err := net.Listen("tcp", listener.Listen)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			tlsCfg, err := buildTurnTLSServerConfig(listener, certMgr)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			ln := tls.NewListener(rawListener, tlsCfg)
+			listenerConfigs = append(listenerConfigs, turn.ListenerConfig{
+				Listener:              ln,
+				RelayAddressGenerator: relayGen,
+				PermissionHandler:     permissionHandler,
+			})
+			wrapper.recordListener(listener.Type, ln.Addr())
+		case "dtls":
+			certMgr, err := newTurnCertManager(listener)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			wrapper.certManagers = append(wrapper.certManagers, certMgr)
+			udpAddr, err := net.ResolveUDPAddr("udp", listener.Listen)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			dtlsCfg, err := buildTurnDTLSServerConfig(listener, certMgr)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			ln, err := piondtls.Listen("udp", udpAddr, dtlsCfg)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			listenerConfigs = append(listenerConfigs, turn.ListenerConfig{
+				Listener:              ln,
+				RelayAddressGenerator: relayGen,
+				PermissionHandler:     permissionHandler,
+			})
+			wrapper.recordListener(listener.Type, ln.Addr())
+		}
 	}
 	server, err := turn.NewServer(turn.ServerConfig{
 		Realm: cfg.Realm,
@@ -840,24 +1108,11 @@ func buildPionServer(cfg Config) (*openRelayPion, error) {
 		EventHandler: turn.EventHandler{
 			OnAuth: wrapper.onAuth,
 		},
-		PacketConnConfigs: []turn.PacketConnConfig{{
-			PacketConn: pc,
-			RelayAddressGenerator: &guardedRelayAddressGenerator{
-				RelayAddressGenerator: &turn.RelayAddressGeneratorPortRange{
-					RelayAddress: net.ParseIP(relayIP),
-					Address:      relayIP,
-					MinPort:      1,
-					MaxPort:      65535,
-				},
-				wrapper: wrapper,
-			},
-			PermissionHandler: func(clientAddr net.Addr, peerIP net.IP) bool {
-				return wrapper.allowPeer(clientAddr, peerIP)
-			},
-		}},
+		PacketConnConfigs: packetConnConfigs,
+		ListenerConfigs:   listenerConfigs,
 	})
 	if err != nil {
-		_ = pc.Close()
+		cleanup()
 		return nil, err
 	}
 	wrapper.servers = append(wrapper.servers, server)
@@ -871,22 +1126,99 @@ func (o *openRelayPion) Close() error {
 			first = err
 		}
 	}
+	for _, certMgr := range o.certManagers {
+		certMgr.Close()
+	}
 	return first
 }
 
-func (r *relayReservation) publicRelayAddr(actual *net.UDPAddr) net.Addr {
+func newRelayAddressGenerator(relayIP, listenAddr string, wrapper *openRelayPion) (*guardedRelayAddressGenerator, error) {
+	bindIP, err := listenerHost(listenAddr)
+	if err != nil {
+		return nil, err
+	}
+	return &guardedRelayAddressGenerator{
+		RelayAddressGenerator: &turn.RelayAddressGeneratorPortRange{
+			RelayAddress: net.ParseIP(relayIP),
+			Address:      bindIP,
+			MinPort:      1,
+			MaxPort:      65535,
+		},
+		wrapper: wrapper,
+	}, nil
+}
+
+func listenerHost(listenAddr string) (string, error) {
+	host, _, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return "", err
+	}
+	if host == "" {
+		return "0.0.0.0", nil
+	}
+	return host, nil
+}
+
+func (o *openRelayPion) recordListener(listenerType string, addr net.Addr) {
+	o.boundListeners = append(o.boundListeners, boundListener{
+		Type: listenerType,
+		Addr: addr,
+	})
+	if listenerType == "udp" {
+		if udpAddr, ok := addr.(*net.UDPAddr); ok && o.listenAddr == nil {
+			o.listenAddr = cloneUDPAddr(udpAddr)
+		}
+	}
+}
+
+func (o *openRelayPion) listenerAddrByType(listenerType string) net.Addr {
+	for _, listener := range o.boundListeners {
+		if listener.Type == listenerType {
+			return listener.Addr
+		}
+	}
+	return nil
+}
+
+func (r *relayReservation) publicRelayAddr(basePublic, actual *net.UDPAddr) net.Addr {
+	return r.publicRelayAddrWithPort(basePublic, actual, 0)
+}
+
+func (r *relayReservation) publicRelayAddrWithPort(basePublic, actual *net.UDPAddr, publicPort int) net.Addr {
 	switch {
 	case r == nil:
-		return cloneUDPAddr(actual)
+		return cloneUDPAddr(basePublic)
 	case r.MappedAddr != nil:
 		return cloneUDPAddr(r.MappedAddr)
 	case r.MappedRangeIP != nil && r.MappedRangeStart > 0 && r.PortRangeStart > 0 && r.PortRangeEnd >= r.PortRangeStart:
+		if publicPort == 0 {
+			publicPort = actual.Port
+		}
 		return &net.UDPAddr{
 			IP:   cloneIP(r.MappedRangeIP),
-			Port: r.MappedRangeStart + (actual.Port - r.PortRangeStart),
+			Port: r.MappedRangeStart + (publicPort - r.PortRangeStart),
 		}
 	default:
-		return cloneUDPAddr(actual)
+		if publicPort == 0 {
+			return cloneUDPAddr(basePublic)
+		}
+		return &net.UDPAddr{
+			IP:   r.publicRelayIP(basePublic.IP),
+			Port: publicPort,
+		}
+	}
+}
+
+func (r *relayReservation) publicRelayIP(fallback net.IP) net.IP {
+	switch {
+	case r == nil:
+		return cloneIP(fallback)
+	case r.MappedAddr != nil:
+		return cloneIP(r.MappedAddr.IP)
+	case r.MappedRangeIP != nil:
+		return cloneIP(r.MappedRangeIP)
+	default:
+		return cloneIP(fallback)
 	}
 }
 
@@ -1043,6 +1375,23 @@ func normalizeUDPAddr(addr net.Addr) (*net.UDPAddr, bool) {
 		return nil, false
 	}
 	return cloneUDPAddr(udpAddr), true
+}
+
+func addrIP(addr net.Addr) (net.IP, bool) {
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		if a == nil || a.IP == nil {
+			return nil, false
+		}
+		return cloneIP(a.IP), true
+	case *net.TCPAddr:
+		if a == nil || a.IP == nil {
+			return nil, false
+		}
+		return cloneIP(a.IP), true
+	default:
+		return nil, false
+	}
 }
 
 func main() {

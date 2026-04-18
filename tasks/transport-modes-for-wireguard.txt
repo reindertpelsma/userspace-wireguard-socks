@@ -1,0 +1,71 @@
+Currently the uwgsocks can bind to both TURN or locally. I want the abiltity that it can also bind to both, as its
+common that the wireguard server still has connections to local peers.
+
+I also want to add SOCKS5 UDP associate as a way to let Wireguard connect. This is then primarily for outbound wireguard connections,
+, so peers with a static endpoint e.g when a socks proxy is required to connect to the internet. 
+
+This means that during Wireguard roaming you not only keep track of the endpoint, but also keep track of the source where it came
+from.
+
+So there are 3 sources a wireguard packet can come from:
+- normal system UDP
+- TURN (tunneling UDP)
+- SOCKS5 UDP associate
+
+A Wireguard peer must be able to roam across all three freely, wherever you receive an authenticated packet from,
+also over IPv6.
+
+If a Wireguard endpoint IP is specified in the Wireguard config, you have a default transport (usually normal system UDP)
+to make the Wireguard connection. Otherwise the Wireguard config can specify per peer how the initial set endpoint IP should be reached
+over which transport. Remember that the peer can still roam to other transport and also remember that RoamFallback should be kept (resetting transport mode and the endpoint to its default)
+if its not dynamic.
+
+
+I also want to add support for Wireguard over TCP. Its like UDP, but you accept/connect to TCP endpoints instead,
+you still use a idle timeout of 30 seconds (30 seconds no activity over the peer? kill TCP connection), and the TCP connection
+uses a 2 byte prefix to indicate the packet length that follows.
+
+The idle timer for Wireguard peers over TCP can be modified per peer. (like it can be extended to minutes because TCP timeouts are much longer)
+
+Since we now have multiple ways to listen for Wireguard, the existing ListenPort should be considered as a compatibility feature.
+Instead 
+
+
+Then I want that to add to the support list:
+- TCP over TLS
+- UDP over DTLS
+
+So you get all of these transport modes for Wireguard
+
+The base transport modes for wireguard packets.
+- DGRAM/UDP (default Wireguard)
+- STREAM/TCP (2 byte prefix)
+- TCP over TLS. (so wireguard is then send over TLS)
+- UDP over DTLS
+
+For the TLS/DTLS variant, the server cert checking can be disabled since we already do Wireguard encryption. 
+It can be optionally enabled to verify, but its not needed for security/confidentiatiltiy of the data.
+
+Which can be carried over:
+- raw (just the base transport)
+- SOCKS5 (SOCKS5 can tunnel both TCP/UDP, using UDP associate for example)
+- HTTP/HTTPS proxy
+- TURN (tunneling UDP, since TURN can only tunnel UDP)
+  - connecting to TURN through:
+     - UDP
+     - TCP
+     - TURNS (TURN over TLS)
+     - TURN over DTLS (ONLY add if the turn library supports it, do not make it yourself)
+
+Implemenet the transport modes in internal/wgbind
+
+This needs to be configured in the configs.
+
+Idea is that you define in the configs transports, specifying every transport.
+The 'standard' transport must be just the regular UDP wireguard over system sockts as we have now.
+
+For socks5/http proxy:
+- for socks5 udp associate you pre-connect to socks5 and assign a UDP port (using UDP associate)
+- for tcp and http connect you only connect when a packet needs to be send out to an endpoint.
+  You use the idle timer of 30 seconds (just like Wireguard over TCP). This can be changed and is shared with the idle
+  timer for Wireguard over TCP. If persistentkeepalive is even set on a peer, then the socks5/http connect should be permanent.

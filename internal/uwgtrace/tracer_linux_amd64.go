@@ -2039,6 +2039,14 @@ func (t *tracer) handleGetSockOpt(tid int, regs unix.PtraceRegs, seccompStop boo
 			}
 			return t.finishEmulated(tid, regs, 0, seccompStop)
 		}
+	case unix.IPPROTO_TCP:
+		switch optname {
+		case unix.TCP_NODELAY:
+			if err := writeInt(1); err != nil {
+				return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+			}
+			return t.finishEmulated(tid, regs, 0, seccompStop)
+		}
 	}
 	return t.resumeDefault(tid, seccompStop)
 }
@@ -2073,6 +2081,12 @@ func (t *tracer) handleSetSockOpt(tid int, regs unix.PtraceRegs, seccompStop boo
 				return t.finishEmulated(tid, regs, 0, seccompStop)
 			}
 			return t.resumeDefault(tid, seccompStop)
+		}
+	}
+	if state.Proxied != 0 && level == unix.IPPROTO_TCP {
+		switch optname {
+		case unix.TCP_NODELAY:
+			return t.finishEmulated(tid, regs, 0, seccompStop)
 		}
 	}
 	if state.Proxied == 0 {

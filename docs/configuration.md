@@ -5,12 +5,16 @@
 
 `uwgsocks` merges configuration from YAML, wg-quick config, and CLI flags. YAML is the base, `wireguard.config_file` and `wireguard.config` are merged into the WireGuard section, then CLI flags append or override values.
 
+The YAML blocks below are intended to be exhaustive for the current config
+schema. When a field is omitted at runtime, `Normalize()` applies the defaults
+described in the surrounding text.
+
 ## WireGuard
 
 ```yaml
 wireguard:
   private_key: ""
-  listen_port: 51820
+  listen_port: null
   listen_addresses: []
   addresses: []
   dns: []
@@ -26,9 +30,17 @@ wireguard:
       endpoint: ""
       allowed_ips: []
       persistent_keepalive: 25
+      transport: ""
+      traffic_shaper:
+        upload_bps: 0
+        download_bps: 0
+        latency_ms: 0
 ```
 
 If `listen_port` is omitted, the process acts as an outbound client and lets the kernel choose UDP source ports. If it is set, WireGuard UDP is bound in server mode. `listen_addresses` restricts the local bind IPs; empty means wildcard IPv4/IPv6.
+`wireguard.peers[].transport` selects a transport by name from the top-level
+`transports:` list. Leave it empty to use the first transport, or the legacy
+UDP / TURN path when `transports` is not configured.
 
 Relevant CLI flags:
 
@@ -50,18 +62,31 @@ Relevant CLI flags:
 ```yaml
 turn:
   server: turn.example.com:3478
+  protocol: udp
   username: wg-client
   password: shared-secret
   realm: example
   permissions:
-    - 203.0.113.10:51820
+    - 203.0.113.10/32
   include_wg_public_key: false
+  tls:
+    cert_file: ""
+    key_file: ""
+    verify_peer: false
+    reload_interval: ""
+    ca_file: ""
+    server_sni: null
 ```
 
 When `turn.server` is set, WireGuard UDP packets are sent through a TURN
 allocation instead of directly binding the normal WireGuard UDP socket. This is
 useful behind NATs, carrier networks, and container platforms where inbound UDP
 is awkward but outbound UDP to a relay is possible.
+
+`turn.protocol` may be `udp`, `tcp`, `tls`, or `dtls`. The legacy top-level
+`turn:` block is a convenience wrapper for a single TURN transport. When you
+need multiple listeners, QUIC / WebSocket obfuscation, or more than one
+transport choice, use `transports:` instead.
 
 `permissions` is the initial TURN permission list. In addition, `uwgsocks`
 automatically adds configured peer endpoints as permissions so static
@@ -83,11 +108,21 @@ The UI server exposes this as `-turn-include-wg-public-key` and
 proxy:
   socks5: 127.0.0.1:1080
   http: 127.0.0.1:8080
+  http_listeners: []
   mixed: ""
   username: ""
   password: ""
   fallback_direct: true
   fallback_socks5: ""
+  ipv6: null
+  udp_associate: true
+  udp_associate_ports: ""
+  https_proxying: true
+  https_proxy_verify: pki
+  https_proxy_ca_file: ""
+  bind: false
+  lowbind: false
+  prefer_ipv6_for_udp_over_socks: false
   honor_environment: true
   outbound_proxies:
     - type: socks5
@@ -96,11 +131,6 @@ proxy:
       password: ""
       roles: [socks, inbound]
       subnets: [0.0.0.0/0, ::/0]
-  udp_associate: true
-  bind: false
-  lowbind: false
-  ipv6: null
-  prefer_ipv6_for_udp_over_socks: false
 ```
 
 `outbound_proxies` replaces the older single-purpose fallback fields. `fallback_socks5` and `inbound.host_dial_proxy_socks5` still work and are internally converted to outbound proxy rules for compatibility.
@@ -108,6 +138,20 @@ proxy:
 a compatibility switch for listener-style tunnel binds. `proxy.lowbind`
 controls whether raw socket/fdproxy binds below port 1024 are allowed; leave it
 false when wrappers should behave like an unprivileged process.
+
+`proxy.http` accepts both classic HTTP proxy traffic and CONNECT tunnels. It
+also supports absolute-form HTTPS proxying such as
+`GET https://example.com/ HTTP/1.1`. Control that path with:
+
+- `proxy.https_proxying`: allow or forbid absolute-form HTTPS proxying.
+- `proxy.https_proxy_verify`: `none`, `pki`, `ca`, or `both`.
+- `proxy.https_proxy_ca_file`: PEM CA bundle used by `ca` and `both`.
+
+`proxy.udp_associate_ports` pins SOCKS5 UDP ASSOCIATE relay sockets to a single
+port or inclusive range such as `40000-40100`. The runtime skips ports already
+occupied by the OS or by other live SOCKS UDP associates in the same process.
+`proxy.http_listeners` adds extra HTTP listeners in addition to `proxy.http`,
+typically Unix sockets.
 
 Roles:
 
@@ -130,12 +174,120 @@ CLI:
 --outbound-proxy 'http://alice:secret@127.0.0.1:3128;roles=socks,inbound;subnets=203.0.113.0/24'
 --honor-proxy-env=false
 --socks5-udp-associate=true
+--socks5-udp-associate-ports 40000-40100
 --socks5-bind=true
 --proxy-ipv6=false
 --prefer-ipv6-for-udp-over-socks=true
 ```
 
 HTTP outbound proxies are CONNECT-only and therefore TCP-only. SOCKS5 outbound proxies can carry TCP and UDP ASSOCIATE.
+
+## Transports
+
+```yaml
+transports:
+  - name: edge-https
+    base: https
+    listen: true
+    listen_port: 443
+    listen_addresses: [0.0.0.0, ::]
+    tls:
+      cert_file: /etc/letsencrypt/live/vpn/fullchain.pem
+      key_file: /etc/letsencrypt/live/vpn/privkey.pem
+      verify_peer: false
+      reload_interval: 60s
+      ca_file: ""
+      server_sni: vpn.example.com
+    websocket:
+      path: /wireguard
+      host_header: vpn.example.com
+      sni_hostname: ""
+    proxy:
+      type: http
+      http:
+        server: proxy.example.com:443
+        username: ""
+        password: ""
+        tls:
+          cert_file: ""
+          key_file: ""
+          verify_peer: true
+          reload_interval: ""
+          ca_file: ""
+          server_sni: proxy.example.com
+    ipv6_translate: false
+    ipv6_prefix: 64:ff9b::/96
+```
+
+`transports` replaces the single-socket UDP-only assumption for outer
+WireGuard transport. Each entry names a transport that peers can use through
+`wireguard.peers[].transport`. The first transport is the default when a peer
+does not name one explicitly.
+
+`base` supports `udp`, `tcp`, `tls`, `dtls`, `http`, `https`, and `quic`.
+`listen: true` means this transport accepts incoming WireGuard sessions; the
+listener port defaults to `wireguard.listen_port` unless `listen_port` overrides
+it per transport.
+
+Shared nested blocks:
+
+- `tls`: server and client certificate settings shared by TLS, DTLS, HTTPS,
+  QUIC, and TLS-capable proxy layers. `server_sni` is tri-state: omitted means
+  infer from the destination hostname, explicit `null` means do not send SNI,
+  and a string forces that SNI.
+- `websocket`: used by HTTP-based transports. `path` defaults to `/`.
+  `host_header` overrides the HTTP Host header. `sni_hostname` is deprecated in
+  favor of `tls.server_sni`.
+- `proxy.type`: `none`, `turn`, `socks5`, or `http`.
+
+Proxy-specific nested blocks:
+
+```yaml
+proxy:
+  type: turn
+  turn:
+    server: turn.example.com:3478
+    username: wg
+    password: secret
+    realm: example
+    protocol: tls
+    no_create_permission: false
+    include_wg_public_key: false
+    permissions: [198.51.100.10/32]
+    tls:
+      cert_file: ""
+      key_file: ""
+      verify_peer: false
+      reload_interval: ""
+      ca_file: ""
+      server_sni: turn.example.com
+  socks5:
+    server: 127.0.0.1:1080
+    username: ""
+    password: ""
+  http:
+    server: proxy.example.com:443
+    username: ""
+    password: ""
+    tls:
+      cert_file: ""
+      key_file: ""
+      verify_peer: false
+      reload_interval: ""
+      ca_file: ""
+      server_sni: proxy.example.com
+```
+
+Notes:
+
+- `proxy.turn.protocol` is `udp`, `tcp`, `tls`, or `dtls`.
+- `proxy.turn.no_create_permission: true` is for open TURN relays.
+- `proxy.turn.include_wg_public_key` appends an encrypted WireGuard public key
+  to the TURN username for relays that understand that metadata.
+- HTTP CONNECT proxies are stream-oriented, so UDP-style base transports become
+  connection-oriented when carried through them.
+- `ipv6_translate` and `ipv6_prefix` enable NAT64-style translation for IPv4
+  peer endpoints when the outer network is IPv6-only.
 
 ## Forwards
 
@@ -449,6 +601,21 @@ existing UDP socket ID.
 `proxy.http_listeners` adds extra HTTP proxy listeners in addition to
 `proxy.http`. This lets the same HTTP proxy, including `/uwg/socket`, be
 available on both a TCP address and a Unix socket.
+
+## Scripts And Logging
+
+```yaml
+scripts:
+  allow: false
+
+log:
+  verbose: false
+```
+
+`scripts.allow` gates all shell-hook execution, including `wireguard.post_up`,
+`wireguard.post_down`, `tun.up`, and `tun.down`. Leave it false for untrusted
+config files. `log.verbose` switches WireGuard device logging from error-only to
+verbose mode and also enables additional runtime warnings from higher layers.
 
 API client commands:
 

@@ -1,0 +1,31 @@
+make a commit of the current feat on both repos. This below are updates for the ugwsocks (not the ui server):
+add to uwgwrapper stdin mode: instead of wrapping another location, uwgwrapper just connects to a TCP socket and forwards stdin/stdout through the TCP socket. For example for SSH this is useful as ProxyCommand. and unlike WireProxy it does not consume a Wireguard peer, multiple of these can be stacked.
+For the forwards and reverse forward support binding/connecting to a unix socket in addition to locally binding/connect to IP/IPv6:
+- for forward: you create a unix socket, eiher STREAM, SEQPACKET or DGRAM type (TCP or UDP), and connections to it connect to remote endpoint. For UDP its important you distinguish multiple connections to the DGRAM/SEQPACKET unix socket, so choose a random UDP source port, just like how every TCP connection has its own ephermal source port.
+- for reverse forward: you bind inside the userspace tunnel (can also be transperantly) and when a connection arrives, TCP or UDP, you connect to a unix socket and relay traffic (UDP is a connection for 30 seconds based on packet, but this is already based on connection tracking anyways, should re-use). 
+- also proxy protocol is on these supported.
+
+For UDP we support both SEQPACKET and DGRAM unix sockets :
+- in SEQPACKET unix socket mode every 'connection' to the unix socket is one UDP flow (source IP + port, destination IP + port) like a connection state in the userspace netstack. Every packet/boundary is a UDP datagram over that flow. This easier to deal then with DGRAM UNIX sockets, but DGRAM UNIX sockets look more like UDP sockets in networking. 
+- in DGRAM unix socket mode, there is no track of connections. Sender must also bind to a unix socket file or an abstract unix address to have a responder address. In this case you track based on the sender address a connection. by default unnamed source DGRAMS are dropped, unless a flag is enabled (very specific flag). 
+   - for forward ports, every unix sender address is a connection. you keep for 30 seconds like UDP timeout (re-use UDP timer)
+   - for reverse forward connections, use a abstract UNIX socket addresses, created for each UDP flow, with the source IP + port in it. Also kept for UDP idle timer (30 seconds). 
+- binding to abstract UNIX socket address is also possible, you use SCM_RIGHTS to reject other processes from sending to the socket, allowed UIDs/GIDs can be put as a list.
+
+For TCP we support all of them: STREAM, DGRAM and SEQPACKET:
+- TCP can also support SEQPACKET or DGRAM, in that case either a 2 byte or a 4 byte big endian uint16_t/uint32_t prefix is put.
+- for stream no boundaries have to be put
+- this allows reliable transport for DGRAM and SEQPACKET unix socket
+
+I think you can distinguish by unix+stream://, unix+dgram://, unix+seqpacket://. by default use DGRAM for UDP and STREAM for TCP.
+
+
+Support:
+        STREAM   DGRAM    SEQPACKET
+TCP      Yes      Yes        Yes
+UDP      No       Yes        Yes
+Stream is not possible for UDP since UDP is unreliable and lacks message boundaries.
+
+I think with the addition to this people can just expose something very privileged like /var/run/docker.sock to other machines, just over Wireguard, and everything would work automatically.
+
+This is very useful on multi tenant/user systems like HPC where binding to loopback is risky or letting an application bind there as anyone can access it. By using unix sockets you can securely isolate applications.

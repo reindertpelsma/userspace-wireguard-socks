@@ -90,6 +90,7 @@ func main() {
 		socksAddr              string
 		httpAddr               string
 		mixedAddr              string
+		socksUDPRelayPorts     string
 		proxyUsername          string
 		proxyPassword          string
 		fallbackSOCKS          string
@@ -155,6 +156,7 @@ func main() {
 	flag.StringVar(&socksAddr, "socks5", "", "host SOCKS5 listen address, for example 127.0.0.1:1080")
 	flag.StringVar(&httpAddr, "http", "", "host HTTP proxy listen address")
 	flag.StringVar(&mixedAddr, "mixed", "", "host mixed SOCKS5/HTTP proxy listen address")
+	flag.StringVar(&socksUDPRelayPorts, "socks5-udp-associate-ports", "", "inclusive UDP relay port or range used for SOCKS5 UDP ASSOCIATE, for example 40000-40100")
 	flag.StringVar(&proxyUsername, "proxy-username", "", "username required by SOCKS5/HTTP proxy authentication")
 	flag.StringVar(&proxyPassword, "proxy-password", "", "password required by SOCKS5/HTTP proxy authentication")
 	flag.Var(&fallback, "fallback-direct", "for SOCKS/HTTP proxy, connect directly when destination is outside WireGuard AllowedIPs")
@@ -314,6 +316,9 @@ func main() {
 	}
 	if mixedAddr != "" {
 		cfg.Proxy.Mixed = mixedAddr
+	}
+	if socksUDPRelayPorts != "" {
+		cfg.Proxy.UDPAssociatePorts = socksUDPRelayPorts
 	}
 	if proxyUsername != "" {
 		cfg.Proxy.Username = proxyUsername

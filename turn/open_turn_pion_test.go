@@ -1,8 +1,16 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,8 +18,118 @@ import (
 	"testing"
 	"time"
 
+	piondtls "github.com/pion/dtls/v3"
 	turn "github.com/pion/turn/v4"
 )
+
+type turnTestCA struct {
+	cert   *x509.Certificate
+	key    *ecdsa.PrivateKey
+	caFile string
+	dir    string
+}
+
+func newTurnTestCA(t *testing.T) *turnTestCA {
+	t.Helper()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "turn-test-ca"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "ca.crt")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return &turnTestCA{
+		cert:   cert,
+		key:    priv,
+		caFile: caFile,
+		dir:    dir,
+	}
+}
+
+func (ca *turnTestCA) issueLeaf(t *testing.T, name string, ipAddrs []net.IP, usages []x509.ExtKeyUsage) (string, string) {
+	t.Helper()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: name},
+		IPAddresses:  ipAddrs,
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  usages,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &priv.PublicKey, ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certFile := filepath.Join(ca.dir, name+".crt")
+	keyFile := filepath.Join(ca.dir, name+".key")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
+}
+
+func loadTurnTestCertPool(t *testing.T, caFile string) *x509.CertPool {
+	t.Helper()
+	data, err := os.ReadFile(caFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(data) {
+		t.Fatal("failed to append CA cert")
+	}
+	return pool
+}
+
+func loadTurnTestKeyPair(t *testing.T, certFile, keyFile string) tls.Certificate {
+	t.Helper()
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
 
 func TestBuildPionServerAndRelayEcho(t *testing.T) {
 	cfg := Config{
@@ -103,6 +221,202 @@ func TestLookupPortRangeMapping(t *testing.T) {
 	if rule.MappedAddr == nil || rule.MappedAddr.String() != "203.0.113.10:51005" {
 		t.Fatalf("unexpected mapped address %v", rule.MappedAddr)
 	}
+}
+
+func TestBuildPionServerMultiListenerAllocations(t *testing.T) {
+	cfg := Config{
+		Realm: "example.org",
+		Listen: ListenConfig{
+			RelayIP: "127.0.0.1",
+		},
+		Listeners: []TURNListenerConfig{
+			{Type: "udp", Listen: "127.0.0.1:0"},
+			{Type: "tcp", Listen: "127.0.0.1:0"},
+			{Type: "tls", Listen: "127.0.0.1:0"},
+			{Type: "dtls", Listen: "127.0.0.1:0"},
+		},
+		Users: []UserConfig{{
+			Username:       "alice",
+			Password:       "alice-pass",
+			SourceNetworks: []string{"127.0.0.0/8"},
+		}},
+	}
+	server := newTestTURNServer(t, cfg)
+
+	for _, listenerType := range []string{"udp", "tcp", "tls", "dtls"} {
+		t.Run(listenerType, func(t *testing.T) {
+			client := newTestTURNClientWithTransport(t, server, listenerType, "alice", "alice-pass", "example.org")
+			relayAddr, closeRelay := allocateRelayForTransport(t, client, listenerType)
+			defer closeRelay()
+			if relayAddr == nil {
+				t.Fatalf("%s relay did not expose a local address", listenerType)
+			}
+		})
+	}
+}
+
+func TestBuildPionServerTLSAndDTLSVerifyPeer(t *testing.T) {
+	ca := newTurnTestCA(t)
+	serverCert, serverKey := ca.issueLeaf(t, "turn-server", []net.IP{net.ParseIP("127.0.0.1")}, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+	clientCert, clientKey := ca.issueLeaf(t, "turn-client", nil, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
+
+	cfg := Config{
+		Realm: "example.org",
+		Listen: ListenConfig{
+			RelayIP: "127.0.0.1",
+		},
+		Listeners: []TURNListenerConfig{
+			{
+				Type:       "tls",
+				Listen:     "127.0.0.1:0",
+				CertFile:   serverCert,
+				KeyFile:    serverKey,
+				VerifyPeer: true,
+				CAFile:     ca.caFile,
+			},
+			{
+				Type:       "dtls",
+				Listen:     "127.0.0.1:0",
+				CertFile:   serverCert,
+				KeyFile:    serverKey,
+				VerifyPeer: true,
+				CAFile:     ca.caFile,
+			},
+		},
+		Users: []UserConfig{{
+			Username:       "alice",
+			Password:       "alice-pass",
+			SourceNetworks: []string{"127.0.0.0/8"},
+		}},
+	}
+	server := newTestTURNServer(t, cfg)
+
+	roots := loadTurnTestCertPool(t, ca.caFile)
+	clientPair := loadTurnTestKeyPair(t, clientCert, clientKey)
+
+	for _, listenerType := range []string{"tls", "dtls"} {
+		t.Run(listenerType, func(t *testing.T) {
+			client := newTestTURNClientWithTransportTLSOptions(t, server, listenerType, "alice", "alice-pass", "example.org", &tls.Config{
+				RootCAs:      roots,
+				ServerName:   "127.0.0.1",
+				Certificates: []tls.Certificate{clientPair},
+			}, &piondtls.Config{
+				RootCAs:      roots,
+				ServerName:   "127.0.0.1",
+				Certificates: []tls.Certificate{clientPair},
+			})
+			relayAddr, closeRelay := allocateRelayForTransport(t, client, listenerType)
+			defer closeRelay()
+			if relayAddr == nil {
+				t.Fatalf("%s relay did not expose a local address", listenerType)
+			}
+		})
+	}
+}
+
+func TestBuildPionServerTLSAndDTLSRejectMissingClientCert(t *testing.T) {
+	ca := newTurnTestCA(t)
+	serverCert, serverKey := ca.issueLeaf(t, "turn-server", []net.IP{net.ParseIP("127.0.0.1")}, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+
+	cfg := Config{
+		Realm: "example.org",
+		Listen: ListenConfig{
+			RelayIP: "127.0.0.1",
+		},
+		Listeners: []TURNListenerConfig{
+			{
+				Type:       "tls",
+				Listen:     "127.0.0.1:0",
+				CertFile:   serverCert,
+				KeyFile:    serverKey,
+				VerifyPeer: true,
+				CAFile:     ca.caFile,
+			},
+			{
+				Type:       "dtls",
+				Listen:     "127.0.0.1:0",
+				CertFile:   serverCert,
+				KeyFile:    serverKey,
+				VerifyPeer: true,
+				CAFile:     ca.caFile,
+			},
+		},
+		Users: []UserConfig{{
+			Username:       "alice",
+			Password:       "alice-pass",
+			SourceNetworks: []string{"127.0.0.0/8"},
+		}},
+	}
+	server := newTestTURNServer(t, cfg)
+	roots := loadTurnTestCertPool(t, ca.caFile)
+
+	t.Run("tls", func(t *testing.T) {
+		addr := server.listenerAddrByType("tls")
+		if addr == nil {
+			t.Fatal("tls listener not found")
+		}
+		conn, err := tls.Dial("tcp", addr.String(), &tls.Config{
+			RootCAs:    roots,
+			ServerName: "127.0.0.1",
+		})
+		if err == nil {
+			defer conn.Close()
+			client, err := turn.NewClient(&turn.ClientConfig{
+				STUNServerAddr: addr.String(),
+				TURNServerAddr: addr.String(),
+				Conn:           turn.NewSTUNConn(conn),
+				Username:       "alice",
+				Password:       "alice-pass",
+				Realm:          "example.org",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			if err := client.Listen(); err == nil {
+				if allocation, allocErr := client.AllocateTCP(); allocErr == nil {
+					_ = allocation.Close()
+					t.Fatal("expected TLS client cert validation failure")
+				}
+			}
+		}
+	})
+
+	t.Run("dtls", func(t *testing.T) {
+		addr := server.listenerAddrByType("dtls")
+		if addr == nil {
+			t.Fatal("dtls listener not found")
+		}
+		udpAddr, err := net.ResolveUDPAddr("udp", addr.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn, err := piondtls.Dial("udp", udpAddr, &piondtls.Config{
+			RootCAs:    roots,
+			ServerName: "127.0.0.1",
+		})
+		if err == nil {
+			defer conn.Close()
+			client, err := turn.NewClient(&turn.ClientConfig{
+				STUNServerAddr: addr.String(),
+				TURNServerAddr: addr.String(),
+				Conn:           turn.NewSTUNConn(conn),
+				Username:       "alice",
+				Password:       "alice-pass",
+				Realm:          "example.org",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			if err := client.Listen(); err == nil {
+				if relayConn, allocErr := client.Allocate(); allocErr == nil {
+					_ = relayConn.Close()
+					t.Fatal("expected DTLS client cert validation failure")
+				}
+			}
+		}
+	})
 }
 
 func TestAllowPeerRespectsSourceNetworks(t *testing.T) {
@@ -275,6 +589,14 @@ func TestInternalOnlyBlocksExternalTraffic(t *testing.T) {
 	alice := newTestTURNClient(t, server.listenAddr.String(), "alice", "alice-pass", "example.org")
 	aliceRelay := allocateRelay(t, alice)
 	defer aliceRelay.Close()
+	hostProbe, err := net.ListenUDP("udp4", &net.UDPAddr{
+		IP:   net.ParseIP("127.0.0.1"),
+		Port: aliceRelay.LocalAddr().(*net.UDPAddr).Port,
+	})
+	if err != nil {
+		t.Fatalf("expected internal-only relay port %d to stay unbound on host: %v", aliceRelay.LocalAddr().(*net.UDPAddr).Port, err)
+	}
+	_ = hostProbe.Close()
 
 	bob := newTestTURNClient(t, server.listenAddr.String(), "bob", "bob-pass", "example.org")
 	bobRelay := allocateRelay(t, bob)
@@ -317,6 +639,42 @@ func TestInternalOnlyBlocksExternalTraffic(t *testing.T) {
 	if _, _, err := peerConn.ReadFromUDP(readBuf); !isTimeout(err) {
 		t.Fatalf("expected internal-only relay to suppress external traffic, got %v", err)
 	}
+}
+
+func TestInternalOnlyMappedAddressDoesNotBindHostPort(t *testing.T) {
+	cfg := Config{
+		Realm: "example.org",
+		Listen: ListenConfig{
+			RelayIP: "127.0.0.1",
+		},
+		Listeners: []TURNListenerConfig{
+			{Type: "udp", Listen: "127.0.0.1:0"},
+		},
+		Users: []UserConfig{{
+			Username:       "alice",
+			Password:       "alice-pass",
+			Port:           40122,
+			MappedAddress:  "127.0.0.1:45122",
+			SourceNetworks: []string{"127.0.0.0/8"},
+			InternalOnly:   true,
+		}},
+	}
+	server := newTestTURNServer(t, cfg)
+	client := newTestTURNClient(t, server.listenAddr.String(), "alice", "alice-pass", "example.org")
+	relayConn := allocateRelay(t, client)
+	defer relayConn.Close()
+
+	if got := relayConn.LocalAddr().String(); got != "127.0.0.1:45122" {
+		t.Fatalf("unexpected mapped relay address %s", got)
+	}
+	hostProbe, err := net.ListenUDP("udp4", &net.UDPAddr{
+		IP:   net.ParseIP("127.0.0.1"),
+		Port: 45122,
+	})
+	if err != nil {
+		t.Fatalf("expected internal-only mapped relay port to stay unbound on host: %v", err)
+	}
+	_ = hostProbe.Close()
 }
 
 func TestUserPortRangeSkipsOccupiedPort(t *testing.T) {
@@ -375,7 +733,69 @@ func newTestTURNServer(t *testing.T, cfg Config) *openRelayPion {
 
 func newTestTURNClient(t *testing.T, serverAddr, username, password, realm string) *turn.Client {
 	t.Helper()
-	clientConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	return newTestTURNClientWithTransportFromAddr(t, "udp", serverAddr, username, password, realm, nil, nil)
+}
+
+func newTestTURNClientWithTransport(t *testing.T, server *openRelayPion, listenerType, username, password, realm string) *turn.Client {
+	t.Helper()
+	addr := server.listenerAddrByType(listenerType)
+	if addr == nil {
+		t.Fatalf("listener type %q not found", listenerType)
+	}
+	return newTestTURNClientWithTransportFromAddr(t, listenerType, addr.String(), username, password, realm, nil, nil)
+}
+
+func newTestTURNClientWithTransportTLSOptions(t *testing.T, server *openRelayPion, listenerType, username, password, realm string, tlsCfg *tls.Config, dtlsCfg *piondtls.Config) *turn.Client {
+	t.Helper()
+	addr := server.listenerAddrByType(listenerType)
+	if addr == nil {
+		t.Fatalf("listener type %q not found", listenerType)
+	}
+	return newTestTURNClientWithTransportFromAddr(t, listenerType, addr.String(), username, password, realm, tlsCfg, dtlsCfg)
+}
+
+func newTestTURNClientWithTransportFromAddr(t *testing.T, listenerType, serverAddr, username, password, realm string, tlsCfg *tls.Config, dtlsCfg *piondtls.Config) *turn.Client {
+	t.Helper()
+	var (
+		clientConn net.PacketConn
+		err        error
+	)
+	switch listenerType {
+	case "udp":
+		clientConn, err = net.ListenPacket("udp4", "127.0.0.1:0")
+	case "tcp":
+		rawConn, dialErr := net.Dial("tcp", serverAddr)
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		clientConn = turn.NewSTUNConn(rawConn)
+	case "tls":
+		if tlsCfg == nil {
+			tlsCfg = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
+		}
+		rawConn, dialErr := tls.Dial("tcp", serverAddr, tlsCfg)
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		clientConn = turn.NewSTUNConn(rawConn)
+	case "dtls":
+		udpAddr, resolveErr := net.ResolveUDPAddr("udp", serverAddr)
+		if resolveErr != nil {
+			t.Fatal(resolveErr)
+		}
+		if dtlsCfg == nil {
+			dtlsCfg = &piondtls.Config{
+				InsecureSkipVerify: true, //nolint:gosec
+			}
+		}
+		rawConn, dialErr := piondtls.Dial("udp", udpAddr, dtlsCfg)
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		clientConn = turn.NewSTUNConn(rawConn)
+	default:
+		t.Fatalf("unsupported listener type %q", listenerType)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,6 +826,21 @@ func allocateRelay(t *testing.T, client *turn.Client) net.PacketConn {
 		t.Fatalf("allocate relay: %v", err)
 	}
 	return relayConn
+}
+
+func allocateRelayForTransport(t *testing.T, client *turn.Client, listenerType string) (net.Addr, func()) {
+	t.Helper()
+	switch listenerType {
+	case "tcp", "tls":
+		allocation, err := client.AllocateTCP()
+		if err != nil {
+			t.Fatalf("allocate tcp relay: %v", err)
+		}
+		return allocation.Addr(), func() { _ = allocation.Close() }
+	default:
+		relayConn := allocateRelay(t, client)
+		return relayConn.LocalAddr(), func() { _ = relayConn.Close() }
+	}
 }
 
 func udpEchoServer(conn *net.UDPConn) {
@@ -443,8 +878,10 @@ func TestLoadConfigUserPortRangeRoundTrip(t *testing.T) {
 	cfgPath := filepath.Join(tmp, "turn.yaml")
 	cfgText := `realm: "example.org"
 listen:
-  turn_listen: "127.0.0.1:3478"
   relay_ip: "127.0.0.1"
+listeners:
+  - type: "udp"
+    listen: "127.0.0.1:3478"
 users:
   - username: "alice"
     password: "alice-pass"
@@ -470,5 +907,8 @@ users:
 	}
 	if !cfg.Users[0].OutboundOnly || !cfg.Users[0].InternalOnly {
 		t.Fatalf("expected outbound_only and internal_only to round-trip, got %+v", cfg.Users[0])
+	}
+	if len(cfg.Listeners) != 1 || cfg.Listeners[0].Type != "udp" || cfg.Listeners[0].Listen != "127.0.0.1:3478" {
+		t.Fatalf("unexpected listeners %+v", cfg.Listeners)
 	}
 }

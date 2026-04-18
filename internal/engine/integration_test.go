@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	mrand "math/rand"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"os"
@@ -392,6 +394,13 @@ func TestTunnelUDPAndSOCKSUDPAssociateBindAndAPIPing(t *testing.T) {
 		PersistentKeepalive: 1,
 	}}
 	clientCfg.Proxy.SOCKS5 = "127.0.0.1:0"
+	occupiedRelay, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupiedRelay.Close()
+	occupiedRelayPort := occupiedRelay.LocalAddr().(*net.UDPAddr).Port
+	clientCfg.Proxy.UDPAssociatePorts = fmt.Sprintf("%d-%d", occupiedRelayPort, occupiedRelayPort+20)
 	clientCfg.Inbound.UDPIdleTimeoutSeconds = 1
 	bind := true
 	clientCfg.Proxy.Bind = &bind
@@ -407,8 +416,14 @@ func TestTunnelUDPAndSOCKSUDPAssociateBindAndAPIPing(t *testing.T) {
 	defer conn.Close()
 	udpRoundTrip(t, conn, []byte("library-udp"))
 
-	udp := socksUDPAssociate(t, clientEng.Addr("socks5"))
+	udp, relay := socksUDPAssociateRelay(t, clientEng.Addr("socks5"))
 	defer udp.Close()
+	if got := int(relay.Port()); got < occupiedRelayPort || got > occupiedRelayPort+20 {
+		t.Fatalf("SOCKS UDP relay port %d outside configured range %d-%d", got, occupiedRelayPort, occupiedRelayPort+20)
+	}
+	if got := int(relay.Port()); got == occupiedRelayPort {
+		t.Fatalf("SOCKS UDP relay reused occupied port %d", got)
+	}
 	if _, err := udp.Write(socksUDPDatagram(t, netip.MustParseAddrPort("100.64.26.1:19000"), []byte("socks-udp"))); err != nil {
 		t.Fatal(err)
 	}
@@ -784,6 +799,53 @@ func TestSOCKSAuthHostForwardVirtualSubnetAndReservedAddresses(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyAbsoluteFormHTTPS(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "hello over https proxy")
+	}))
+	defer upstream.Close()
+
+	caFile := filepath.Join(t.TempDir(), "https-proxy-ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	key := mustKey(t)
+	cfg := config.Default()
+	cfg.WireGuard.PrivateKey = key.String()
+	cfg.WireGuard.Addresses = []string{"100.64.29.2/32"}
+	cfg.Proxy.HTTP = "127.0.0.1:0"
+	cfg.Proxy.HTTPSProxyVerify = "ca"
+	cfg.Proxy.HTTPSProxyCAFile = caFile
+	eng := mustStart(t, cfg)
+
+	status, body := httpProxyAbsoluteFormGet(t, eng.Addr("http"), upstream.URL)
+	if status != http.StatusOK || body != "hello over https proxy" {
+		t.Fatalf("unexpected HTTPS proxy response status=%d body=%q", status, body)
+	}
+}
+
+func TestHTTPProxyAbsoluteFormHTTPSCanBeDisabled(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "should not be reached")
+	}))
+	defer upstream.Close()
+
+	key := mustKey(t)
+	cfg := config.Default()
+	cfg.WireGuard.PrivateKey = key.String()
+	cfg.WireGuard.Addresses = []string{"100.64.29.3/32"}
+	cfg.Proxy.HTTP = "127.0.0.1:0"
+	enabled := false
+	cfg.Proxy.HTTPSProxying = &enabled
+	eng := mustStart(t, cfg)
+
+	status, _ := httpProxyAbsoluteFormGet(t, eng.Addr("http"), upstream.URL)
+	if status != http.StatusForbidden {
+		t.Fatalf("unexpected disabled HTTPS proxy status=%d", status)
+	}
+}
+
 func TestBINDDefaultDisabled(t *testing.T) {
 	key := mustKey(t)
 	cfg := config.Default()
@@ -800,6 +862,55 @@ func TestBINDDefaultDisabled(t *testing.T) {
 	rep, _ := readSOCKSReply(t, control)
 	if rep != 0x07 {
 		t.Fatalf("BIND should be disabled by default, got SOCKS reply %d", rep)
+	}
+}
+
+func TestSOCKSUDPAssociatePinsClientEndpoint(t *testing.T) {
+	hostUDP, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hostUDP.Close()
+	go serveUDPEcho(hostUDP)
+
+	key := mustKey(t)
+	cfg := config.Default()
+	cfg.WireGuard.PrivateKey = key.String()
+	cfg.WireGuard.Addresses = []string{"100.64.31.2/32"}
+	cfg.Proxy.SOCKS5 = "127.0.0.1:0"
+	eng := mustStart(t, cfg)
+
+	udp, relay := socksUDPAssociateRelay(t, eng.Addr("socks5"))
+	defer udp.Close()
+	target := netip.MustParseAddrPort(hostUDP.LocalAddr().String())
+	if _, err := udp.Write(socksUDPDatagram(t, target, []byte("primary"))); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSOCKSUDPDatagram(t, udp); !bytes.Equal(got, []byte("primary")) {
+		t.Fatalf("primary UDP associate echo mismatch: got %q", got)
+	}
+
+	intruder, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(relay))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer intruder.Close()
+	_ = intruder.SetDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, err := intruder.Write(socksUDPDatagram(t, target, []byte("intruder"))); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 256)
+	if _, err := intruder.Read(buf); err == nil {
+		t.Fatal("intruder UDP endpoint unexpectedly received a response")
+	} else if nerr, ok := err.(net.Error); !ok || !nerr.Timeout() {
+		t.Fatalf("intruder UDP read error = %v, want timeout", err)
+	}
+
+	if _, err := udp.Write(socksUDPDatagram(t, target, []byte("primary-again"))); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSOCKSUDPDatagram(t, udp); !bytes.Equal(got, []byte("primary-again")) {
+		t.Fatalf("post-intruder UDP associate echo mismatch: got %q", got)
 	}
 }
 
@@ -2125,6 +2236,34 @@ func httpProxyGet(t *testing.T, proxyAddr, target string) string {
 	return string(body)
 }
 
+func httpProxyAbsoluteFormGet(t *testing.T, proxyAddr, targetURL string) (int, string) {
+	t.Helper()
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	br := bufio.NewReader(c)
+	if _, err := fmt.Fprintf(c, "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", targetURL, u.Host); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, string(body)
+}
+
 func httpProxyGetUnix(t *testing.T, proxySocket, target string) string {
 	t.Helper()
 	client := &http.Client{
@@ -2469,6 +2608,12 @@ func socksControlAuth(t *testing.T, socksAddr, username, password string) net.Co
 
 func socksUDPAssociate(t *testing.T, socksAddr string) net.Conn {
 	t.Helper()
+	udp, _ := socksUDPAssociateRelay(t, socksAddr)
+	return udp
+}
+
+func socksUDPAssociateRelay(t *testing.T, socksAddr string) (net.Conn, netip.AddrPort) {
+	t.Helper()
 	control := socksControl(t, socksAddr)
 	if _, err := control.Write(socksRequestBytes(0x03, netip.MustParseAddrPort("0.0.0.0:0"))); err != nil {
 		_ = control.Close()
@@ -2485,7 +2630,7 @@ func socksUDPAssociate(t *testing.T, socksAddr string) net.Conn {
 		_ = control.Close()
 		t.Fatal(err)
 	}
-	return &socksUDPClient{UDPConn: udp, control: control}
+	return &socksUDPClient{UDPConn: udp, control: control}, relay
 }
 
 func socksBind(t *testing.T, socksAddr string, requested netip.AddrPort) (netip.AddrPort, <-chan error) {

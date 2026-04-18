@@ -505,6 +505,9 @@ func TestUWGWrapperReentrantTrackedLockFailsFast(t *testing.T) {
 }
 
 func TestUWGWrapperNoNewPrivilegesDefaultAndOverride(t *testing.T) {
+	if runningRestrictedGVisor() {
+		t.Skip("restricted gVisor keeps no_new_privs forced on wrapper-launched processes")
+	}
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
@@ -687,6 +690,17 @@ func runCommandCombinedFileBacked(t *testing.T, cmd *exec.Cmd) ([]byte, error) {
 	return out, runErr
 }
 
+func runningRestrictedGVisor() bool {
+	if _, err := os.Stat("/proc/sentry-meminfo"); err == nil {
+		return true
+	}
+	return false
+}
+
+func unsupportedWrappedMode(out []byte) bool {
+	return bytes.Contains(out, []byte("function not implemented"))
+}
+
 func startWrappedListenerProcess(t *testing.T, art wrapperArtifacts, httpSock, transport, target string, args []string, opts wrapperRunOptions) (*exec.Cmd, *bytes.Buffer, chan error) {
 	t.Helper()
 	var lastErr error
@@ -732,6 +746,9 @@ func startWrappedListenerProcess(t *testing.T, art wrapperArtifacts, httpSock, t
 		lastStderr = stderr.String()
 		killProcessGroup(cmd)
 		<-done
+		if runningRestrictedGVisor() && unsupportedWrappedMode(stderr.Bytes()) {
+			t.Skipf("skipping wrapper mode %q on restricted gVisor kernel: %s", transport, strings.TrimSpace(stderr.String()))
+		}
 		if retryableWrappedFailure(stderr.Bytes(), nil) {
 			t.Logf("retrying wrapped listener after startup failure: %s %v", target, args)
 			continue
@@ -771,6 +788,9 @@ func runWrappedTargetWithOptions(t *testing.T, art wrapperArtifacts, httpSock, t
 		}
 		lastOut = out
 		lastErr = err
+		if runningRestrictedGVisor() && unsupportedWrappedMode(out) {
+			t.Skipf("skipping wrapper mode %q on restricted gVisor kernel: %s", transport, strings.TrimSpace(string(out)))
+		}
 		if ctx.Err() == context.DeadlineExceeded {
 			killProcessGroup(cmd)
 			if attempt < 2 && retryableWrappedTimeout(target) {
@@ -902,6 +922,9 @@ func retryableWrappedFailure(out []byte, err error) bool {
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 141 {
+		return true
+	}
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 127 && len(bytes.TrimSpace(out)) == 0 {
 		return true
 	}
 	return false

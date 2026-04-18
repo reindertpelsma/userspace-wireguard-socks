@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/transport"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,6 +36,13 @@ type Config struct {
 	ACL           ACL           `yaml:"acl"`
 	Forwards      []Forward     `yaml:"forwards"`
 	TURN          TURN          `yaml:"turn"`
+	// Transports defines the pluggable transport layer for WireGuard packets.
+	// Each entry names a transport (base protocol + optional proxy) that can
+	// be used in listen mode, client mode, or both.  Peers reference transports
+	// by name; the first entry is the default.
+	//
+	// If empty the legacy TURN config and UDP-listen logic apply unchanged.
+	Transports []transport.Config `yaml:"transports"`
 	// ReverseForwards listen inside the userspace WireGuard netstack and dial
 	// out to the host network. They are narrower than transparent inbound
 	// forwarding because only explicitly configured tunnel IP:port pairs are
@@ -74,6 +82,8 @@ type WireGuard struct {
 type TURN struct {
 	// Server is the TURN server address (host:port).
 	Server string `yaml:"server"`
+	// Protocol is how to reach the TURN server: udp | tcp | tls | dtls.
+	Protocol string `yaml:"protocol"`
 	// Username for TURN authentication.
 	Username string `yaml:"username"`
 	// Password for TURN authentication.
@@ -88,6 +98,8 @@ type TURN struct {
 	// WireGuard public key to the TURN username. The companion open TURN relay
 	// can use that metadata to bind allocations to a WireGuard identity.
 	IncludeWGPublicKey bool `yaml:"include_wg_public_key"`
+	// TLS configures TURNS and TURN-over-DTLS.
+	TLS transport.TLSConfig `yaml:"tls"`
 }
 
 type Peer struct {
@@ -97,6 +109,9 @@ type Peer struct {
 	AllowedIPs          []string      `yaml:"allowed_ips"`
 	PersistentKeepalive int           `yaml:"persistent_keepalive"`
 	TrafficShaper       TrafficShaper `yaml:"traffic_shaper"`
+	// Transport is the name of a transport from the top-level transports list.
+	// Empty means use the default transport (first entry, or legacy UDP).
+	Transport string `yaml:"transport,omitempty"`
 }
 
 type Proxy struct {
@@ -110,6 +125,10 @@ type Proxy struct {
 	FallbackSOCKS5            string          `yaml:"fallback_socks5"`
 	IPv6                      *bool           `yaml:"ipv6"`
 	UDPAssociate              *bool           `yaml:"udp_associate"`
+	UDPAssociatePorts         string          `yaml:"udp_associate_ports"`
+	HTTPSProxying             *bool           `yaml:"https_proxying"`
+	HTTPSProxyVerify          string          `yaml:"https_proxy_verify"`
+	HTTPSProxyCAFile          string          `yaml:"https_proxy_ca_file"`
 	Bind                      *bool           `yaml:"bind"`
 	LowBind                   *bool           `yaml:"lowbind"`
 	PreferIPv6ForUDPOverSOCKS *bool           `yaml:"prefer_ipv6_for_udp_over_socks"`
@@ -286,6 +305,8 @@ func Default() Config {
 		Proxy: Proxy{
 			FallbackDirect:            boolPtr(true),
 			UDPAssociate:              boolPtr(true),
+			HTTPSProxying:             boolPtr(true),
+			HTTPSProxyVerify:          "pki",
 			Bind:                      boolPtr(false),
 			LowBind:                   boolPtr(false),
 			PreferIPv6ForUDPOverSOCKS: boolPtr(false),
@@ -393,6 +414,36 @@ func (c *Config) Normalize() error {
 	if c.Proxy.UDPAssociate == nil {
 		t := true
 		c.Proxy.UDPAssociate = &t
+	}
+	if c.Proxy.UDPAssociatePorts != "" {
+		if _, _, err := ParsePortRange(c.Proxy.UDPAssociatePorts); err != nil {
+			return fmt.Errorf("proxy.udp_associate_ports %q: %w", c.Proxy.UDPAssociatePorts, err)
+		}
+	}
+	if c.Proxy.HTTPSProxying == nil {
+		t := true
+		c.Proxy.HTTPSProxying = &t
+	}
+	if c.Proxy.HTTPSProxyVerify == "" {
+		if c.Proxy.HTTPSProxyCAFile != "" {
+			c.Proxy.HTTPSProxyVerify = "both"
+		} else {
+			c.Proxy.HTTPSProxyVerify = "pki"
+		}
+	}
+	switch c.Proxy.HTTPSProxyVerify {
+	case "none", "pki":
+	case "ca", "both":
+		if c.Proxy.HTTPSProxyCAFile == "" {
+			return fmt.Errorf("proxy.https_proxy_ca_file is required when proxy.https_proxy_verify is %q", c.Proxy.HTTPSProxyVerify)
+		}
+	default:
+		return fmt.Errorf("invalid proxy.https_proxy_verify %q", c.Proxy.HTTPSProxyVerify)
+	}
+	if c.Proxy.HTTPSProxyCAFile != "" {
+		if _, err := os.Stat(c.Proxy.HTTPSProxyCAFile); err != nil {
+			return fmt.Errorf("proxy.https_proxy_ca_file %q: %w", c.Proxy.HTTPSProxyCAFile, err)
+		}
 	}
 	if c.Proxy.Bind == nil {
 		f := false
@@ -593,6 +644,37 @@ func (c *Config) Normalize() error {
 	if err := normalizeForwards("reverse_forward", c.ReverseForwards); err != nil {
 		return err
 	}
+	if err := c.normalizeTransports(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// normalizeTransports validates transport configs and checks per-peer
+// transport references.
+func (c *Config) normalizeTransports() error {
+	for i := range c.Transports {
+		cfg := &c.Transports[i]
+		if cfg.Name == "" {
+			return fmt.Errorf("transports[%d]: name is required", i)
+		}
+		if err := transport.ValidateBase(cfg.Base); err != nil {
+			return fmt.Errorf("transports[%d] %q: %w", i, cfg.Name, err)
+		}
+		if err := transport.ValidateProxyType(cfg.Proxy.Type); err != nil {
+			return fmt.Errorf("transports[%d] %q: %w", i, cfg.Name, err)
+		}
+	}
+	// Build a name set for peer validation.
+	names := make(map[string]bool, len(c.Transports))
+	for _, t := range c.Transports {
+		names[t.Name] = true
+	}
+	for i, p := range c.WireGuard.Peers {
+		if p.Transport != "" && !names[p.Transport] {
+			return fmt.Errorf("wireguard.peers[%d]: transport %q not found in transports", i, p.Transport)
+		}
+	}
 	return nil
 }
 
@@ -613,6 +695,40 @@ func normalizeTrafficShaper(name string, cfg *TrafficShaper) error {
 		cfg.LatencyMillis = 15
 	}
 	return nil
+}
+
+// ParsePortRange parses "port" or "start-end" into an inclusive port range.
+func ParsePortRange(raw string) (int, int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, 0, fmt.Errorf("port range is empty")
+	}
+	startText, endText, hasDash := strings.Cut(raw, "-")
+	if !hasDash {
+		port, err := strconv.Atoi(raw)
+		if err != nil {
+			return 0, 0, fmt.Errorf("invalid port %q", raw)
+		}
+		if port < 1 || port > 65535 {
+			return 0, 0, fmt.Errorf("port %d must be between 1 and 65535", port)
+		}
+		return port, port, nil
+	}
+	start, err := strconv.Atoi(strings.TrimSpace(startText))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid start port %q", startText)
+	}
+	end, err := strconv.Atoi(strings.TrimSpace(endText))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid end port %q", endText)
+	}
+	if start < 1 || start > 65535 || end < 1 || end > 65535 {
+		return 0, 0, fmt.Errorf("ports must be between 1 and 65535")
+	}
+	if start > end {
+		return 0, 0, fmt.Errorf("start port %d must be <= end port %d", start, end)
+	}
+	return start, end, nil
 }
 
 func normalizeForwards(name string, forwards []Forward) error {
@@ -886,6 +1002,8 @@ func setPeer(peer *Peer, key, value string) error {
 			return fmt.Errorf("invalid PersistentKeepalive %q", value)
 		}
 		peer.PersistentKeepalive = n
+	case "transport":
+		peer.Transport = value
 	default:
 		return fmt.Errorf("unsupported peer key %q", key)
 	}

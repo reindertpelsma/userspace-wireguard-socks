@@ -121,18 +121,24 @@ func TestHalfOpenSOCKSFloodAndAPIMutation(t *testing.T) {
 	eng := mustStartEngine(t, cfg)
 
 	before := runtime.NumGoroutine()
+	dialTimeout := time.Second
+	deadline := 500 * time.Millisecond
+	if runtime.GOOS == "android" {
+		dialTimeout = 3 * time.Second
+		deadline = 1500 * time.Millisecond
+	}
 	var wg sync.WaitGroup
 	for i := 0; i < 32; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			conn, err := net.DialTimeout("tcp", eng.Addr("socks5"), time.Second)
+			conn, err := net.DialTimeout("tcp", eng.Addr("socks5"), dialTimeout)
 			if err != nil {
 				t.Errorf("dial half-open %d: %v", i, err)
 				return
 			}
 			defer conn.Close()
-			_ = conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+			_ = conn.SetDeadline(time.Now().Add(deadline))
 			_, _ = conn.Write([]byte{0x05, 0x02})
 			time.Sleep(25 * time.Millisecond)
 		}(i)

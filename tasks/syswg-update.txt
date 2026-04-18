@@ -1,0 +1,27 @@
+Syswg needs to have an update (the system Wireguard manager in case you want root access for uwgsocks-ui)
+- First I want that it supports loading the ACLs from the config file yaml just like uwgsocks has. Currently it only supports
+inserting ACLs from API
+- Then I want the ability to 'forward' ports from this machine to Wireguard (since Wireguard tunnel is usually behind NAT).
+  Use the same config format as in uwgsocks
+  What you do is both a PREROUTING (as in iptables, but now in nftables) that routes connections to LOCAL (so IPs assigned to this machine, not local subnets),
+  just like how docker port exposing works, to in the tunnel. And a REDIRECT in nat so that if I connect to loopback:port that it gets forwarded to the wireguard,
+  just like how Docker achieves this
+- Add reverse forwarding. In this case its simply a 'DNAT' from Wireguard to the Wireguard tunnel IP (so match from Wireguard interface, to LOCAL (this machine) IP) on a specific port
+  forward to other port. Source nat masquerade is kept
+- Ensure there is no source nat masquerade for traffic leaving the wg interface
+- I want to implement proxy protocol as well. If you encounter proxy protocol 
+  you need a small TCP forwarder since we need to insert/remove proxy protocol.
+
+  Since transperant binding on Wireguard tunnel is pretty difficult to do using kernel APIs unlike it was in userspace Wireguard,
+  I don't mind to not support that option for now. 
+  So specifically this case not to support: This means that proxy protocol does not make sense for forward, i.e a proxy client giving a source IP. send packet to your local listener and then you transperantly binding
+  on wireguard. 
+
+  So this means proxy protocol is only for reverse forwards, so you add the source IP in a header and then forward the connection to a local application.
+  You bind for the specific port on the Wireguard tunnel interface, record source IP, and relay the UDP/TCP stream using proxy protocol to a target application.
+  For UDP use idle timer of 30 seconds to decide if reply packets are accepted/forwarded.
+
+  Transperant binding of reverse forward also not supported.
+
+Please check if the config format of syswg matches that what ugwsocks uses (only its a subset now)
+For the kernel wireguard we only support the regular UDP transport mode.

@@ -149,6 +149,9 @@ func runWrappedTargetExpectFailure(t *testing.T, art wrapperArtifacts, httpSock,
 		killProcessGroup(cmd)
 		return out, ctx.Err()
 	}
+	if runningRestrictedGVisor() && unsupportedWrappedMode(out) {
+		t.Skipf("skipping wrapper mode %q on restricted gVisor kernel: %s", transport, strings.TrimSpace(string(out)))
+	}
 	if err != nil && strings.TrimSpace(string(out)) == "" {
 		return out, err
 	}

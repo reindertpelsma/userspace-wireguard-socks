@@ -19,7 +19,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 )
 
 const (
@@ -215,8 +218,7 @@ func (e *Engine) serveSOCKSUDPAssociate(control net.Conn, src netip.AddrPort) {
 		_ = writeSOCKSReply(control, socksRepCommandNotSupported, netip.AddrPort{})
 		return
 	}
-	host := socksUDPBindHost(control)
-	pc, err := net.ListenPacket("udp", net.JoinHostPort(host, "0"))
+	pc, err := e.listenSOCKSUDPAssociatePacketConn(control)
 	if err != nil {
 		_ = writeSOCKSReply(control, socksRepGeneralFailure, netip.AddrPort{})
 		return
@@ -233,6 +235,122 @@ func (e *Engine) serveSOCKSUDPAssociate(control net.Conn, src netip.AddrPort) {
 		_ = pc.Close()
 	}()
 	e.serveSOCKSUDPRelay(pc, src, done)
+}
+
+func (e *Engine) listenSOCKSUDPAssociatePacketConn(control net.Conn) (net.PacketConn, error) {
+	host := socksUDPBindHost(control)
+	if e.cfg.Proxy.UDPAssociatePorts == "" {
+		return net.ListenPacket("udp", net.JoinHostPort(host, "0"))
+	}
+	start, end, err := config.ParsePortRange(e.cfg.Proxy.UDPAssociatePorts)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for port := start; port <= end; port++ {
+		if e.socksUDPRelayPortKnownOccupied(host, port) {
+			continue
+		}
+		pc, err := net.ListenPacket("udp", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err == nil {
+			e.markSOCKSUDPRelayPort(host, port)
+			return &trackedPacketConn{
+				PacketConn: pc,
+				onClose: func() {
+					e.unmarkSOCKSUDPRelayPort(host, port)
+				},
+			}, nil
+		}
+		if errors.Is(err, syscall.EADDRINUSE) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) {
+			lastErr = err
+			continue
+		}
+		return nil, err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no free UDP relay port found")
+	}
+	return nil, fmt.Errorf("socks5 udp associate ports %q: %w", e.cfg.Proxy.UDPAssociatePorts, lastErr)
+}
+
+func (e *Engine) socksUDPRelayPortKnownOccupied(host string, port int) bool {
+	e.socksUDPMu.Lock()
+	defer e.socksUDPMu.Unlock()
+	ports := e.socksUDPRelayPorts[host]
+	if ports == nil {
+		return false
+	}
+	_, ok := ports[port]
+	return ok
+}
+
+func (e *Engine) markSOCKSUDPRelayPort(host string, port int) {
+	e.socksUDPMu.Lock()
+	defer e.socksUDPMu.Unlock()
+	if e.socksUDPRelayPorts[host] == nil {
+		e.socksUDPRelayPorts[host] = make(map[int]struct{})
+	}
+	e.socksUDPRelayPorts[host][port] = struct{}{}
+}
+
+func (e *Engine) unmarkSOCKSUDPRelayPort(host string, port int) {
+	e.socksUDPMu.Lock()
+	defer e.socksUDPMu.Unlock()
+	ports := e.socksUDPRelayPorts[host]
+	if ports == nil {
+		return
+	}
+	delete(ports, port)
+	if len(ports) == 0 {
+		delete(e.socksUDPRelayPorts, host)
+	}
+}
+
+type trackedPacketConn struct {
+	net.PacketConn
+	closeOnce sync.Once
+	onClose   func()
+}
+
+func (p *trackedPacketConn) Close() error {
+	var err error
+	p.closeOnce.Do(func() {
+		err = p.PacketConn.Close()
+		if p.onClose != nil {
+			p.onClose()
+		}
+	})
+	return err
+}
+
+func (p *trackedPacketConn) Connect(addr net.Addr) error {
+	conn, ok := p.PacketConn.(interface{ Connect(net.Addr) error })
+	if !ok {
+		return errors.New("packet conn does not support connect")
+	}
+	return conn.Connect(addr)
+}
+
+func (p *trackedPacketConn) Read(b []byte) (int, error) {
+	conn, ok := p.PacketConn.(net.Conn)
+	if !ok {
+		return 0, errors.New("packet conn does not support stream read")
+	}
+	return conn.Read(b)
+}
+
+func (p *trackedPacketConn) Write(b []byte) (int, error) {
+	conn, ok := p.PacketConn.(net.Conn)
+	if !ok {
+		return 0, errors.New("packet conn does not support stream write")
+	}
+	return conn.Write(b)
+}
+
+type connectablePacketConn interface {
+	net.PacketConn
+	net.Conn
+	Connect(net.Addr) error
 }
 
 func socksUDPBindHost(c net.Conn) string {
@@ -255,14 +373,20 @@ type socksUDPSession struct {
 
 func (e *Engine) serveSOCKSUDPRelay(pc net.PacketConn, src netip.AddrPort, done <-chan struct{}) {
 	type clientState struct {
-		addr net.Addr
-		host netip.Addr
+		addr      net.Addr
+		endpoint  netip.AddrPort
+		connected bool
 	}
 	var (
-		client  clientState
-		hasPeer bool
-		mu      sync.Mutex
+		client     clientState
+		hasPeer    bool
+		mu         sync.Mutex
+		relayConn  connectablePacketConn
+		canConnect bool
 	)
+	if c, ok := pc.(connectablePacketConn); ok {
+		relayConn, canConnect = c, true
+	}
 	sessions := make(map[string]*socksUDPSession)
 	timeout := e.udpIdleTimeout()
 	expire := func(key string, sess *socksUDPSession) {
@@ -288,7 +412,17 @@ func (e *Engine) serveSOCKSUDPRelay(pc net.PacketConn, src netip.AddrPort, done 
 	}
 	buf := make([]byte, 64*1024)
 	for {
-		n, addr, err := pc.ReadFrom(buf)
+		var (
+			n    int
+			addr net.Addr
+			err  error
+		)
+		if hasPeer && client.connected {
+			n, err = relayConn.Read(buf)
+			addr = client.addr
+		} else {
+			n, addr, err = pc.ReadFrom(buf)
+		}
 		if err != nil {
 			return
 		}
@@ -302,10 +436,16 @@ func (e *Engine) serveSOCKSUDPRelay(pc net.PacketConn, src netip.AddrPort, done 
 			continue
 		}
 		if !hasPeer {
-			client = clientState{addr: addr, host: peer.Addr()}
+			if src.IsValid() && peer.Addr() != src.Addr() {
+				continue
+			}
+			client = clientState{addr: addr, endpoint: peer}
 			hasPeer = true
+			if canConnect && relayConn.Connect(addr) == nil {
+				client.connected = true
+			}
 		}
-		if peer.Addr() != client.host {
+		if !client.connected && peer != client.endpoint {
 			continue
 		}
 		dst, payload, ok := parseSOCKSUDPDatagram(buf[:n])
@@ -313,7 +453,7 @@ func (e *Engine) serveSOCKSUDPRelay(pc net.PacketConn, src netip.AddrPort, done 
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		c, target, key, err := e.socksUDPSession(ctx, sessions, &mu, src, dst, timeout, expire, touch, pc, client.addr)
+		c, target, key, err := e.socksUDPSession(ctx, sessions, &mu, src, dst, timeout, expire, touch, pc, client.addr, client.connected)
 		cancel()
 		if err != nil {
 			continue
@@ -327,7 +467,7 @@ func (e *Engine) serveSOCKSUDPRelay(pc net.PacketConn, src netip.AddrPort, done 
 	}
 }
 
-func (e *Engine) socksUDPSession(ctx context.Context, sessions map[string]*socksUDPSession, mu *sync.Mutex, src netip.AddrPort, dst socksAddr, timeout time.Duration, expire func(string, *socksUDPSession), touch func(*socksUDPSession), pc net.PacketConn, client net.Addr) (net.Conn, netip.AddrPort, string, error) {
+func (e *Engine) socksUDPSession(ctx context.Context, sessions map[string]*socksUDPSession, mu *sync.Mutex, src netip.AddrPort, dst socksAddr, timeout time.Duration, expire func(string, *socksUDPSession), touch func(*socksUDPSession), pc net.PacketConn, client net.Addr, clientConnected bool) (net.Conn, netip.AddrPort, string, error) {
 	candidates, err := e.resolveAddrPortCandidates(ctx, "udp", dst.string(), true)
 	if err != nil {
 		return nil, netip.AddrPort{}, "", err
@@ -357,13 +497,13 @@ func (e *Engine) socksUDPSession(ctx context.Context, sessions map[string]*socks
 		mu.Lock()
 		sessions[key] = sess
 		mu.Unlock()
-		go e.readSOCKSUDPReplies(pc, client, key, sess, sessions, mu)
+		go e.readSOCKSUDPReplies(pc, client, clientConnected, key, sess, sessions, mu)
 		return conn, target, key, nil
 	}
 	return nil, netip.AddrPort{}, "", errProxyFallbackDisabled
 }
 
-func (e *Engine) readSOCKSUDPReplies(pc net.PacketConn, client net.Addr, key string, sess *socksUDPSession, sessions map[string]*socksUDPSession, mu *sync.Mutex) {
+func (e *Engine) readSOCKSUDPReplies(pc net.PacketConn, client net.Addr, clientConnected bool, key string, sess *socksUDPSession, sessions map[string]*socksUDPSession, mu *sync.Mutex) {
 	defer sess.conn.Close()
 	defer func() {
 		if sess.timer != nil {
@@ -395,6 +535,12 @@ func (e *Engine) readSOCKSUDPReplies(pc net.PacketConn, client net.Addr, key str
 		packet, err := packSOCKSUDPDatagram(sess.target, buf[:n])
 		if err != nil {
 			continue
+		}
+		if clientConnected {
+			if relayConn, ok := pc.(connectablePacketConn); ok {
+				_, _ = relayConn.Write(packet)
+				continue
+			}
 		}
 		_, _ = pc.WriteTo(packet, client)
 	}

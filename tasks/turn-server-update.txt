@@ -1,0 +1,23 @@
+
+I want to add for the TURN client for uwgsocks that it can also support connecting to:
+- TURN UDP
+- TURN TCP
+- TURN over DTLS (ONLY add if the turn library supports it, do not make it yourself)
+- TURN over TLS
+
+the later 4 options are optionally enabled.
+
+Then I want to add the same support for the TURN server for Wireguard in turn directory.
+For TLS you need to specify a cert, allow me to specify a location for a cert + key. Periodically check if the cert is refreshed
+/renewed (modified).
+
+The other TURN protocols is mainly to bypass restrictive firewalls or hide traffic. 
+
+Then I want that the TURN server can support relaying traffic between two TURN clients.
+This works like so: if a TURN client tries sending a UDP packet to a XOR-RELAYED-ADDRESS IP+port of another TURN client, then instead of sending
+the UDP packet out, you just forward internally to the other TURN client. allowing TURN to TURN communication.
+This is called short circuit optimalization. 
+
+Then the second thing is that the TURN server can also be enabled to not allocate real ports, but only allow this
+shortcut optimization (so internally if both clients speak TURN). In that case the XOR-RELAYED-ADDRESS can be fake (like use RFC local address space),
+does not really matter. This is when internal routing only is enabled
