@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/transport"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,6 +36,13 @@ type Config struct {
 	ACL           ACL           `yaml:"acl"`
 	Forwards      []Forward     `yaml:"forwards"`
 	TURN          TURN          `yaml:"turn"`
+	// Transports defines the pluggable transport layer for WireGuard packets.
+	// Each entry names a transport (base protocol + optional proxy) that can
+	// be used in listen mode, client mode, or both.  Peers reference transports
+	// by name; the first entry is the default.
+	//
+	// If empty the legacy TURN config and UDP-listen logic apply unchanged.
+	Transports []transport.Config `yaml:"transports"`
 	// ReverseForwards listen inside the userspace WireGuard netstack and dial
 	// out to the host network. They are narrower than transparent inbound
 	// forwarding because only explicitly configured tunnel IP:port pairs are
@@ -97,6 +105,9 @@ type Peer struct {
 	AllowedIPs          []string      `yaml:"allowed_ips"`
 	PersistentKeepalive int           `yaml:"persistent_keepalive"`
 	TrafficShaper       TrafficShaper `yaml:"traffic_shaper"`
+	// Transport is the name of a transport from the top-level transports list.
+	// Empty means use the default transport (first entry, or legacy UDP).
+	Transport string `yaml:"transport,omitempty"`
 }
 
 type Proxy struct {
@@ -593,6 +604,37 @@ func (c *Config) Normalize() error {
 	if err := normalizeForwards("reverse_forward", c.ReverseForwards); err != nil {
 		return err
 	}
+	if err := c.normalizeTransports(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// normalizeTransports validates transport configs and checks per-peer
+// transport references.
+func (c *Config) normalizeTransports() error {
+	for i := range c.Transports {
+		cfg := &c.Transports[i]
+		if cfg.Name == "" {
+			return fmt.Errorf("transports[%d]: name is required", i)
+		}
+		if err := transport.ValidateBase(cfg.Base); err != nil {
+			return fmt.Errorf("transports[%d] %q: %w", i, cfg.Name, err)
+		}
+		if err := transport.ValidateProxyType(cfg.Proxy.Type); err != nil {
+			return fmt.Errorf("transports[%d] %q: %w", i, cfg.Name, err)
+		}
+	}
+	// Build a name set for peer validation.
+	names := make(map[string]bool, len(c.Transports))
+	for _, t := range c.Transports {
+		names[t.Name] = true
+	}
+	for i, p := range c.WireGuard.Peers {
+		if p.Transport != "" && !names[p.Transport] {
+			return fmt.Errorf("wireguard.peers[%d]: transport %q not found in transports", i, p.Transport)
+		}
+	}
 	return nil
 }
 
@@ -886,6 +928,8 @@ func setPeer(peer *Peer, key, value string) error {
 			return fmt.Errorf("invalid PersistentKeepalive %q", value)
 		}
 		peer.PersistentKeepalive = n
+	case "transport":
+		peer.Transport = value
 	default:
 		return fmt.Errorf("unsupported peer key %q", key)
 	}

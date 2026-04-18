@@ -4,23 +4,32 @@ since it has a vast feature space and does not mess with system routing, but sti
 to route traffic of any application. This is then the same as Tailscale where Wireguard is also userspace wiht data plane but it still exposes 
 a tunnel interface. (like we support different transport modes)
 
+Basically with this uwgsocks we can literally replace Tailscale data plane. 
+
 so its optional, and must be explicitly enabled, and users not supporting /dev/net/tun are still a primary target.
 Even if enabled, then socks5 and http and port forwards/reverse forwards still must work.
 
-What you should do: if a tunnel interface is used you should install netstack on it.
-I want to have control over the direct TCP/UDP/ICMP transport stream over it, just like how we convert TCP to transport streams
-to userspace so we can invoke connect(2) and write(2) calls (terminating TCP control flow).
-The same must be true for the userspace interface, and this is necessary to still support other features as then technically
-we still own the IP assigned in ugwsocks and the port assignments on them.
+For firewall/routing you should treat connections from/to the tun interface the same as SOCKS/HTTP connections, including fallback.
 
-This means that if a TCP connection is reached through the tun interface, you terminate it, convert to stream, start a new TCP
-connection on wireguard, forward. for UDP you just forward the packets. You keep the source IP (so you transperantly bind)
+How you should implement tun0? You should terminate all connections on tun0 using netstack TCP/UDP and then make the relevant calls
+using the uwgsocks API.
 
-The same is for reverse. When tun0 is enabled by default you disable the 'default fallback' to system userspace networking
-invvolving connect(2) calls and such. This can be re-enabled, especially if the tun0 device was created without the privilege/will
-to update kernel routing so it can carry 0.0.0.0/0 traffic. Since we handle the L4 streams seperately makes this really possible.
+TCP connection -> netstack of the tun -> inbound firewall -> stream -> netstack of wireguard -> peers/fallback/socks outbonud etc
+Same for UDP flows.
 
-You assign the IP (as in the kernel) the tunnel assigned IP on it. 
+uwgsocks can also specify a tun0 interface. In case it does, this can then also be used for inbound connections.
+So instead of host_forward then having a direct_ip, host_forward can also be that the connection should be sent out on tun0
+The same is true for transperant inbound. Then a TCP/UDP connection is made through the tun0 interface
 
-also important: unlike kernel wireguard relayed traffic between wireguard peers do not flow in/out of the tun0 device, they are just handled internally
+Idea is that you create a seperate netstack for tun0, where TCP/UDP/ICMP is terminated. 
 
+test the tun device using a go test. Also it must support IPv6.
+
+First the important thing is that uwgsocks supports tun so that we have similar what tailscale has, by having a tun config section in the yaml.
+When creating the tun, it should use kernel syscalls directly (this is configurable by config when to use/not use) if it should set add the tunnel addresses to the new interface,
+and if the allowedIPs should be added as routes (next hop not needed for tun devices). For allowedIPs you should be aware of overlapping cidrs, and only add whats non-overlapping and covers all allowedIPs. so if one allowedIPs is 172.18.0.0/16 and the other is 172.16.0.0/12 you only add 172.16.0.0/12.
+The user may also not use allowedIPs and specify a list of cidrs for the tun to route instead
+Also this is using kernel APIs directly from go and behind a flag if the created tun device should do that.
+Also alternatively a script for turning up/turning down the tun device can be provided, like the user can provide a script where it can say to add routes/delete routes. Scripts are run after the interface is created
+
+You can test the tun device by creating it locally, do not route all your internet over it but if you just do some local ips then its fine.

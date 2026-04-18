@@ -904,6 +904,9 @@ func retryableWrappedFailure(out []byte, err error) bool {
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 141 {
 		return true
 	}
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 127 && len(bytes.TrimSpace(out)) == 0 {
+		return true
+	}
 	return false
 }
 

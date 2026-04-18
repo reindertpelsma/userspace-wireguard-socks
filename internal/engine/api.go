@@ -20,6 +20,7 @@ import (
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/transport"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -75,6 +76,8 @@ func (e *Engine) startAPIServer() error {
 	mux.HandleFunc("/v1/socket", e.handleAPISocket)
 	mux.HandleFunc("/v1/status", e.handleAPIStatus)
 	mux.HandleFunc("/v1/ping", e.handleAPIPing)
+	mux.HandleFunc("/v1/transports", e.handleAPITransports)
+	mux.HandleFunc("/v1/transports/", e.handleAPITransport)
 
 	if isUnixEndpoint(e.cfg.API.Listen) {
 		_ = os.Remove(unixEndpointPath(e.cfg.API.Listen))
@@ -939,4 +942,151 @@ func writeAPIJSON(w http.ResponseWriter, status int, value any) {
 
 func writeAPIError(w http.ResponseWriter, status int, message string) {
 	writeAPIJSON(w, status, map[string]string{"error": message})
+}
+
+// --- /v1/transports --------------------------------------------------------
+
+type apiTransport struct {
+	Name            string            `json:"name"`
+	Base            string            `json:"base"`
+	Listen          bool              `json:"listen"`
+	ListenPort      *int              `json:"listen_port,omitempty"`
+	ListenAddresses []string          `json:"listen_addresses,omitempty"`
+	TLS             transport.TLSConfig   `json:"tls,omitempty"`
+	Proxy           transport.ProxyConfig `json:"proxy,omitempty"`
+	IPv6Translate   bool              `json:"ipv6_translate,omitempty"`
+	IPv6Prefix      string            `json:"ipv6_prefix,omitempty"`
+	ActiveSessions  int               `json:"active_sessions"`
+}
+
+// handleAPITransports handles GET /v1/transports and POST /v1/transports.
+func (e *Engine) handleAPITransports(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		e.cfgMu.RLock()
+		cfgs := append([]transport.Config(nil), e.cfg.Transports...)
+		e.cfgMu.RUnlock()
+
+		out := make([]apiTransport, 0, len(cfgs))
+		for _, tc := range cfgs {
+			at := apiTransport{
+				Name:            tc.Name,
+				Base:            tc.Base,
+				Listen:          tc.Listen,
+				ListenPort:      tc.ListenPort,
+				ListenAddresses: tc.ListenAddresses,
+				TLS:             tc.TLS,
+				Proxy:           tc.Proxy,
+				IPv6Translate:   tc.IPv6Translate,
+				IPv6Prefix:      tc.IPv6Prefix,
+			}
+			if e.transportBind != nil {
+				at.ActiveSessions = e.transportBind.ActiveSessions()
+			}
+			out = append(out, at)
+		}
+		writeAPIJSON(w, http.StatusOK, out)
+
+	case http.MethodPost:
+		var tc transport.Config
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := json.Unmarshal(body, &tc); err != nil {
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if tc.Name == "" {
+			writeAPIError(w, http.StatusBadRequest, "name is required")
+			return
+		}
+		if err := transport.ValidateBase(tc.Base); err != nil {
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := e.AddTransportConfig(tc); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		e.cfgMu.Lock()
+		e.cfg.Transports = append(e.cfg.Transports, tc)
+		e.cfgMu.Unlock()
+		writeAPIJSON(w, http.StatusCreated, map[string]string{"name": tc.Name})
+
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleAPITransport handles DELETE /v1/transports/{name}.
+func (e *Engine) handleAPITransport(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/v1/transports/")
+	if name == "" {
+		writeAPIError(w, http.StatusBadRequest, "transport name required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		e.cfgMu.RLock()
+		var found *transport.Config
+		for _, tc := range e.cfg.Transports {
+			tc := tc
+			if tc.Name == name {
+				found = &tc
+				break
+			}
+		}
+		e.cfgMu.RUnlock()
+		if found == nil {
+			writeAPIError(w, http.StatusNotFound, "transport not found")
+			return
+		}
+		at := apiTransport{
+			Name:            found.Name,
+			Base:            found.Base,
+			Listen:          found.Listen,
+			ListenPort:      found.ListenPort,
+			ListenAddresses: found.ListenAddresses,
+			TLS:             found.TLS,
+			Proxy:           found.Proxy,
+			IPv6Translate:   found.IPv6Translate,
+			IPv6Prefix:      found.IPv6Prefix,
+		}
+		if e.transportBind != nil {
+			at.ActiveSessions = e.transportBind.ActiveSessions()
+		}
+		writeAPIJSON(w, http.StatusOK, at)
+
+	case http.MethodDelete:
+		if e.transportBind == nil {
+			writeAPIError(w, http.StatusConflict, "pluggable transports not active")
+			return
+		}
+		e.cfgMu.Lock()
+		newCfgs := e.cfg.Transports[:0]
+		found := false
+		for _, tc := range e.cfg.Transports {
+			if tc.Name == name {
+				found = true
+				continue
+			}
+			newCfgs = append(newCfgs, tc)
+		}
+		if found {
+			e.cfg.Transports = newCfgs
+		}
+		e.cfgMu.Unlock()
+		if !found {
+			writeAPIError(w, http.StatusNotFound, "transport not found")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		w.Header().Set("Allow", "GET, DELETE")
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
 }

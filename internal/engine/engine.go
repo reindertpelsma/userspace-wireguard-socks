@@ -27,6 +27,7 @@ import (
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/netstackex"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/transport"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/wgbind"
 	"golang.org/x/net/proxy"
 	"golang.zx2c4.com/wireguard/conn"
@@ -93,7 +94,8 @@ type Engine struct {
 	localAddrs     []netip.Addr
 	localPrefixes  []netip.Prefix
 	dnsSem         chan struct{}
-	turnBind       *wgbind.TURNBind
+	turnBind        *wgbind.TURNBind
+	transportBind   *transport.MultiTransportBind
 }
 
 type trackedConn struct {
@@ -223,11 +225,35 @@ func (e *Engine) Start() error {
 		e.net.SetICMPForwarder(e.handleICMPForward)
 	}
 
-	// With no ListenPort we avoid binding a UDP port at all. OutboundOnlyBind
-	// opens one connected UDP socket per peer endpoint only when WireGuard has
-	// traffic to send.
+	// Build the WireGuard bind layer.  When transports are configured in the
+	// config use the pluggable transport system; otherwise fall back to the
+	// legacy UDP / TURN bind implementations for backward compatibility.
 	var bind conn.Bind
-	if e.cfg.TURN.Server != "" {
+	if len(e.cfg.Transports) > 0 {
+		wgPubKey, err := e.wgPublicKey()
+		if err != nil {
+			return fmt.Errorf("transport: resolve wg public key: %w", err)
+		}
+		listenPort := 0
+		if e.cfg.WireGuard.ListenPort != nil {
+			listenPort = *e.cfg.WireGuard.ListenPort
+		}
+		tb, err := transport.BuildRegistry(
+			e.cfg.Transports,
+			wgPubKey,
+			listenPort,
+			e.transportPeerLookup,
+			e.onTransportEndpointReset,
+			false,
+		)
+		if err != nil {
+			return fmt.Errorf("transport registry: %w", err)
+		}
+		e.transportBind = tb
+		// Configure per-peer static transport endpoints.
+		e.initPeerTransportEndpoints()
+		bind = tb
+	} else if e.cfg.TURN.Server != "" {
 		turnBind, err := newTURNBind(e.cfg)
 		if err != nil {
 			return err
