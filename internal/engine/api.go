@@ -484,12 +484,15 @@ func (e *Engine) Peer(publicKey string) (config.Peer, error) {
 // AddPeer updates both the live wireguard-go device and the engine's AllowedIPs
 // cache. Adding a peer with an existing public key replaces that peer.
 func (e *Engine) AddPeer(peer config.Peer) error {
-	if _, err := peerUAPI(peer, false); err != nil {
-		return err
-	}
 	e.cfgMu.RLock()
+	transports := e.cfg.Transports
+	defTName := transport.ResolveDefaultTransportName(transports, e.cfg.WireGuard.DefaultTransport)
 	globalTraffic := e.cfg.TrafficShaper
 	e.cfgMu.RUnlock()
+
+	if _, err := peerUAPI(peer, false, transports, defTName); err != nil {
+		return err
+	}
 	if _, _, _, err := buildPeerTrafficState([]config.Peer{peer}, globalTraffic); err != nil {
 		return err
 	}
@@ -508,7 +511,7 @@ func (e *Engine) AddPeer(peer config.Peer) error {
 		next = append(next, peer)
 	}
 	if e.dev != nil {
-		uapi, err := peerUAPI(peer, false)
+		uapi, err := peerUAPI(peer, false, e.cfg.Transports, transport.ResolveDefaultTransportName(e.cfg.Transports, e.cfg.WireGuard.DefaultTransport))
 		if err != nil {
 			e.cfgMu.Unlock()
 			return err
@@ -765,7 +768,10 @@ func removeForwardConfig(in []config.Forward, f config.Forward) []config.Forward
 
 // peerUAPI renders the minimal WireGuard userspace API stanza for one peer.
 // The caller is responsible for deciding whether this is an add/update/remove.
-func peerUAPI(peer config.Peer, remove bool) (string, error) {
+// transports and defaultTransportName are used to prepend the transport prefix
+// to the endpoint so that ParseEndpoint creates the correct endpoint type.
+// When transports is empty the endpoint is written as-is (legacy UDP path).
+func peerUAPI(peer config.Peer, remove bool, transports []transport.Config, defaultTransportName string) (string, error) {
 	pub, err := wgtypes.ParseKey(peer.PublicKey)
 	if err != nil {
 		return "", fmt.Errorf("public_key: %w", err)
@@ -784,7 +790,17 @@ func peerUAPI(peer config.Peer, remove bool) (string, error) {
 		fmt.Fprintf(&b, "preshared_key=%s\n", hex.EncodeToString(psk[:]))
 	}
 	if peer.Endpoint != "" {
-		fmt.Fprintf(&b, "endpoint=%s\n", peer.Endpoint)
+		ep := peer.Endpoint
+		if len(transports) > 0 {
+			tName := peer.Transport
+			if tName == "" {
+				tName = defaultTransportName
+			}
+			if tName != "" {
+				ep = tName + "@" + peer.Endpoint
+			}
+		}
+		fmt.Fprintf(&b, "endpoint=%s\n", ep)
 	}
 	if peer.PersistentKeepalive > 0 {
 		fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", peer.PersistentKeepalive)

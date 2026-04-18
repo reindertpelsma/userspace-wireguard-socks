@@ -65,6 +65,11 @@ func (e *Engine) onTransportEndpointReset(identBytes []byte, fallbackAddr string
 	if e.dev == nil || fallbackAddr == "" {
 		return
 	}
+	select {
+	case <-e.closed:
+		return
+	default:
+	}
 	target := identTargetAddr(identBytes)
 	if target == "" {
 		target = fallbackAddr
@@ -79,7 +84,7 @@ func (e *Engine) onTransportEndpointReset(identBytes []byte, fallbackAddr string
 			continue
 		}
 		if p.Endpoint == target || endpointMatchesTarget(p.Endpoint, target) {
-			uapi, err := peerUAPI(p, false)
+			uapi, err := peerUAPI(p, false, e.cfg.Transports, transport.ResolveDefaultTransportName(e.cfg.Transports, e.cfg.WireGuard.DefaultTransport))
 			if err != nil {
 				return
 			}

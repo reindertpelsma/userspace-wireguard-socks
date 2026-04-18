@@ -54,7 +54,7 @@ func (t *UDPTransport) Dial(ctx context.Context, target string) (Session, error)
 func (t *UDPTransport) Listen(_ context.Context, port int) (Listener, error) {
 	addrs := t.listenAddrs
 	if len(addrs) == 0 {
-		addrs = []string{"0.0.0.0", "::"}
+		addrs = []string{"0.0.0.0"}
 	}
 	var conns []*net.UDPConn
 	chosen := port

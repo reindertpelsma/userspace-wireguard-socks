@@ -71,8 +71,17 @@ type MultiTransportBind struct {
 	// transports maps transport name → Transport.
 	transports map[string]Transport
 
-	// listenTransports is the ordered list of transports in listen mode.
+	// listenTransports is the ordered list of config-only (no live listener)
+	// entries.  listener is always nil here; it exists only as configuration.
 	listenTransports []listenEntry
+
+	// activeListeners holds the live listenEntry values (with listeners) while
+	// the bind is open.  It is created in Open() and nilled in closeLocked().
+	activeListeners []listenEntry
+
+	// defaultTransport is the name used by ParseEndpoint for plain host:port
+	// strings.  Set via SetDefaultTransport.
+	defaultTransport string
 
 	// sessions maps peer ident (hex of IdentBytes) → sessionState.
 	sessions map[string]*sessionState
@@ -169,6 +178,9 @@ func (b *MultiTransportBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, erro
 	ctx, cancel := context.WithCancel(context.Background())
 	b.cancelListeners = cancel
 
+	// Reset active listeners — b.listenTransports holds only config (no live listener).
+	b.activeListeners = nil
+
 	chosenPort := uint16(0)
 	for _, t := range b.listenTransports {
 		listenPort := int(port)
@@ -182,7 +194,7 @@ func (b *MultiTransportBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, erro
 			return nil, 0, err
 		}
 		entry := listenEntry{transport: t.transport, listener: ln, portOverride: t.portOverride}
-		b.listenTransports = append(b.listenTransports, entry)
+		b.activeListeners = append(b.activeListeners, entry)
 		if chosenPort == 0 {
 			if addr := ln.Addr(); addr != nil {
 				if ta, ok := addr.(*net.TCPAddr); ok {
@@ -611,11 +623,12 @@ func (b *MultiTransportBind) Close() error {
 }
 
 func (b *MultiTransportBind) closeLocked() {
-	for _, e := range b.listenTransports {
+	for _, e := range b.activeListeners {
 		if e.listener != nil {
 			e.listener.Close()
 		}
 	}
+	b.activeListeners = nil
 	for _, s := range b.sessions {
 		s.mu.Lock()
 		if s.activeSession != nil {
@@ -656,24 +669,36 @@ func (b *MultiTransportBind) ParseEndpoint(s string) (conn.Endpoint, error) {
 			return NewNotConnOrientedEndpoint(tName, ap), nil
 		}
 	}
-	// Plain host:port → use the first not-connection-oriented transport.
+	// Plain host:port → use the default not-connection-oriented transport.
 	ap, err := resolveAddrPort(s)
 	if err != nil {
 		return nil, err
 	}
 	b.mu.RLock()
-	var firstNCO string
-	for name, t := range b.transports {
-		if !t.IsConnectionOriented() {
-			firstNCO = name
-			break
+	fallbackName := b.defaultTransport
+	if fallbackName == "" {
+		// Backward compat: pick first NCO transport from map.
+		for name, t := range b.transports {
+			if !t.IsConnectionOriented() {
+				fallbackName = name
+				break
+			}
 		}
 	}
 	b.mu.RUnlock()
-	if firstNCO == "" {
-		firstNCO = "udp"
+	if fallbackName == "" {
+		fallbackName = "udp"
 	}
-	return NewNotConnOrientedEndpoint(firstNCO, ap), nil
+	return NewNotConnOrientedEndpoint(fallbackName, ap), nil
+}
+
+// SetDefaultTransport sets the transport name used by ParseEndpoint when the
+// endpoint string is a plain host:port (no transport prefix).  Call this after
+// BuildRegistry to guarantee deterministic fallback instead of map iteration.
+func (b *MultiTransportBind) SetDefaultTransport(name string) {
+	b.mu.Lock()
+	b.defaultTransport = name
+	b.mu.Unlock()
 }
 
 // GetTransport returns the named transport or nil.
@@ -689,7 +714,7 @@ func (b *MultiTransportBind) GetTransport(name string) Transport {
 func (b *MultiTransportBind) ListenPort() uint16 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	for _, e := range b.listenTransports {
+	for _, e := range b.activeListeners {
 		if e.listener == nil {
 			continue
 		}
