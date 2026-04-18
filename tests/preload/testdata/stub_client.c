@@ -181,6 +181,42 @@ static int echo_connected_pselect(int fd, const char *message) {
     return strcmp(buf, message) == 0 ? 0 : 1;
 }
 
+static int echo_connected_select(int fd, const char *message) {
+    fd_set writefds;
+    FD_ZERO(&writefds);
+    FD_SET(fd, &writefds);
+    struct timeval timeout;
+    timeout.tv_sec = 1;
+    timeout.tv_usec = 0;
+    if (select(fd + 1, NULL, &writefds, NULL, &timeout) <= 0 || !FD_ISSET(fd, &writefds)) {
+        perror("select writable");
+        return 1;
+    }
+    size_t want = strlen(message);
+    if (send(fd, message, want, 0) != (ssize_t)want) {
+        perror("send");
+        return 1;
+    }
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(fd, &readfds);
+    timeout.tv_sec = 3;
+    timeout.tv_usec = 0;
+    if (select(fd + 1, &readfds, NULL, NULL, &timeout) <= 0 || !FD_ISSET(fd, &readfds)) {
+        perror("select readable");
+        return 1;
+    }
+    char buf[4096];
+    ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
+    if (n < 0) {
+        perror("recv");
+        return 1;
+    }
+    buf[n] = 0;
+    printf("%s", buf);
+    return strcmp(buf, message) == 0 ? 0 : 1;
+}
+
 static int echo_unconnected_udp(int fd, const struct sockaddr_in *addr, const char *message) {
     size_t want = strlen(message);
     if (sendto(fd, message, want, 0, (const struct sockaddr *)addr, sizeof(*addr)) != (ssize_t)want) {
@@ -741,6 +777,7 @@ int main(int argc, char **argv) {
     int use_mmsg = 0;
     int use_readv_writev = 0;
     int use_syscall_surface = 0;
+    int use_select = 0;
     int use_pselect = 0;
     for (int i = 4; i < argc; i++) {
         if (strcmp(argv[i], "udp") == 0) {
@@ -786,6 +823,8 @@ int main(int argc, char **argv) {
             use_mmsg = 1;
         } else if (strcmp(argv[i], "iov") == 0) {
             use_readv_writev = 1;
+        } else if (strcmp(argv[i], "select") == 0) {
+            use_select = 1;
         } else if (strcmp(argv[i], "pselect") == 0) {
             use_pselect = 1;
         } else if (strcmp(argv[i], "syscall-surface") == 0) {
@@ -943,6 +982,8 @@ int main(int argc, char **argv) {
     int rc;
     if (udp_no_poll) {
         rc = echo_connected_udp_nopoll(fd, argv[3]);
+    } else if (use_select) {
+        rc = echo_connected_select(fd, argv[3]);
     } else if (use_pselect) {
         rc = echo_connected_pselect(fd, argv[3]);
     } else {

@@ -13,6 +13,10 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#ifndef NETDB_SUCCESS
+#define NETDB_SUCCESS 0
+#endif
+
 extern int dns_tcp_connect(void);
 
 #if defined(__ANDROID__)

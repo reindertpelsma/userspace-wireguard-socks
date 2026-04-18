@@ -2100,7 +2100,10 @@ func (e *Engine) allowEgressPacket(packet []byte) bool {
 		return false
 	}
 	if *e.cfg.Relay.Enabled {
-		return e.allowRelayPacket(packet)
+		meta, ok := parseRelayPacket(packet)
+		if ok && e.isRelayTransitPacket(meta) {
+			return e.allowRelayPacketMeta(packet, meta)
+		}
 	}
 	return true
 }
@@ -2199,7 +2202,23 @@ func ipv4InvalidTunnelAddr(ip netip.Addr) bool {
 
 func (e *Engine) allowRelayPacket(packet []byte) bool {
 	meta, ok := parseRelayPacket(packet)
-	if !ok || e.localAddrContains(meta.src.Addr()) {
+	if !ok {
+		return true
+	}
+	return e.allowRelayPacketMeta(packet, meta)
+}
+
+func (e *Engine) isRelayTransitPacket(meta relayPacketMeta) bool {
+	src := meta.src.Addr().Unmap()
+	dst := meta.dst.Addr().Unmap()
+	if e.localAddrContains(src) || e.localAddrContains(dst) {
+		return false
+	}
+	return e.allowedContains(src) && e.allowedContains(dst)
+}
+
+func (e *Engine) allowRelayPacketMeta(packet []byte, meta relayPacketMeta) bool {
+	if e.localAddrContains(meta.src.Addr()) {
 		return true
 	}
 	allowed := false

@@ -329,6 +329,23 @@ func TestUWGWrapperPselectAcrossTransports(t *testing.T) {
 	}
 }
 
+func TestUWGWrapperSelectAcrossTransports(t *testing.T) {
+	requireWrapperToolchain(t)
+	art := buildWrapperArtifacts(t)
+	_, httpSock := setupWrapperNetwork(t)
+
+	for _, transport := range []string{"preload", "preload-and-ptrace", "ptrace", "ptrace-seccomp", "ptrace-only"} {
+		t.Run(transport, func(t *testing.T) {
+			out := runWrappedTargetWithOptions(t, art, httpSock, transport, art.stub,
+				[]string{"100.64.94.1", "18080", "tcp-select", "tcp", "select"},
+				wrapperRunOptions{timeout: 60 * time.Second})
+			if normalizedOutput(out) != "tcp-select" {
+				t.Fatalf("unexpected select output %q", out)
+			}
+		})
+	}
+}
+
 func TestUWGWrapperPtraceSeccompSocketSyscallSurfaceStats(t *testing.T) {
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)

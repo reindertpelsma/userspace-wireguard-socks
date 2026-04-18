@@ -598,37 +598,7 @@ func (t *tracer) hasPassthroughSecret(nr int64, regs unix.PtraceRegs) bool {
 	if t.secret == 0 || regs.Regs[5] != t.secret {
 		return false
 	}
-	switch nr {
-	case unix.SYS_SENDTO, unix.SYS_RECVFROM:
-		return false
-	case unix.SYS_SOCKET,
-		unix.SYS_CONNECT,
-		unix.SYS_BIND,
-		unix.SYS_LISTEN,
-		unix.SYS_ACCEPT,
-		unix.SYS_ACCEPT4,
-		unix.SYS_CLOSE,
-		unix.SYS_READ,
-		unix.SYS_WRITE,
-		unix.SYS_READV,
-		unix.SYS_WRITEV,
-		unix.SYS_SENDMSG,
-		unix.SYS_RECVMSG,
-		unix.SYS_SENDMMSG,
-		unix.SYS_RECVMMSG,
-		unix.SYS_DUP,
-		unix.SYS_DUP3,
-		unix.SYS_GETSOCKNAME,
-		unix.SYS_GETPEERNAME,
-		unix.SYS_SHUTDOWN,
-		unix.SYS_FCNTL,
-		unix.SYS_GETSOCKOPT,
-		unix.SYS_SETSOCKOPT,
-		unix.SYS_PPOLL:
-		return true
-	default:
-		return false
-	}
+	return syscallUsesPassthroughSecret(nr)
 }
 
 func (t *tracer) handleSocket(tid int, regs unix.PtraceRegs, seccompStop bool) error {

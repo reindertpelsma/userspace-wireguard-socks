@@ -24,7 +24,7 @@ curl -x http://127.0.0.1:8080 https://example.com
 ```
 
 For a complete local two-peer demo, start `examples/exit-server.yaml` and
-`examples/exit-client.yaml` as described in [Full-Technical-How-To.md](Full-Technical-How-To.md).
+`examples/exit-client.yaml` as described in [docs/howto/build-and-quickstart.md](docs/howto/build-and-quickstart.md).
 
 ## Binaries
 
@@ -117,7 +117,7 @@ traffic shaping, and runtime API updates. See [docs/testing.md](docs/testing.md)
 
 ## More Documentation
 
-- [Full technical how-to](Full-Technical-How-To.md)
+- [Technical how-to](docs/howto/README.md)
 - [Configuration reference](docs/configuration.md)
 - [Raw socket API](docs/socket-protocol.md)
 - [Proxy routing](docs/proxy-routing.md)

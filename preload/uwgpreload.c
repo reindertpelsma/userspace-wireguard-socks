@@ -22,6 +22,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -37,10 +38,25 @@
 #define UWG_HAS_FOPENCOOKIE 0
 #define UWG_SENDMMSG_CONST const
 #define UWG_RECVMMSG_TIMEOUT_CONST const
+#define UWG_MMSG_FLAGS_T int
+#elif defined(__GLIBC__)
+#define UWG_HAS_FOPENCOOKIE 1
+#define UWG_SENDMMSG_CONST
+#define UWG_RECVMMSG_TIMEOUT_CONST
+#define UWG_MMSG_FLAGS_T int
 #else
 #define UWG_HAS_FOPENCOOKIE 1
 #define UWG_SENDMMSG_CONST
 #define UWG_RECVMMSG_TIMEOUT_CONST
+#define UWG_MMSG_FLAGS_T unsigned int
+#endif
+
+#if UWG_HAS_FOPENCOOKIE
+#if defined(__GLIBC__)
+typedef off64_t uwg_cookie_off_t;
+#else
+typedef off_t uwg_cookie_off_t;
+#endif
 #endif
 
 /* DNS routing mode helpers */
@@ -97,8 +113,9 @@ static ssize_t (*real_writev_fn)(int, const struct iovec *, int);
 static ssize_t (*real_sendmsg_fn)(int, const struct msghdr *, int) = NULL;
 static ssize_t (*real_recvmsg_fn)(int, struct msghdr *, int) = NULL;
 static int (*real_sendmmsg_fn)(int, UWG_SENDMMSG_CONST struct mmsghdr *,
-                               unsigned int, int);
-static int (*real_recvmmsg_fn)(int, struct mmsghdr *, unsigned int, int,
+                               unsigned int, UWG_MMSG_FLAGS_T);
+static int (*real_recvmmsg_fn)(int, struct mmsghdr *, unsigned int,
+                               UWG_MMSG_FLAGS_T,
                                UWG_RECVMMSG_TIMEOUT_CONST struct timespec *);
 static int (*real_dup_fn)(int);
 static int (*real_dup2_fn)(int, int);
@@ -112,6 +129,10 @@ static int (*real_setsockopt_fn)(int, int, int, const void *, socklen_t);
 static int (*real_poll_fn)(struct pollfd *, nfds_t, int);
 static int (*real_ppoll_fn)(struct pollfd *, nfds_t, const struct timespec *,
                             const sigset_t *);
+static int (*real_select_fn)(int, fd_set *, fd_set *, fd_set *,
+                             struct timeval *);
+static int (*real_pselect_fn)(int, fd_set *, fd_set *, fd_set *,
+                              const struct timespec *, const sigset_t *);
 static FILE *(*real_fdopen_fn)(int, const char *);
 
 static int fill_sockaddr_from_text(int family, const char *ip, uint16_t port,
@@ -146,6 +167,12 @@ static long passthrough_syscall(long nr, long a1, long a2, long a3, long a4,
 static long cold_syscall(long nr, long a1, long a2, long a3, long a4, long a5,
                          long a6);
 static int use_passthrough_secret(void);
+static int real_select_call(int nfds, fd_set *readfds, fd_set *writefds,
+                            fd_set *exceptfds, struct timeval *timeout);
+static int real_pselect_call(int nfds, fd_set *readfds, fd_set *writefds,
+                             fd_set *exceptfds,
+                             const struct timespec *timeout,
+                             const sigset_t *sigmask);
 static int fd_ok(int fd);
 static int should_cold_path(const struct tracked_fd *state);
 static uint32_t tracked_hash(int32_t pid, int fd);
@@ -196,6 +223,8 @@ static void init_real(void) {
   real_setsockopt_fn = dlsym(RTLD_NEXT, "setsockopt");
   real_poll_fn = dlsym(RTLD_NEXT, "poll");
   real_ppoll_fn = dlsym(RTLD_NEXT, "ppoll");
+  real_select_fn = dlsym(RTLD_NEXT, "select");
+  real_pselect_fn = dlsym(RTLD_NEXT, "pselect");
   real_fdopen_fn = dlsym(RTLD_NEXT, "fdopen");
 }
 
@@ -289,7 +318,7 @@ static ssize_t real_recvmsg_call(int sockfd, struct msghdr *msg, int flags) {
 }
 
 static int real_sendmmsg_call(int sockfd, UWG_SENDMMSG_CONST struct mmsghdr *msgvec,
-                              unsigned int vlen, int flags) {
+                              unsigned int vlen, UWG_MMSG_FLAGS_T flags) {
   if (use_passthrough_secret())
     return (int)passthrough_syscall(SYS_sendmmsg, sockfd, (long)msgvec, vlen,
                                     flags, 0);
@@ -297,7 +326,7 @@ static int real_sendmmsg_call(int sockfd, UWG_SENDMMSG_CONST struct mmsghdr *msg
 }
 
 static int real_recvmmsg_call(int sockfd, struct mmsghdr *msgvec,
-                              unsigned int vlen, int flags,
+                              unsigned int vlen, UWG_MMSG_FLAGS_T flags,
                               UWG_RECVMMSG_TIMEOUT_CONST struct timespec *timeout) {
   if (use_passthrough_secret())
     return (int)syscall(SYS_recvmmsg, sockfd, msgvec, vlen, flags, timeout,
@@ -633,6 +662,180 @@ static int real_ppoll_call(struct pollfd *fds, nfds_t nfds,
     return real_ppoll_fn(fds, nfds, timeout, sigmask);
   return (int)syscall(SYS_ppoll, fds, nfds, timeout, sigmask,
                       UWG_KERNEL_SIGSET_SIZE);
+}
+
+static void update_select_timeout_remaining(struct timeval *timeout,
+                                            const struct timeval *original,
+                                            const struct timespec *start,
+                                            const struct timespec *end) {
+  if (!timeout || !original || !start || !end)
+    return;
+  int64_t original_us =
+      (int64_t)original->tv_sec * 1000000LL + (int64_t)original->tv_usec;
+  int64_t elapsed_ns =
+      (int64_t)(end->tv_sec - start->tv_sec) * 1000000000LL +
+      (int64_t)(end->tv_nsec - start->tv_nsec);
+  int64_t elapsed_us = elapsed_ns <= 0 ? 0 : elapsed_ns / 1000LL;
+  int64_t remaining_us = original_us - elapsed_us;
+  if (remaining_us < 0)
+    remaining_us = 0;
+  timeout->tv_sec = (time_t)(remaining_us / 1000000LL);
+  timeout->tv_usec = (suseconds_t)(remaining_us % 1000000LL);
+}
+
+static int select_via_ppoll_common(int nfds, fd_set *readfds, fd_set *writefds,
+                                   fd_set *exceptfds,
+                                   const struct timespec *timeout,
+                                   const sigset_t *sigmask) {
+  // select/pselect carry too many syscall arguments to stash the hot-path
+  // bypass secret directly, so the fast path translates them into ppoll where
+  // the seccomp/preload secret still fits.
+  struct select_pollfd {
+    struct pollfd pfd;
+    unsigned char want_read;
+    unsigned char want_write;
+    unsigned char want_except;
+  };
+  struct select_pollfd *entries = NULL;
+  int count = 0;
+  int ready = 0;
+
+  if (nfds < 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  for (int fd = 0; fd < nfds; fd++) {
+    if ((readfds && FD_ISSET(fd, readfds)) ||
+        (writefds && FD_ISSET(fd, writefds)) ||
+        (exceptfds && FD_ISSET(fd, exceptfds))) {
+      count++;
+    }
+  }
+
+  if (count > 0) {
+    entries = calloc((size_t)count, sizeof(*entries));
+    if (!entries) {
+      errno = ENOMEM;
+      return -1;
+    }
+    count = 0;
+    for (int fd = 0; fd < nfds; fd++) {
+      short events = 0;
+      if (readfds && FD_ISSET(fd, readfds))
+        events |= POLLIN;
+      if (writefds && FD_ISSET(fd, writefds))
+        events |= POLLOUT;
+      if (exceptfds && FD_ISSET(fd, exceptfds))
+        events |= POLLPRI;
+      if (!events)
+        continue;
+      entries[count].pfd.fd = fd;
+      entries[count].pfd.events = events;
+      entries[count].want_read = (events & POLLIN) != 0;
+      entries[count].want_write = (events & POLLOUT) != 0;
+      entries[count].want_except = (events & POLLPRI) != 0;
+      count++;
+    }
+  }
+
+  ready = real_ppoll_call(entries ? &entries[0].pfd : NULL, (nfds_t)count,
+                          timeout, sigmask);
+  if (ready < 0) {
+    free(entries);
+    return -1;
+  }
+
+  if (readfds)
+    FD_ZERO(readfds);
+  if (writefds)
+    FD_ZERO(writefds);
+  if (exceptfds)
+    FD_ZERO(exceptfds);
+
+  if (ready == 0) {
+    free(entries);
+    return 0;
+  }
+
+  ready = 0;
+  for (int i = 0; i < count; i++) {
+    short revents = entries[i].pfd.revents;
+    int fd = entries[i].pfd.fd;
+    if (entries[i].want_read &&
+        (revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL))) {
+      if (readfds)
+        FD_SET(fd, readfds);
+      ready++;
+    }
+    if (entries[i].want_write &&
+        (revents & (POLLOUT | POLLERR | POLLHUP | POLLNVAL))) {
+      if (writefds)
+        FD_SET(fd, writefds);
+      ready++;
+    }
+    if (entries[i].want_except && (revents & POLLPRI)) {
+      if (exceptfds)
+        FD_SET(fd, exceptfds);
+      ready++;
+    }
+  }
+
+  free(entries);
+  return ready;
+}
+
+static int real_select_call(int nfds, fd_set *readfds, fd_set *writefds,
+                            fd_set *exceptfds, struct timeval *timeout) {
+  if (use_passthrough_secret()) {
+    struct timeval original = {0, 0};
+    struct timespec start = {0, 0};
+    struct timespec end = {0, 0};
+    struct timespec ts;
+    struct timespec *tsp = NULL;
+    int rc;
+
+    if (timeout) {
+      original = *timeout;
+      ts.tv_sec = timeout->tv_sec;
+      ts.tv_nsec = (long)timeout->tv_usec * 1000L;
+      tsp = &ts;
+      (void)clock_gettime(CLOCK_MONOTONIC, &start);
+    }
+    rc = select_via_ppoll_common(nfds, readfds, writefds, exceptfds, tsp, NULL);
+    if (timeout && (rc >= 0 || errno == EINTR)) {
+      (void)clock_gettime(CLOCK_MONOTONIC, &end);
+      update_select_timeout_remaining(timeout, &original, &start, &end);
+    }
+    return rc;
+  }
+  if (real_select_fn)
+    return real_select_fn(nfds, readfds, writefds, exceptfds, timeout);
+#ifdef SYS_select
+  return (int)syscall(SYS_select, nfds, readfds, writefds, exceptfds, timeout);
+#else
+  if (timeout) {
+    struct timespec ts = {.tv_sec = timeout->tv_sec,
+                          .tv_nsec = (long)timeout->tv_usec * 1000L};
+    return select_via_ppoll_common(nfds, readfds, writefds, exceptfds, &ts,
+                                   NULL);
+  }
+  return select_via_ppoll_common(nfds, readfds, writefds, exceptfds, NULL,
+                                 NULL);
+#endif
+}
+
+static int real_pselect_call(int nfds, fd_set *readfds, fd_set *writefds,
+                             fd_set *exceptfds,
+                             const struct timespec *timeout,
+                             const sigset_t *sigmask) {
+  if (use_passthrough_secret())
+    return select_via_ppoll_common(nfds, readfds, writefds, exceptfds, timeout,
+                                   sigmask);
+  if (real_pselect_fn)
+    return real_pselect_fn(nfds, readfds, writefds, exceptfds, timeout,
+                           sigmask);
+  return select_via_ppoll_common(nfds, readfds, writefds, exceptfds, timeout,
+                                 sigmask);
 }
 
 
@@ -1074,7 +1277,8 @@ static ssize_t stdio_cookie_write(void *cookie, const char *buf, size_t size) {
   return write(state->fd, buf, size);
 }
 
-static int stdio_cookie_seek(void *cookie, off64_t *offset, int whence) {
+static int stdio_cookie_seek(void *cookie, uwg_cookie_off_t *offset,
+                             int whence) {
   (void)cookie;
   (void)offset;
   (void)whence;
@@ -2031,6 +2235,29 @@ FILE *fdopen64(int fd, const char *mode) { return fdopen(fd, mode); }
 int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
   init_real();
   return real_poll_call(fds, nfds, timeout);
+}
+
+int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+           struct timeval *timeout) {
+  init_real();
+  return real_select_call(nfds, readfds, writefds, exceptfds, timeout);
+}
+
+int __select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+             struct timeval *timeout) {
+  return select(nfds, readfds, writefds, exceptfds, timeout);
+}
+
+int pselect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+            const struct timespec *timeout, const sigset_t *sigmask) {
+  init_real();
+  return real_pselect_call(nfds, readfds, writefds, exceptfds, timeout,
+                           sigmask);
+}
+
+int __pselect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+              const struct timespec *timeout, const sigset_t *sigmask) {
+  return pselect(nfds, readfds, writefds, exceptfds, timeout, sigmask);
 }
 
 int ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
@@ -3021,7 +3248,7 @@ ssize_t recvmsg(int fd, struct msghdr *msg, int flags) {
 }
 
 int sendmmsg(int fd, UWG_SENDMMSG_CONST struct mmsghdr *vmessages,
-             unsigned int vlen, int flags) {
+             unsigned int vlen, UWG_MMSG_FLAGS_T flags) {
   init_real();
   if (tracked_reentrant_socket_fd(fd))
     return -1;
@@ -3029,7 +3256,7 @@ int sendmmsg(int fd, UWG_SENDMMSG_CONST struct mmsghdr *vmessages,
   if (fd_ok(fd) && state.proxied) {
     unsigned int i;
     for (i = 0; i < vlen; i++) {
-      ssize_t n = sendmsg(fd, &vmessages[i].msg_hdr, flags);
+      ssize_t n = sendmsg(fd, &vmessages[i].msg_hdr, (int)flags);
       if (n < 0)
         return i ? (int)i : -1;
       ((struct mmsghdr *)vmessages)[i].msg_len = (unsigned int)n;
@@ -3039,7 +3266,8 @@ int sendmmsg(int fd, UWG_SENDMMSG_CONST struct mmsghdr *vmessages,
   return real_sendmmsg_call(fd, vmessages, vlen, flags);
 }
 
-int recvmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags,
+int recvmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen,
+             UWG_MMSG_FLAGS_T flags,
              UWG_RECVMMSG_TIMEOUT_CONST struct timespec *timeout) {
   init_real();
   if (tracked_reentrant_socket_fd(fd))
@@ -3049,7 +3277,7 @@ int recvmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags,
   if (fd_ok(fd) && state.proxied) {
     unsigned int i;
     for (i = 0; i < vlen; i++) {
-      ssize_t n = recvmsg(fd, &vmessages[i].msg_hdr, flags);
+      ssize_t n = recvmsg(fd, &vmessages[i].msg_hdr, (int)flags);
       if (n < 0)
         return i ? (int)i : -1;
       vmessages[i].msg_len = (unsigned int)n;

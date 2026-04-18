@@ -68,42 +68,6 @@ func buildSeccompProgram(mode SeccompMode, secret uint64) ([]unix.SockFilter, er
 		ret(unix.SECCOMP_RET_TRACE),
 	)
 
-	secretBypassSyscalls := []uint32{
-		unix.SYS_SOCKET,
-		unix.SYS_CONNECT,
-		unix.SYS_BIND,
-		unix.SYS_LISTEN,
-		unix.SYS_ACCEPT,
-		unix.SYS_ACCEPT4,
-		unix.SYS_CLOSE,
-		unix.SYS_READ,
-		unix.SYS_WRITE,
-		unix.SYS_READV,
-		unix.SYS_WRITEV,
-		unix.SYS_SENDMSG,
-		unix.SYS_RECVMSG,
-		unix.SYS_SENDMMSG,
-		unix.SYS_RECVMMSG,
-		unix.SYS_DUP,
-		unix.SYS_DUP2,
-		unix.SYS_DUP3,
-		unix.SYS_GETSOCKNAME,
-		unix.SYS_GETPEERNAME,
-		unix.SYS_SHUTDOWN,
-		unix.SYS_FCNTL,
-		unix.SYS_GETSOCKOPT,
-		unix.SYS_SETSOCKOPT,
-		unix.SYS_POLL,
-		unix.SYS_PPOLL,
-	}
-
-	alwaysTraceSyscalls := []uint32{
-		unix.SYS_SENDTO,
-		unix.SYS_RECVFROM,
-		unix.SYS_SELECT,
-		unix.SYS_PSELECT6,
-	}
-
 	out = append(out, ldAbs(seccompOffsetNR))
 
 	switch mode {
