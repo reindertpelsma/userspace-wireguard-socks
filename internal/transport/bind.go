@@ -453,16 +453,7 @@ func (b *MultiTransportBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	switch te.Kind() {
 	case KindNotConnOriented:
 		nce := ep.(*NotConnOrientedEndpoint)
-		t := b.GetTransport(nce.TransportID)
-		if t == nil {
-			return ErrTransportNotFound
-		}
-		sess, err := t.Dial(context.Background(), nce.DstToString())
-		if err != nil {
-			return err
-		}
-		defer sess.Close()
-		return sendAll(sess, bufs)
+		return b.sendNCO(nce, bufs)
 
 	case KindDial:
 		de := ep.(*DialEndpoint)
@@ -539,6 +530,121 @@ func (b *MultiTransportBind) sendViaDial(bufs [][]byte, de *DialEndpoint) error 
 	go b.serveConnSession(context.Background(), t, newSess)
 	b.startIdleTimer(s, de.IdentBytes())
 	return sendAll(newSess, bufs)
+}
+
+// sendNCO sends bufs to a not-connection-oriented endpoint.
+//
+// Server path: a udpListenerSession is already stored in the session state
+// (set by serveNotConnSession via updatePeerEndpoint).  That session's
+// WritePacket sends through the bound listener socket back to the peer, so
+// the reply always originates from the correct listen port.
+//
+// Client path: create a connected UDP socket per destination, cache it for
+// 30 seconds of inactivity, and start a receive goroutine on it so replies
+// are delivered to WireGuard's recvCh.
+func (b *MultiTransportBind) sendNCO(nce *NotConnOrientedEndpoint, bufs [][]byte) error {
+	t := b.GetTransport(nce.TransportID)
+	if t == nil {
+		return ErrTransportNotFound
+	}
+
+	key := hex.EncodeToString(nce.IdentBytes())
+
+	// Fast path: use whatever session is already active for this peer.
+	b.mu.RLock()
+	s := b.sessions[key]
+	b.mu.RUnlock()
+	if s != nil {
+		s.mu.Lock()
+		sess := s.activeSession
+		s.mu.Unlock()
+		if sess != nil {
+			if err := sendAll(sess, bufs); err == nil {
+				b.resetIdleTimer(s)
+				return nil
+			}
+			// Session failed — clear so we fall through to dial a new one.
+			s.mu.Lock()
+			if s.activeSession == sess {
+				s.activeSession = nil
+			}
+			s.mu.Unlock()
+		}
+	}
+
+	// Slow path: allocate session state if needed, then dial a connected socket.
+	b.mu.Lock()
+	if s == nil {
+		s = &sessionState{staticEP: nce, currentEP: nce, transport: t}
+		b.sessions[key] = s
+	}
+	b.mu.Unlock()
+
+	// Double-check: another goroutine may have raced us to the socket.
+	s.mu.Lock()
+	if s.activeSession != nil {
+		sess := s.activeSession
+		s.mu.Unlock()
+		err := sendAll(sess, bufs)
+		b.resetIdleTimer(s)
+		return err
+	}
+	s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), rekeyTimeout*3)
+	defer cancel()
+	newSess, err := t.Dial(ctx, nce.DstToString())
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	if s.activeSession != nil {
+		// Lost the race — use the winning goroutine's session.
+		existing := s.activeSession
+		s.mu.Unlock()
+		newSess.Close()
+		err := sendAll(existing, bufs)
+		b.resetIdleTimer(s)
+		return err
+	}
+	s.activeSession = newSess
+	s.mu.Unlock()
+
+	// Receive goroutine: deliver inbound packets from the connected socket.
+	go b.serveNCOOutboundSession(nce, newSess, key)
+	b.startIdleTimer(s, nce.IdentBytes())
+	return sendAll(newSess, bufs)
+}
+
+// serveNCOOutboundSession reads packets from a connected UDP socket (client
+// outbound path) and delivers them to WireGuard's recvCh.  It exits when the
+// socket is closed by the idle timer or by Close().
+func (b *MultiTransportBind) serveNCOOutboundSession(nce *NotConnOrientedEndpoint, sess Session, key string) {
+	defer func() {
+		b.mu.RLock()
+		s := b.sessions[key]
+		b.mu.RUnlock()
+		if s != nil {
+			s.mu.Lock()
+			if s.activeSession == sess {
+				s.activeSession = nil
+			}
+			s.mu.Unlock()
+		}
+		sess.Close()
+	}()
+	for {
+		pkt, err := sess.ReadPacket()
+		if err != nil {
+			return
+		}
+		select {
+		case b.recvCh <- inboundPacket{data: pkt, ep: nce}:
+		case <-b.closed:
+			return
+		}
+	}
 }
 
 func (b *MultiTransportBind) sendNotConnOriented(bufs [][]byte, addr string) error {

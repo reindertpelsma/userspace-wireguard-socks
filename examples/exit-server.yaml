@@ -4,7 +4,7 @@
 # Rootless egress server. WireGuard peers can route Internet traffic here, and
 # uwgsocks terminates inbound TCP/UDP to normal host sockets.
 wireguard:
-  config_file: ./server.conf
+  config_file: ./examples/server.conf
 
 inbound:
   transparent: true
@@ -12,6 +12,13 @@ inbound:
 dns_server:
   # Tunnel-side DNS listener. This is not a host port 53 bind.
   listen: 100.64.90.1:53
+
+
+transports:
+    - base: udp
+      listen: true
+      listen_port: 51821
+      name: udp
 
 api:
   listen: 127.0.0.1:9090

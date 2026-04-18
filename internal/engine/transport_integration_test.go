@@ -314,3 +314,58 @@ func TestQUICTransportEndToEnd(t *testing.T) {
 	waitPeerStatus(t, clientEng, serverKey_.PublicKey().String())
 	waitPeerStatus(t, serverEng, clientKey_.PublicKey().String())
 }
+
+// TestNamedUDPTransportEndToEnd verifies that a server with an explicit named
+// UDP transport (listen: true, listen_port: N) works correctly when paired
+// with a client that has no transports section (uses the legacy UDP bind).
+// This is the exact scenario from examples/exit-server.yaml + exit-client.yaml.
+func TestNamedUDPTransportEndToEnd(t *testing.T) {
+	hostIP := nonLoopbackIPv4(t)
+	srv := startHTTPServer(t)
+	defer srv.Close()
+
+	serverKey_, clientKey_ := mustKey(t), mustKey(t)
+	udpPort := freeUDPPort(t)
+
+	// Server: named UDP transport with explicit listen_port.
+	serverCfg := config.Default()
+	serverCfg.WireGuard.PrivateKey = serverKey_.String()
+	transparent := true
+	serverCfg.Inbound.Transparent = &transparent
+	serverCfg.WireGuard.Addresses = []string{"100.64.43.1/32"}
+	serverCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:  clientKey_.PublicKey().String(),
+		AllowedIPs: []string{"100.64.43.2/32"},
+	}}
+	listenPort := udpPort
+	serverCfg.Transports = []transport.Config{{
+		Name:       "udp",
+		Base:       "udp",
+		Listen:     true,
+		ListenPort: &listenPort,
+	}}
+	serverEng := mustStart(t, serverCfg)
+	defer serverEng.Close()
+
+	// Client: no transports section — uses legacy OutboundOnlyBind.
+	clientCfg := config.Default()
+	clientCfg.WireGuard.PrivateKey = clientKey_.String()
+	clientCfg.WireGuard.Addresses = []string{"100.64.43.2/32"}
+	clientCfg.Proxy.SOCKS5 = "127.0.0.1:0"
+	clientCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:           serverKey_.PublicKey().String(),
+		Endpoint:            fmt.Sprintf("127.0.0.1:%d", udpPort),
+		AllowedIPs:          []string{hostIP.String() + "/32"},
+		PersistentKeepalive: 1,
+	}}
+	clientEng := mustStart(t, clientCfg)
+	defer clientEng.Close()
+
+	target := net.JoinHostPort(hostIP.String(), srv.Port)
+	body := socksHTTPGet(t, clientEng.Addr("socks5"), target)
+	if body != "hello over wg" {
+		t.Fatalf("named UDP transport: unexpected body %q", body)
+	}
+	waitPeerStatus(t, clientEng, serverKey_.PublicKey().String())
+	waitPeerStatus(t, serverEng, clientKey_.PublicKey().String())
+}
