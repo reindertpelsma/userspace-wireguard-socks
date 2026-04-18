@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: ISC
 
 wireguard:
-  config_file: ./exit-client.conf
+  config_file: ./examples/client.conf
 
 proxy:
   socks5: 127.0.0.1:1080
