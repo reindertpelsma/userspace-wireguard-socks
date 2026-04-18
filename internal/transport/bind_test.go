@@ -1023,6 +1023,7 @@ func TestQUICTransportRoundTrip(t *testing.T) {
 		transport.TLSConfig{},
 		"/wireguard",
 		"",
+		"",
 	)
 	trClient := transport.NewQUICTransport(
 		"quic-client",
@@ -1035,6 +1036,7 @@ func TestQUICTransportRoundTrip(t *testing.T) {
 		},
 		"/wireguard",
 		"inner.example",
+		"",
 	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

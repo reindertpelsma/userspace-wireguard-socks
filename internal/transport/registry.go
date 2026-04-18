@@ -114,6 +114,9 @@ func buildBaseTransport(cfg Config, dialer ProxyDialer, wgPubKey [32]byte) (Tran
 	if cfg.WebSocket.Path != "" {
 		wsOpts = append(wsOpts, WithWebSocketPath(cfg.WebSocket.Path))
 	}
+	if cfg.WebSocket.ConnectHost != "" {
+		wsOpts = append(wsOpts, WithWebSocketConnectHost(cfg.WebSocket.ConnectHost))
+	}
 	if cfg.WebSocket.HostHeader != "" {
 		wsOpts = append(wsOpts, WithWebSocketHostHeader(cfg.WebSocket.HostHeader))
 	}
@@ -165,7 +168,24 @@ func buildBaseTransport(cfg Config, dialer ProxyDialer, wgPubKey [32]byte) (Tran
 		if err != nil {
 			return nil, err
 		}
-		return NewQUICTransport(cfg.Name, dialer, listenAddrs, certMgr, cfg.TLS, cfg.WebSocket.Path, cfg.WebSocket.HostHeader), nil
+		return NewQUICTransport(cfg.Name, dialer, listenAddrs, certMgr, cfg.TLS, cfg.WebSocket.Path, cfg.WebSocket.HostHeader, cfg.WebSocket.ConnectHost), nil
+
+	case "quic-ws":
+		certMgr, err := buildCertManager(cfg.TLS, cfg.Listen)
+		if err != nil {
+			return nil, err
+		}
+		return NewQUICWebSocketTransport(cfg.Name, dialer, listenAddrs, certMgr, cfg.TLS, cfg.WebSocket.Path, cfg.WebSocket.HostHeader, cfg.WebSocket.ConnectHost), nil
+
+	case "url":
+		if cfg.URL == "" {
+			return nil, fmt.Errorf("url transport requires url field (e.g. https://example.com/wg)")
+		}
+		certMgr, err := buildCertManager(cfg.TLS, cfg.Listen)
+		if err != nil {
+			return nil, err
+		}
+		return NewURLTransport(cfg.Name, cfg.URL, dialer, listenAddrs, certMgr, cfg.TLS, cfg.WebSocket.ConnectHost, cfg.WebSocket.HostHeader)
 	}
 	return nil, fmt.Errorf("unsupported base protocol %q", cfg.Base)
 }

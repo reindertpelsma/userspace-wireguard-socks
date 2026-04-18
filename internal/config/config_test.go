@@ -289,6 +289,89 @@ func TestParseOutboundProxyArg(t *testing.T) {
 	}
 }
 
+func TestWGDirectives(t *testing.T) {
+	priv := mustConfigKey(t)
+	peer := mustConfigKey(t)
+
+	text := `
+[Interface]
+PrivateKey = ` + priv.String() + `
+Address = 10.0.0.1/24
+#!TURN=turn+tls://alice:secret@turn.example.com:5349
+#!TCP
+
+[Peer]
+PublicKey = ` + peer.PublicKey().String() + `
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0
+#!TCP=required
+#!SkipVerifyTLS=yes
+#!URL=https://vpn.example.com/wg
+`
+	var wg WireGuard
+	if err := MergeWGQuick(&wg, text); err != nil {
+		t.Fatal(err)
+	}
+	if len(wg.TURNDirectives) != 1 || wg.TURNDirectives[0] != "turn+tls://alice:secret@turn.example.com:5349" {
+		t.Fatalf("TURN directive not parsed: %+v", wg.TURNDirectives)
+	}
+	if !wg.TCPListen {
+		t.Fatal("TCPListen not set by #!TCP")
+	}
+	if len(wg.Peers) != 1 {
+		t.Fatalf("expected 1 peer, got %d", len(wg.Peers))
+	}
+	p := wg.Peers[0]
+	if p.TCPMode != "required" {
+		t.Fatalf("TCPMode: want required, got %q", p.TCPMode)
+	}
+	if p.SkipVerifyTLS == nil || !*p.SkipVerifyTLS {
+		t.Fatalf("SkipVerifyTLS: want true, got %v", p.SkipVerifyTLS)
+	}
+	if p.ConnectURL != "https://vpn.example.com/wg" {
+		t.Fatalf("ConnectURL: want https://vpn.example.com/wg, got %q", p.ConnectURL)
+	}
+}
+
+func TestSynthesizeDirectiveTransports(t *testing.T) {
+	priv := mustConfigKey(t)
+	peer := mustConfigKey(t)
+
+	text := `
+[Interface]
+PrivateKey = ` + priv.String() + `
+Address = 10.0.0.1/24
+#!TURN=turn://bob:pass@relay.example.com:3478
+
+[Peer]
+PublicKey = ` + peer.PublicKey().String() + `
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0
+#!URL=https://vpn.example.com/wg
+`
+	cfg := &Config{}
+	if err := MergeWGQuick(&cfg.WireGuard, text); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	// Should have synthesized a TURN transport and a URL transport.
+	names := make(map[string]bool)
+	for _, tr := range cfg.Transports {
+		names[tr.Name] = true
+	}
+	if !names["_wg-turn-0"] {
+		t.Fatalf("TURN transport not synthesized, got %v", cfg.Transports)
+	}
+	if !names["_wg-url-0"] {
+		t.Fatalf("URL transport not synthesized, got %v", cfg.Transports)
+	}
+	if cfg.WireGuard.Peers[0].Transport != "_wg-url-0" {
+		t.Fatalf("peer.Transport not set to url transport: %q", cfg.WireGuard.Peers[0].Transport)
+	}
+}
+
 func mustConfigKey(t *testing.T) wgtypes.Key {
 	t.Helper()
 	key, err := wgtypes.GeneratePrivateKey()

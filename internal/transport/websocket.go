@@ -39,8 +39,11 @@ type WebSocketTransport struct {
 	useTLS      bool
 	// path is the HTTP path for WebSocket upgrade. Defaults to "/".
 	path string
-	// hostHeader overrides the Host header sent in the HTTP upgrade request.
-	// When empty, the target host is used.
+	// connectHost, when non-empty, overrides the host used for DNS lookup
+	// and TCP connection (domain fronting: connect to CDN edge).
+	connectHost string
+	// hostHeader overrides the HTTP Host header (inner host for domain
+	// fronting). When empty, the target host is used.
 	hostHeader string
 }
 
@@ -62,6 +65,12 @@ func WithWebSocketPath(path string) WebSocketOption {
 func WithWebSocketHostHeader(host string) WebSocketOption {
 	return func(t *WebSocketTransport) {
 		t.hostHeader = host
+	}
+}
+
+func WithWebSocketConnectHost(host string) WebSocketOption {
+	return func(t *WebSocketTransport) {
+		t.connectHost = host
 	}
 }
 
@@ -98,17 +107,30 @@ func (t *WebSocketTransport) Name() string               { return t.name }
 func (t *WebSocketTransport) IsConnectionOriented() bool { return true }
 
 // Dial opens a client-mode WebSocket session to target (host:port).
+// Domain fronting: connectHost sets the DNS/TCP connect address; TLS.ServerSNI
+// sets the ClientHello SNI; HostHeader sets the HTTP Host (inner host).
 func (t *WebSocketTransport) Dial(ctx context.Context, target string) (Session, error) {
-	// Build underlying TCP/TLS connection through the proxy dialer.
-	tcpConn, err := t.dialer.DialContext(ctx, "tcp", target)
+	// connectAddr is the address used for the actual TCP connection.
+	connectAddr := target
+	if t.connectHost != "" {
+		_, port, err := net.SplitHostPort(target)
+		if err != nil {
+			return nil, fmt.Errorf("ws transport %s: invalid target %q: %w", t.name, target, err)
+		}
+		connectAddr = net.JoinHostPort(t.connectHost, port)
+	}
+
+	tcpConn, err := t.dialer.DialContext(ctx, "tcp", connectAddr)
 	if err != nil {
-		return nil, fmt.Errorf("ws transport %s: dial %s: %w", t.name, target, err)
+		return nil, fmt.Errorf("ws transport %s: dial %s: %w", t.name, connectAddr, err)
 	}
 
 	var conn net.Conn = tcpConn
 	scheme := "ws"
 	if t.useTLS {
 		scheme = "wss"
+		// SNI is inferred from target (the WG peer endpoint host) unless
+		// TLS.ServerSNI is explicitly configured.
 		clientCfg, cfgErr := buildTLSClientConfig(t.tlsCfg, t.certMgr, serverName(target), false)
 		if cfgErr != nil {
 			tcpConn.Close()
