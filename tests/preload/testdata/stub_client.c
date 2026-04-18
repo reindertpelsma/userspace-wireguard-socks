@@ -12,12 +12,15 @@
 #include <netinet/ip_icmp.h>
 #include <netinet/icmp6.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static int apply_reuse_from_env(int fd) {
@@ -129,6 +132,42 @@ static int echo_connected_nopoll(int fd, const char *message) {
     size_t want = strlen(message);
     if (send(fd, message, want, 0) != (ssize_t)want) {
         perror("send");
+        return 1;
+    }
+    char buf[4096];
+    ssize_t n = recv(fd, buf, sizeof(buf) - 1, 0);
+    if (n < 0) {
+        perror("recv");
+        return 1;
+    }
+    buf[n] = 0;
+    printf("%s", buf);
+    return strcmp(buf, message) == 0 ? 0 : 1;
+}
+
+static int echo_connected_pselect(int fd, const char *message) {
+    fd_set writefds;
+    FD_ZERO(&writefds);
+    FD_SET(fd, &writefds);
+    struct timespec timeout;
+    timeout.tv_sec = 1;
+    timeout.tv_nsec = 0;
+    if (pselect(fd + 1, NULL, &writefds, NULL, &timeout, NULL) <= 0 || !FD_ISSET(fd, &writefds)) {
+        perror("pselect writable");
+        return 1;
+    }
+    size_t want = strlen(message);
+    if (send(fd, message, want, 0) != (ssize_t)want) {
+        perror("send");
+        return 1;
+    }
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(fd, &readfds);
+    timeout.tv_sec = 3;
+    timeout.tv_nsec = 0;
+    if (pselect(fd + 1, &readfds, NULL, NULL, &timeout, NULL) <= 0 || !FD_ISSET(fd, &readfds)) {
+        perror("pselect readable");
         return 1;
     }
     char buf[4096];
@@ -702,6 +741,7 @@ int main(int argc, char **argv) {
     int use_mmsg = 0;
     int use_readv_writev = 0;
     int use_syscall_surface = 0;
+    int use_pselect = 0;
     for (int i = 4; i < argc; i++) {
         if (strcmp(argv[i], "udp") == 0) {
             socktype = SOCK_DGRAM;
@@ -746,6 +786,8 @@ int main(int argc, char **argv) {
             use_mmsg = 1;
         } else if (strcmp(argv[i], "iov") == 0) {
             use_readv_writev = 1;
+        } else if (strcmp(argv[i], "pselect") == 0) {
+            use_pselect = 1;
         } else if (strcmp(argv[i], "syscall-surface") == 0) {
             socktype = SOCK_STREAM;
             use_syscall_surface = 1;
@@ -901,6 +943,8 @@ int main(int argc, char **argv) {
     int rc;
     if (udp_no_poll) {
         rc = echo_connected_udp_nopoll(fd, argv[3]);
+    } else if (use_pselect) {
+        rc = echo_connected_pselect(fd, argv[3]);
     } else {
         rc = tcp_no_poll ? echo_connected_nopoll(fd, argv[3]) : echo_connected(fd, argv[3]);
     }

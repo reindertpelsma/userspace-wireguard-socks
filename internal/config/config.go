@@ -77,6 +77,12 @@ type WireGuard struct {
 	PostUp              []string `yaml:"post_up"`
 	PostDown            []string `yaml:"post_down"`
 	Peers               []Peer   `yaml:"peers"`
+
+	// Fields synthesized from #! directives in wg-quick config files.
+	// TURNDirectives holds raw TURN URLs from #!TURN= lines, e.g. "turn+tls://user:pass@host:port".
+	TURNDirectives []string `yaml:"turn_directives,omitempty"`
+	// TCPListen enables a TCP listener synthesized from a #!TCP directive in [Interface].
+	TCPListen bool `yaml:"tcp_listen,omitempty"`
 }
 
 type TURN struct {
@@ -112,6 +118,14 @@ type Peer struct {
 	// Transport is the name of a transport from the top-level transports list.
 	// Empty means use the default transport (first entry, or legacy UDP).
 	Transport string `yaml:"transport,omitempty"`
+
+	// Fields synthesized from #! directives in wg-quick config files.
+	// TCPMode is set by #!TCP=: "no" (default), "supported", "required".
+	TCPMode string `yaml:"tcp_mode,omitempty"`
+	// SkipVerifyTLS is set by #!SkipVerifyTLS=: nil=default, true=skip, false=verify.
+	SkipVerifyTLS *bool `yaml:"skip_verify_tls,omitempty"`
+	// ConnectURL is set by #!URL=: full URL for auto-negotiation transport.
+	ConnectURL string `yaml:"connect_url,omitempty"`
 }
 
 type Proxy struct {
@@ -644,10 +658,102 @@ func (c *Config) Normalize() error {
 	if err := normalizeForwards("reverse_forward", c.ReverseForwards); err != nil {
 		return err
 	}
+	if err := c.synthesizeDirectiveTransports(); err != nil {
+		return err
+	}
 	if err := c.normalizeTransports(); err != nil {
 		return err
 	}
 	return nil
+}
+
+// synthesizeDirectiveTransports converts #! directive fields on WireGuard and
+// Peer into proper transport.Config entries appended to c.Transports, and
+// updates peer.Transport references accordingly.
+func (c *Config) synthesizeDirectiveTransports() error {
+	// TURN directives → one transport.Config per entry (UDP base + TURN proxy).
+	for i, rawURL := range c.WireGuard.TURNDirectives {
+		tc, err := parseTURNDirectiveURL(fmt.Sprintf("_wg-turn-%d", i), rawURL)
+		if err != nil {
+			return fmt.Errorf("#!TURN directive %d: %w", i, err)
+		}
+		c.Transports = append(c.Transports, tc)
+	}
+
+	// #!TCP in [Interface] → TCP listener transport.
+	if c.WireGuard.TCPListen {
+		c.Transports = append(c.Transports, transport.Config{
+			Name:   "_wg-tcp-listen",
+			Base:   "tcp",
+			Listen: true,
+		})
+	}
+
+	// Per-peer directives.
+	for i := range c.WireGuard.Peers {
+		peer := &c.WireGuard.Peers[i]
+		if peer.Transport != "" {
+			continue // explicit transport already set; directives are informational only
+		}
+		tlsCfg := transport.TLSConfig{}
+		if peer.SkipVerifyTLS != nil {
+			tlsCfg.VerifyPeer = !*peer.SkipVerifyTLS
+		}
+		if peer.ConnectURL != "" {
+			name := fmt.Sprintf("_wg-url-%d", i)
+			c.Transports = append(c.Transports, transport.Config{
+				Name: name,
+				Base: "url",
+				URL:  peer.ConnectURL,
+				TLS:  tlsCfg,
+			})
+			peer.Transport = name
+		} else if peer.TCPMode == "required" || peer.TCPMode == "supported" {
+			name := fmt.Sprintf("_wg-tcp-%d", i)
+			c.Transports = append(c.Transports, transport.Config{
+				Name: name,
+				Base: "tcp",
+				TLS:  tlsCfg,
+			})
+			peer.Transport = name
+		}
+	}
+	return nil
+}
+
+// parseTURNDirectiveURL parses a #!TURN= URL into a transport.Config.
+// Supported schemes: turn (UDP), turns (TLS), turn+udp, turn+tcp, turn+tls, turn+dtls.
+func parseTURNDirectiveURL(name, rawURL string) (transport.Config, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return transport.Config{}, fmt.Errorf("invalid TURN URL %q: %w", rawURL, err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	proto := "udp"
+	switch {
+	case scheme == "turns":
+		proto = "tls"
+	case strings.HasPrefix(scheme, "turn+"):
+		proto = strings.TrimPrefix(scheme, "turn+")
+	}
+	username := u.User.Username()
+	password, _ := u.User.Password()
+	if u.Host == "" {
+		return transport.Config{}, fmt.Errorf("TURN URL %q missing host", rawURL)
+	}
+	return transport.Config{
+		Name: name,
+		Base: "udp",
+		Proxy: transport.ProxyConfig{
+			Type: "turn",
+			TURN: transport.TURNProxyConfig{
+				Server:   u.Host,
+				Username: username,
+				Password: password,
+				Protocol: proto,
+			},
+		},
+	}, nil
 }
 
 // normalizeTransports validates transport configs and checks per-peer
@@ -906,7 +1012,16 @@ func MergeWGQuick(dst *WireGuard, text string) error {
 	lineNo := 0
 	for sc.Scan() {
 		lineNo++
-		line := strings.TrimSpace(stripComment(sc.Text()))
+		rawLine := strings.TrimSpace(sc.Text())
+		// #! directives are parsed before comment stripping so standard
+		// wg-quick clients see them as ordinary comments and ignore them.
+		if strings.HasPrefix(rawLine, "#!") {
+			if err := applyWGDirective(dst, peer, section, rawLine[2:], lineNo); err != nil {
+				return err
+			}
+			continue
+		}
+		line := strings.TrimSpace(stripComment(rawLine))
 		if line == "" {
 			continue
 		}
@@ -943,6 +1058,75 @@ func MergeWGQuick(dst *WireGuard, text string) error {
 		}
 	}
 	return sc.Err()
+}
+
+// applyWGDirective processes a single #! directive line (the #! prefix is
+// already stripped). Per-peer directives are applied to the current peer
+// pointer; global directives update the WireGuard-level fields.
+func applyWGDirective(dst *WireGuard, peer *Peer, section, directive string, lineNo int) error {
+	key, value, hasValue := strings.Cut(directive, "=")
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+
+	switch strings.ToUpper(key) {
+	case "TURN":
+		if !hasValue || value == "" {
+			return fmt.Errorf("wg config line %d: #!TURN requires a URL value", lineNo)
+		}
+		dst.TURNDirectives = append(dst.TURNDirectives, value)
+
+	case "TCP":
+		if !hasValue {
+			// #!TCP with no value in [Interface] enables TCP listener.
+			if section == "interface" || section == "" {
+				dst.TCPListen = true
+			}
+			return nil
+		}
+		if peer == nil {
+			// Global #!TCP=... in [Interface]: treat as listener flag.
+			switch strings.ToLower(value) {
+			case "supported", "required":
+				dst.TCPListen = true
+			}
+			return nil
+		}
+		switch strings.ToLower(value) {
+		case "no", "":
+			peer.TCPMode = "no"
+		case "supported":
+			peer.TCPMode = "supported"
+		case "required":
+			peer.TCPMode = "required"
+		default:
+			return fmt.Errorf("wg config line %d: #!TCP value must be no|supported|required, got %q", lineNo, value)
+		}
+
+	case "SKIPVERIFYTLS":
+		if peer == nil {
+			return fmt.Errorf("wg config line %d: #!SkipVerifyTLS is only valid in [Peer]", lineNo)
+		}
+		switch strings.ToLower(value) {
+		case "yes", "true", "1":
+			t := true
+			peer.SkipVerifyTLS = &t
+		case "no", "false", "0":
+			f := false
+			peer.SkipVerifyTLS = &f
+		default:
+			return fmt.Errorf("wg config line %d: #!SkipVerifyTLS value must be yes|no, got %q", lineNo, value)
+		}
+
+	case "URL":
+		if peer == nil {
+			return fmt.Errorf("wg config line %d: #!URL is only valid in [Peer]", lineNo)
+		}
+		if !hasValue || value == "" {
+			return fmt.Errorf("wg config line %d: #!URL requires a URL value", lineNo)
+		}
+		peer.ConnectURL = value
+	}
+	return nil
 }
 
 func stripComment(s string) string {

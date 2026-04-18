@@ -27,7 +27,12 @@ type QUICTransport struct {
 	certMgr     *CertManager
 	tlsCfg      TLSConfig
 	path        string
-	hostHeader  string
+	// connectHost overrides the host used for DNS lookup and QUIC connection.
+	// Empty means use the peer endpoint host.
+	connectHost string
+	// hostHeader sets the HTTP :authority / Host for domain fronting.
+	// Empty means use the peer endpoint host.
+	hostHeader string
 }
 
 // quicClientPacketConn intentionally hides SyscallConn / OOB-specific methods
@@ -37,7 +42,7 @@ type quicClientPacketConn struct {
 	net.PacketConn
 }
 
-func NewQUICTransport(name string, dialer ProxyDialer, listenAddrs []string, certMgr *CertManager, tlsCfg TLSConfig, path, hostHeader string) *QUICTransport {
+func NewQUICTransport(name string, dialer ProxyDialer, listenAddrs []string, certMgr *CertManager, tlsCfg TLSConfig, path, hostHeader, connectHost string) *QUICTransport {
 	if path == "" {
 		path = "/"
 	}
@@ -52,6 +57,7 @@ func NewQUICTransport(name string, dialer ProxyDialer, listenAddrs []string, cer
 		tlsCfg:      tlsCfg,
 		path:        path,
 		hostHeader:  hostHeader,
+		connectHost: connectHost,
 	}
 }
 
@@ -59,16 +65,25 @@ func (t *QUICTransport) Name() string               { return t.name }
 func (t *QUICTransport) IsConnectionOriented() bool { return true }
 
 func (t *QUICTransport) Dial(ctx context.Context, target string) (Session, error) {
+	// SNI is inferred from the peer endpoint host unless tls.server_sni is set.
 	tlsCfg, err := buildTLSClientConfig(t.tlsCfg, t.certMgr, serverName(target), false)
 	if err != nil {
 		return nil, fmt.Errorf("quic transport %s: TLS config: %w", t.name, err)
 	}
 
+	// authority is the HTTP/3 :authority (Host header / domain fronting inner host).
 	authority := target
 	if t.hostHeader != "" {
 		authority = t.hostHeader
 	}
 	urlStr := "https://" + authority + t.path
+
+	// connectTarget is the actual UDP address to dial (domain fronting outer host).
+	connectTarget := target
+	if t.connectHost != "" {
+		_, port, _ := net.SplitHostPort(target)
+		connectTarget = net.JoinHostPort(t.connectHost, port)
+	}
 
 	var packetConn net.PacketConn
 	d := webtransport.Dialer{
@@ -79,12 +94,12 @@ func (t *QUICTransport) Dial(ctx context.Context, target string) (Session, error
 			DisablePathMTUDiscovery:          true,
 		},
 		DialAddr: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-			pc, err := t.openPacketConn(ctx, target)
+			pc, err := t.openPacketConn(ctx, connectTarget)
 			if err != nil {
 				return nil, err
 			}
 			packetConn = pc
-			remoteAddr, err := t.resolveRemoteUDPAddr(target)
+			remoteAddr, err := t.resolveRemoteUDPAddr(connectTarget)
 			if err != nil {
 				_ = pc.Close()
 				packetConn = nil

@@ -92,6 +92,10 @@ For a release candidate, run two binaries for hours:
 
 Also run a real-world browser test through SOCKS5, including HTTP/3-capable sites, because UDP behavior through SOCKS5 clients varies in practice.
 
+One recent real multi-host pass, including amd64, arm64 Termux, arm64 Docker,
+and gVisor, is summarized in
+[docs/live-matrix-2026-04-18.md](live-matrix-2026-04-18.md).
+
 ## External Review Checklist
 
 Before calling this production-safe, ask another engineer to review:

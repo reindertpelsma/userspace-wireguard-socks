@@ -98,6 +98,7 @@ func buildSeccompProgram(mode SeccompMode, secret uint64) ([]unix.SockFilter, er
 	alwaysTraceSyscalls := []uint32{
 		unix.SYS_SENDTO,
 		unix.SYS_RECVFROM,
+		unix.SYS_PSELECT6,
 	}
 
 	out = append(out, ldAbs(seccompOffsetNR))

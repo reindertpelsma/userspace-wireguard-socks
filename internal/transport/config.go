@@ -21,6 +21,9 @@ type Config struct {
 
 	// TLS holds TLS / DTLS / HTTPS / QUIC certificate and validation options.
 	TLS TLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
+	// URL is the full base URL for the "url" auto-negotiation transport,
+	// e.g. "https://example.com/wg". Only used when Base = "url".
+	URL string `yaml:"url,omitempty" json:"url,omitempty"`
 	// WebSocket configures HTTP path / Host header details for HTTP-based transports.
 	WebSocket WebSocketConfig `yaml:"websocket,omitempty" json:"websocket,omitempty"`
 
@@ -62,8 +65,18 @@ type TLSConfig struct {
 type WebSocketConfig struct {
 	// Path is the HTTP path used for the WebSocket upgrade. Defaults to "/".
 	Path string `yaml:"path,omitempty" json:"path,omitempty"`
-	// HostHeader overrides the HTTP Host header sent during the upgrade.
-	// Empty means use the target host.
+	// ConnectHost overrides the host used for DNS lookup and TCP/QUIC
+	// connection. When empty the peer endpoint host is used. This is the
+	// first of three independently configurable host values for domain
+	// fronting:
+	//   ConnectHost  → DNS + actual TCP/QUIC connect
+	//   TLS.ServerSNI → TLS ClientHello SNI
+	//   HostHeader   → HTTP Host / :authority header (inner, often encrypted)
+	ConnectHost string `yaml:"connect_host,omitempty" json:"connect_host,omitempty"`
+	// HostHeader overrides the HTTP Host / :authority header sent in the
+	// upgrade request. Used for domain fronting where the HTTP layer is
+	// encrypted and the CDN routes on the inner host. Empty means use the
+	// target host.
 	HostHeader string `yaml:"host_header,omitempty" json:"host_header,omitempty"`
 	// SNIHostname is deprecated. Use tls.server_sni instead.
 	SNIHostname string `yaml:"sni_hostname,omitempty" json:"sni_hostname,omitempty"`
@@ -123,7 +136,7 @@ type HTTPProxyConfig struct {
 // carried over a stream proxy such as SOCKS5 or HTTP CONNECT).
 func IsConnectionOriented(cfg Config) bool {
 	switch cfg.Base {
-	case "tcp", "tls", "dtls", "http", "https", "quic":
+	case "tcp", "tls", "dtls", "http", "https", "quic", "quic-ws", "url":
 		return true
 	}
 	// UDP base can still be connection-oriented when routed through a stream
@@ -138,10 +151,10 @@ func IsConnectionOriented(cfg Config) bool {
 // ValidateBase checks that the Base field is one of the supported values.
 func ValidateBase(base string) error {
 	switch base {
-	case "", "udp", "tcp", "tls", "dtls", "http", "https", "quic":
+	case "", "udp", "tcp", "tls", "dtls", "http", "https", "quic", "quic-ws", "url":
 		return nil
 	}
-	return &ConfigError{Field: "base", Value: base, Msg: "must be one of: udp tcp tls dtls http https quic"}
+	return &ConfigError{Field: "base", Value: base, Msg: "must be one of: udp tcp tls dtls http https quic quic-ws url"}
 }
 
 // ValidateProxyType checks that the proxy Type field is valid.

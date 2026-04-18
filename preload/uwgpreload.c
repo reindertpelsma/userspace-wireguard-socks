@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
@@ -2873,6 +2874,16 @@ int getsockopt(int fd, int level, int optname, void *optval,
   return real_getsockopt_call(fd, level, optname, optval, optlen);
 }
 
+int __getsockopt(int fd, int level, int optname, void *optval,
+                 socklen_t *optlen) {
+  return getsockopt(fd, level, optname, optval, optlen);
+}
+
+int __libc_getsockopt(int fd, int level, int optname, void *optval,
+                      socklen_t *optlen) {
+  return getsockopt(fd, level, optname, optval, optlen);
+}
+
 int setsockopt(int fd, int level, int optname, const void *optval,
                socklen_t optlen) {
   init_real();
@@ -2928,6 +2939,16 @@ int setsockopt(int fd, int level, int optname, const void *optval,
 #endif
   }
   return real_setsockopt_call(fd, level, optname, optval, optlen);
+}
+
+int __setsockopt(int fd, int level, int optname, const void *optval,
+                 socklen_t optlen) {
+  return setsockopt(fd, level, optname, optval, optlen);
+}
+
+int __libc_setsockopt(int fd, int level, int optname, const void *optval,
+                      socklen_t optlen) {
+  return setsockopt(fd, level, optname, optval, optlen);
 }
 
 ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
