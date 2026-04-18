@@ -30,6 +30,40 @@ func TestAllowTunnelPacketDropsLoopAndInvalidAddresses(t *testing.T) {
 	}
 }
 
+func TestAllowEgressPacketWithRelayEnabledOnlyAppliesRelayACLToPeerTransit(t *testing.T) {
+	cfg := config.Default()
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	conntrack := false
+	relayEnabled := true
+	cfg.Relay.Conntrack = &conntrack
+	cfg.Relay.Enabled = &relayEnabled
+	rel := acl.List{Default: acl.Deny}
+	if err := rel.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	e := &Engine{
+		cfg:        cfg,
+		relACL:     rel,
+		localAddrs: []netip.Addr{netip.MustParseAddr("100.64.0.1")},
+		allowed: []netip.Prefix{
+			netip.MustParsePrefix("100.64.2.0/24"),
+			netip.MustParsePrefix("100.64.3.0/24"),
+		},
+	}
+
+	if !e.allowEgressPacket(testIPv4TCPPacket("198.51.100.9", "100.64.2.2", 443, 40000)) {
+		t.Fatal("relay ACL incorrectly filtered a non-relay packet from the host network back to a peer")
+	}
+	if !e.allowEgressPacket(testIPv4TCPPacket("100.64.0.1", "100.64.2.2", 40000, 443)) {
+		t.Fatal("relay ACL incorrectly filtered locally-originated tunnel traffic")
+	}
+	if e.allowEgressPacket(testIPv4TCPPacket("100.64.2.2", "100.64.3.3", 40000, 443)) {
+		t.Fatal("peer-to-peer relay transit bypassed the relay ACL")
+	}
+}
+
 func TestAllowRelayPacketAppliesACLAndAddressSubnetReservations(t *testing.T) {
 	cfg := config.Default()
 	cfg.WireGuard.Addresses = []string{"100.64.0.1/24"}

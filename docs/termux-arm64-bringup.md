@@ -136,7 +136,7 @@ is still the safer workflow.
 Start by reading these files in order:
 
 1. `README.md`
-2. `Full-Technical-How-To.md`
+2. `docs/howto/README.md`
 3. `docs/configuration.md`
 4. `docs/socket-protocol.md`
 5. `docs/testing.md`
