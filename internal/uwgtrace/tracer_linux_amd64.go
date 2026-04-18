@@ -556,6 +556,10 @@ func (t *tracer) dispatchInterceptedSyscall(tid int, regs unix.PtraceRegs, secco
 		return t.handleGetSockOpt(tid, regs, seccompStop)
 	case unix.SYS_SETSOCKOPT:
 		return t.handleSetSockOpt(tid, regs, seccompStop)
+	case unix.SYS_SELECT:
+		return t.handleSelect(tid, regs, false, seccompStop)
+	case unix.SYS_PSELECT6:
+		return t.handleSelect(tid, regs, true, seccompStop)
 	case unix.SYS_POLL:
 		return t.handlePoll(tid, regs, false, seccompStop)
 	case unix.SYS_PPOLL:
@@ -1928,6 +1932,153 @@ func (t *tracer) handlePoll(tid int, regs unix.PtraceRegs, ppoll bool, seccompSt
 	return t.finishEmulated(tid, regs, int64(ready), seccompStop)
 }
 
+func (t *tracer) handleSelect(tid int, regs unix.PtraceRegs, pselect bool, seccompStop bool) error {
+	nfds := int(int32(regs.Rdi))
+	if nfds < 0 {
+		return t.finishEmulated(tid, regs, -int64(syscall.EINVAL), seccompStop)
+	}
+	if nfds == 0 {
+		return t.resumeDefault(tid, seccompStop)
+	}
+	readPtr := uintptr(regs.Rsi)
+	writePtr := uintptr(regs.Rdx)
+	exceptPtr := uintptr(regs.R10)
+	timeoutPtr := uintptr(regs.R8)
+	if readPtr == 0 && writePtr == 0 && exceptPtr == 0 {
+		return t.resumeDefault(tid, seccompStop)
+	}
+	if nfds > 1<<20 {
+		return t.finishEmulated(tid, regs, -int64(syscall.EINVAL), seccompStop)
+	}
+	setSize := fdSetSizeBytes(nfds)
+	readIn, err := t.readSelectFDSet(tid, readPtr, setSize)
+	if err != nil {
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+	}
+	writeIn, err := t.readSelectFDSet(tid, writePtr, setSize)
+	if err != nil {
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+	}
+	exceptIn, err := t.readSelectFDSet(tid, exceptPtr, setSize)
+	if err != nil {
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+	}
+	type selectEntry struct {
+		fd         int
+		proxied    bool
+		wantRead   bool
+		wantWrite  bool
+		wantExcept bool
+		pollEvents int16
+	}
+	entries := make([]selectEntry, 0)
+	hasProxied := false
+	for fd := 0; fd < nfds; fd++ {
+		wantRead := fdSetIsSet(readIn, fd)
+		wantWrite := fdSetIsSet(writeIn, fd)
+		wantExcept := fdSetIsSet(exceptIn, fd)
+		if !wantRead && !wantWrite && !wantExcept {
+			continue
+		}
+		entry := selectEntry{
+			fd:         fd,
+			wantRead:   wantRead,
+			wantWrite:  wantWrite,
+			wantExcept: wantExcept,
+		}
+		if wantRead {
+			entry.pollEvents |= unix.POLLIN | unix.POLLHUP | unix.POLLERR
+		}
+		if wantWrite {
+			entry.pollEvents |= unix.POLLOUT | unix.POLLERR
+		}
+		if wantExcept {
+			entry.pollEvents |= unix.POLLPRI | unix.POLLERR
+		}
+		state := t.trackedSnapshot(tid, fd)
+		if state.Proxied != 0 && (state.Kind == uwgshared.KindTCPStream || state.Kind == uwgshared.KindUDPConnected || state.Kind == uwgshared.KindUDPListener || state.Kind == uwgshared.KindTCPListener) {
+			entry.proxied = true
+			hasProxied = true
+		}
+		entries = append(entries, entry)
+	}
+	if !hasProxied {
+		return t.resumeDefault(tid, seccompStop)
+	}
+	timeoutMillis, timeoutDuration, err := t.selectTimeout(tid, timeoutPtr, pselect)
+	if err != nil {
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+	}
+	localPoll := make([]unix.PollFd, 0, len(entries))
+	tempFDs := make([]int, 0, len(entries))
+	group := t.groupFor(tid)
+	for _, entry := range entries {
+		localFD := -1
+		if entry.proxied {
+			localFD, err = t.ensureLocalFD(procFD{pid: group, fd: entry.fd})
+		} else {
+			localFD, err = t.dupTraceeFD(group, entry.fd)
+			if err == nil {
+				tempFDs = append(tempFDs, localFD)
+			}
+		}
+		if err != nil {
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+		}
+		localPoll = append(localPoll, unix.PollFd{
+			Fd:     int32(localFD),
+			Events: entry.pollEvents,
+		})
+	}
+	defer func() {
+		for _, fd := range tempFDs {
+			_ = unix.Close(fd)
+		}
+	}()
+	start := time.Now()
+	if _, err := unix.Poll(localPoll, timeoutMillis); err != nil {
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+	}
+	readOut := make([]byte, setSize)
+	writeOut := make([]byte, setSize)
+	exceptOut := make([]byte, setSize)
+	ready := make(map[int]struct{}, len(entries))
+	for i, entry := range entries {
+		revents := localPoll[i].Revents
+		if entry.wantRead && revents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR) != 0 {
+			fdSetSet(readOut, entry.fd)
+			ready[entry.fd] = struct{}{}
+		}
+		if entry.wantWrite && revents&(unix.POLLOUT|unix.POLLERR) != 0 {
+			fdSetSet(writeOut, entry.fd)
+			ready[entry.fd] = struct{}{}
+		}
+		if entry.wantExcept && revents&(unix.POLLPRI|unix.POLLERR) != 0 {
+			fdSetSet(exceptOut, entry.fd)
+			ready[entry.fd] = struct{}{}
+		}
+	}
+	if err := t.writeSelectFDSet(tid, readPtr, readOut); err != nil {
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+	}
+	if err := t.writeSelectFDSet(tid, writePtr, writeOut); err != nil {
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+	}
+	if err := t.writeSelectFDSet(tid, exceptPtr, exceptOut); err != nil {
+		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+	}
+	if !pselect && timeoutPtr != 0 {
+		remaining := timeoutDuration - time.Since(start)
+		if remaining < 0 {
+			remaining = 0
+		}
+		if err := t.writeSelectTimeval(tid, timeoutPtr, remaining); err != nil {
+			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
+		}
+	}
+	return t.finishEmulated(tid, regs, int64(len(ready)), seccompStop)
+}
+
 func (t *tracer) pollTimeoutMillis(tid int, regs unix.PtraceRegs, ppoll bool) (int, error) {
 	if !ppoll {
 		return int(int32(regs.Rdx)), nil
@@ -1956,6 +2107,113 @@ func (t *tracer) pollTimeoutMillis(tid int, regs unix.PtraceRegs, ppoll bool) (i
 		return int(maxMillis), nil
 	}
 	return int(ms), nil
+}
+
+func fdSetSizeBytes(nfds int) int {
+	if nfds <= 0 {
+		return 0
+	}
+	return ((nfds + 63) / 64) * 8
+}
+
+func fdSetIsSet(buf []byte, fd int) bool {
+	if fd < 0 {
+		return false
+	}
+	byteIndex := fd / 8
+	if byteIndex >= len(buf) {
+		return false
+	}
+	return buf[byteIndex]&(1<<uint(fd%8)) != 0
+}
+
+func fdSetSet(buf []byte, fd int) {
+	if fd < 0 {
+		return
+	}
+	byteIndex := fd / 8
+	if byteIndex >= len(buf) {
+		return
+	}
+	buf[byteIndex] |= 1 << uint(fd%8)
+}
+
+func (t *tracer) readSelectFDSet(tid int, ptr uintptr, size int) ([]byte, error) {
+	if ptr == 0 || size == 0 {
+		return nil, nil
+	}
+	raw, err := t.readTraceeBytes(tid, ptr, size)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) < size {
+		return nil, syscall.EFAULT
+	}
+	return raw, nil
+}
+
+func (t *tracer) writeSelectFDSet(tid int, ptr uintptr, data []byte) error {
+	if ptr == 0 {
+		return nil
+	}
+	return t.writeTracee(tid, ptr, data)
+}
+
+func (t *tracer) selectTimeout(tid int, ptr uintptr, pselect bool) (int, time.Duration, error) {
+	if ptr == 0 {
+		return -1, 0, nil
+	}
+	raw, err := t.readTraceeBytes(tid, ptr, 16)
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(raw) < 16 {
+		return 0, 0, syscall.EFAULT
+	}
+	var sec, frac int64
+	if pselect {
+		sec = int64(binary.LittleEndian.Uint64(raw[:8]))
+		frac = int64(binary.LittleEndian.Uint64(raw[8:16]))
+		if sec < 0 || frac < 0 || frac >= int64(time.Second) {
+			return 0, 0, syscall.EINVAL
+		}
+	} else {
+		sec = int64(binary.LittleEndian.Uint64(raw[:8]))
+		frac = int64(binary.LittleEndian.Uint64(raw[8:16]))
+		if sec < 0 || frac < 0 || frac >= int64(time.Second/time.Microsecond) {
+			return 0, 0, syscall.EINVAL
+		}
+		frac *= int64(time.Microsecond)
+	}
+	const maxMillis = int64(^uint(0) >> 1)
+	const maxDuration = time.Duration(1<<63 - 1)
+	duration := time.Duration(sec)*time.Second + time.Duration(frac)
+	if duration < 0 {
+		return 0, 0, syscall.EINVAL
+	}
+	if duration > maxDuration {
+		return int(maxMillis), maxDuration, nil
+	}
+	millis := duration / time.Millisecond
+	if duration%time.Millisecond != 0 {
+		millis++
+	}
+	return int(millis), duration, nil
+}
+
+func (t *tracer) writeSelectTimeval(tid int, ptr uintptr, d time.Duration) error {
+	if ptr == 0 {
+		return nil
+	}
+	if d < 0 {
+		d = 0
+	}
+	sec := int64(d / time.Second)
+	usec := int64((d % time.Second) / time.Microsecond)
+	var raw [16]byte
+	binary.LittleEndian.PutUint64(raw[:8], uint64(sec))
+	binary.LittleEndian.PutUint64(raw[8:16], uint64(usec))
+	return t.writeTracee(tid, ptr, raw[:])
 }
 
 func (t *tracer) handleFcntl(tid int, regs unix.PtraceRegs, seccompStop bool) error {
@@ -3109,6 +3367,10 @@ func syscallName(nr int64) string {
 		return "getsockopt"
 	case unix.SYS_SETSOCKOPT:
 		return "setsockopt"
+	case unix.SYS_SELECT:
+		return "select"
+	case unix.SYS_PSELECT6:
+		return "pselect6"
 	case unix.SYS_POLL:
 		return "poll"
 	case unix.SYS_PPOLL:

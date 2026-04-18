@@ -74,11 +74,28 @@ func NewTURNTransport(name string, cfg TURNProxyConfig, wgPubKey [32]byte) (*TUR
 func (t *TURNTransport) Name() string               { return t.name }
 func (t *TURNTransport) IsConnectionOriented() bool { return false }
 
-// Dial is not used for TURN in client mode because TURN is always in
-// "listen mode" (it has an allocation).  Calling Dial returns an error; use
-// Listen instead.
-func (t *TURNTransport) Dial(_ context.Context, _ string) (Session, error) {
-	return nil, fmt.Errorf("turn transport %s: use Listen, not Dial", t.name)
+// Dial returns a lightweight write-capable session that sends packets through
+// the shared TURN allocation to the requested destination. Read traffic still
+// arrives through Listen/Accept because TURN is not connection-oriented.
+func (t *TURNTransport) Dial(ctx context.Context, target string) (Session, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.open {
+		if err := t.connectLocked(ctx); err != nil {
+			return nil, err
+		}
+	}
+	if t.relayConn == nil {
+		return nil, fmt.Errorf("turn transport %s: relay allocation is not open", t.name)
+	}
+	udpAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return nil, fmt.Errorf("turn transport %s: resolve target %q: %w", t.name, target, err)
+	}
+	return &turnOutboundSession{
+		relayConn: t.relayConn,
+		target:    udpAddr,
+	}, nil
 }
 
 // Listen allocates a TURN relay and returns a TURNListener that can both
@@ -422,6 +439,23 @@ func (s *turnSession) WritePacket(pkt []byte) error {
 
 func (s *turnSession) RemoteAddr() string { return s.from.String() }
 func (s *turnSession) Close() error       { return nil }
+
+type turnOutboundSession struct {
+	relayConn net.PacketConn
+	target    *net.UDPAddr
+}
+
+func (s *turnOutboundSession) ReadPacket() ([]byte, error) {
+	return nil, net.ErrClosed
+}
+
+func (s *turnOutboundSession) WritePacket(pkt []byte) error {
+	_, err := s.relayConn.WriteTo(pkt, s.target)
+	return err
+}
+
+func (s *turnOutboundSession) RemoteAddr() string { return s.target.String() }
+func (s *turnOutboundSession) Close() error       { return nil }
 
 // --- helpers ---------------------------------------------------------------
 

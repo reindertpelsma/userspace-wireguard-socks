@@ -394,12 +394,25 @@ func TestTunnelUDPAndSOCKSUDPAssociateBindAndAPIPing(t *testing.T) {
 		PersistentKeepalive: 1,
 	}}
 	clientCfg.Proxy.SOCKS5 = "127.0.0.1:0"
-	occupiedRelay, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	var occupiedRelay net.PacketConn
+	var occupiedRelayPort int
+	for i := 0; i < 64; i++ {
+		candidate, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := candidate.LocalAddr().(*net.UDPAddr).Port
+		if port <= 65515 {
+			occupiedRelay = candidate
+			occupiedRelayPort = port
+			break
+		}
+		candidate.Close()
+	}
+	if occupiedRelay == nil {
+		t.Fatal("failed to reserve UDP relay port with range headroom")
 	}
 	defer occupiedRelay.Close()
-	occupiedRelayPort := occupiedRelay.LocalAddr().(*net.UDPAddr).Port
 	clientCfg.Proxy.UDPAssociatePorts = fmt.Sprintf("%d-%d", occupiedRelayPort, occupiedRelayPort+20)
 	clientCfg.Inbound.UDPIdleTimeoutSeconds = 1
 	bind := true
