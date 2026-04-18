@@ -5,7 +5,7 @@ This TURN server is tuned for UDP relay use cases where relay ports, WireGuard f
 It is built on Pion TURN and adds:
 - fixed relay ports per user
 - username-as-port range mode
-- per-user dynamic port ranges
+- per-user dynamic port ranges, for outbound clients and for clients not needing a fixed port.
 - optional mapped/public relay addresses
 - internal relay-to-relay routing optimization
 - `outbound_only` users that may only receive replies after they send first
@@ -34,7 +34,9 @@ The server supports three allocation styles:
 2. Username-as-port range:
    the TURN username itself is the requested relay port inside a configured range.
 3. Per-user dynamic port range:
-   one username can allocate any free port inside its configured range.
+   one username gets any free port inside its configured range, this user can then also connect multiple times.
+   Unlike fixed user ports and the username-as-ports, this user can have multiple sessions.
+   This is useful for users that are Wireguard clients, or Wireguard servers that only need a temporary ephermal port.
 
 When one TURN client sends to the public `XOR-RELAYED-ADDRESS` of another live TURN client on the same server, the packet is routed internally inside the Go process instead of going out to the network. WireGuard guards still apply on both sides.
 

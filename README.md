@@ -34,9 +34,6 @@ For a complete local two-peer demo, start `examples/exit-server.yaml` and
   `uwgsocks` using `LD_PRELOAD`, seccomp-assisted ptrace, or ptrace fallback.
 - `uwgfdproxy`: local Unix-socket bridge used by the wrapper and by advanced
   raw socket API clients.
-- `uwgkm`: optional kernel WireGuard manager built by `uwgsocks-ui`; it is for
-  hosts where you do want a normal kernel WireGuard interface and have the
-  privileges to create one.
 - `turn/`: standalone open TURN relay for deterministic UDP relay ports. It can
   be used with `uwgsocks` TURN mode when peers need a relay-friendly UDP path.
 - `uwgsocks-ui/`: separate web UI repo embedded in this checkout for managing
