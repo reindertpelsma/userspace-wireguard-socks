@@ -225,7 +225,7 @@ WireGuard transport. Each entry names a transport that peers can use through
 `wireguard.peers[].transport`. The first transport is the default when a peer
 does not name one explicitly.
 
-`base` supports `udp`, `tcp`, `tls`, `dtls`, `http`, `https`, and `quic`.
+`base` supports `udp`, `tcp`, `tls`, `dtls`, `http`, `https`, `turn`, and `quic`.
 `listen: true` means this transport accepts incoming WireGuard sessions; the
 listener port defaults to `wireguard.listen_port` unless `listen_port` overrides
 it per transport.
@@ -242,29 +242,50 @@ Shared nested blocks:
   Listen mode always accepts both WebSocket and `UoTLV/1` on the same path.
   `host_header` overrides the HTTP Host header. `sni_hostname` is deprecated in
   favor of `tls.server_sni`.
-- `proxy.type`: `none`, `turn`, `socks5`, or `http`.
+- `proxy.type`: `none`, `socks5`, `http`, or `https`.
 
 Proxy-specific nested blocks:
 
 ```yaml
+transports:
+  - name: turn
+    base: turn
+    listen: true
+    turn:
+      server: turn.example.com:3478
+      username: wg
+      password: secret
+      realm: example
+      protocol: tls
+      no_create_permission: false
+      include_wg_public_key: false
+      permissions: [198.51.100.10/32]
+      tls:
+        cert_file: ""
+        key_file: ""
+        verify_peer: false
+        reload_interval: ""
+        ca_file: ""
+        server_sni: turn.example.com
+```
+
+Notes:
+
+- `turn.protocol` is `udp`, `tcp`, `tls`, or `dtls`.
+- `turn.no_create_permission: true` is for open TURN relays.
+- `turn.include_wg_public_key` appends an encrypted WireGuard public key
+  to the TURN username for relays that understand that metadata.
+- HTTP CONNECT proxies are stream-oriented, so UDP-style base transports become
+  connection-oriented when carried through them.
+- `ipv6_translate` and `ipv6_prefix` enable NAT64-style translation for IPv4
+  peer endpoints when the outer network is IPv6-only.
+
+Proxy config:
+
+
+```yaml
 proxy:
-  type: turn
-  turn:
-    server: turn.example.com:3478
-    username: wg
-    password: secret
-    realm: example
-    protocol: tls
-    no_create_permission: false
-    include_wg_public_key: false
-    permissions: [198.51.100.10/32]
-    tls:
-      cert_file: ""
-      key_file: ""
-      verify_peer: false
-      reload_interval: ""
-      ca_file: ""
-      server_sni: turn.example.com
+  type: socks5
   socks5:
     server: 127.0.0.1:1080
     username: ""
@@ -281,17 +302,6 @@ proxy:
       ca_file: ""
       server_sni: proxy.example.com
 ```
-
-Notes:
-
-- `proxy.turn.protocol` is `udp`, `tcp`, `tls`, or `dtls`.
-- `proxy.turn.no_create_permission: true` is for open TURN relays.
-- `proxy.turn.include_wg_public_key` appends an encrypted WireGuard public key
-  to the TURN username for relays that understand that metadata.
-- HTTP CONNECT proxies are stream-oriented, so UDP-style base transports become
-  connection-oriented when carried through them.
-- `ipv6_translate` and `ipv6_prefix` enable NAT64-style translation for IPv4
-  peer endpoints when the outer network is IPv6-only.
 
 ## Forwards
 

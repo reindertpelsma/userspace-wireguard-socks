@@ -129,16 +129,12 @@ func buildDialer(cfg Config) (ProxyDialer, error) {
 	case "socks5":
 		pc := cfg.Proxy.SOCKS5
 		return NewSOCKS5Dialer(pc.Server, pc.Username, pc.Password)
-
 	case "http":
 		pc := cfg.Proxy.HTTP
-		scheme := "http"
-		// If the transport itself is TLS/HTTPS we use HTTPS proxy by default.
-		if cfg.Base == "tls" || cfg.Base == "https" {
-			scheme = "https"
-		}
-		return NewHTTPConnectDialer(pc.Server, scheme, pc.Username, pc.Password, pc.TLS)
-
+		return NewHTTPConnectDialer(pc.Server, "http", pc.Username, pc.Password, pc.TLS)
+	case "https":
+		pc := cfg.Proxy.HTTP
+		return NewHTTPConnectDialer(pc.Server, "https", pc.Username, pc.Password, pc.TLS)
 	}
 	return direct, nil
 }

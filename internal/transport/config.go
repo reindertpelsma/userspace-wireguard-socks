@@ -98,7 +98,7 @@ type WebSocketConfig struct {
 
 // ProxyConfig selects an optional proxy layer and its settings.
 type ProxyConfig struct {
-	// Type is: none | socks5 | http. "turn" is still accepted as a legacy
+	// Type is: none | socks5 | http | https. "turn" is still accepted as a legacy
 	// compatibility alias and is normalized into base: turn.
 	Type string `yaml:"type,omitempty" json:"type,omitempty"`
 
