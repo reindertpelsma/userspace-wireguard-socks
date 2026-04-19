@@ -572,10 +572,10 @@ Runtime API endpoints:
 - `PUT/POST /v1/wireguard/config`
 
 `/v1/wireguard/config` accepts a wg-quick-style config body or JSON
-`{"config":"..."}`. It never executes `PostUp`/`PostDown`. It replaces the
-live WireGuard private key, listen port when supplied, and peer set, while
-rejecting `Address`, `DNS`, and `MTU` changes that require rebuilding the
-userspace netstack.
+`{"config":"..."}`. It never executes or retains `PreUp`, `PostUp`,
+`PreDown`, or `PostDown`. It replaces the live WireGuard private key, listen
+port when supplied, and peer set, while rejecting `Address`, `DNS`, and `MTU`
+changes that require rebuilding the userspace netstack.
 
 `/v1/socket` is the HTTP-upgraded raw socket protocol documented in
 [`docs/socket-protocol.md`](socket-protocol.md). Connected TCP/UDP sockets do
@@ -612,10 +612,14 @@ log:
   verbose: false
 ```
 
-`scripts.allow` gates all shell-hook execution, including `wireguard.post_up`,
-`wireguard.post_down`, `tun.up`, and `tun.down`. Leave it false for untrusted
-config files. `log.verbose` switches WireGuard device logging from error-only to
-verbose mode and also enables additional runtime warnings from higher layers.
+`scripts.allow` gates all shell-hook execution, including `wireguard.pre_up`,
+`wireguard.post_up`, `wireguard.pre_down`, `wireguard.post_down`, `tun.up`,
+and `tun.down`. It defaults off. Leave it false for untrusted config files,
+including provider-supplied or internet-downloaded `wg-quick` files.
+Runtime API updates through `/v1/wireguard/config` always strip those hooks,
+even when scripts are enabled. `log.verbose` switches WireGuard device logging
+from error-only to verbose mode and also enables additional runtime warnings
+from higher layers.
 
 API client commands:
 
@@ -650,5 +654,6 @@ client command. `--api` accepts `http://host:port`, `host:port`, or
 --check
 ```
 
-`--allow-scripts` enables `PostUp`, `PostDown`, `tun.up`, and `tun.down`
-commands. Leave it off for untrusted config files.
+`--allow-scripts` enables `PreUp`, `PostUp`, `PreDown`, `PostDown`, `tun.up`,
+and `tun.down` commands. Leave it off for untrusted config files, especially
+`wg-quick` configs that were downloaded or supplied by a remote party.

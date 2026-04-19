@@ -144,7 +144,7 @@ static void tracked_wrunlock(void);
 static struct tracked_slot *tracked_slots(void);
 static struct tracked_fd tracked_snapshot(int fd);
 static struct tracked_fd tracked_peek(int fd);
-static void tracked_store(int fd, const struct tracked_fd *state);
+static int tracked_store(int fd, const struct tracked_fd *state);
 static void tracked_clear_fd(int fd);
 static void tracked_clear_process(int32_t pid);
 static void tracked_map_if_needed(void);
@@ -1165,16 +1165,17 @@ static struct tracked_fd tracked_peek(int fd) {
   return out;
 }
 
-static void tracked_store(int fd, const struct tracked_fd *state) {
+static int tracked_store(int fd, const struct tracked_fd *state) {
   size_t idx = 0;
   int32_t pid = current_pid_key();
   if (!fd_ok(fd) || !state)
-    return;
+    return -1;
   if (tracked_wrlock() != 0)
-    return;
+    return -1;
   if (tracked_find_slot_locked(pid, fd, 1, &idx) < 0) {
     tracked_wrunlock();
-    return;
+    errno = EMFILE;
+    return -1;
   }
   tracked_test_delay();
   if (tracked_fd_is_zero(state)) {
@@ -1187,6 +1188,7 @@ static void tracked_store(int fd, const struct tracked_fd *state) {
     tracked_slots()[idx].state = *state;
   }
   tracked_wrunlock();
+  return 0;
 }
 
 static void tracked_clear_fd(int fd) {
@@ -1335,15 +1337,15 @@ static int sockaddr_to_ip_port(const struct sockaddr *addr, char *ip,
   return -1;
 }
 
-static void copy_tracking(int dst, int src) {
+static int copy_tracking(int dst, int src) {
   if (!fd_ok(dst))
-    return;
+    return 0;
   if (fd_ok(src)) {
     struct tracked_fd state = tracked_snapshot(src);
-    tracked_store(dst, &state);
-    return;
+    return tracked_store(dst, &state);
   }
   tracked_clear_fd(dst);
+  return 0;
 }
 
 static const char *manager_path(void) {
@@ -1500,7 +1502,12 @@ int dns_tcp_connect(void) {
     state.domain = AF_UNIX;
     state.type = SOCK_STREAM;
     state.protocol = 0;
-    tracked_store(fd, &state);
+    if (tracked_store(fd, &state) != 0) {
+      int e = errno ? errno : EMFILE;
+      real_close_call(fd);
+      errno = e;
+      return -1;
+    }
   }
   return fd;
 }
@@ -1596,7 +1603,12 @@ static int force_dns_stream_fd(int fd) {
     state.proxied = 1;
     state.kind = KIND_TCP_STREAM;
     state.hot_ready = 1;
-    tracked_store(fd, &state);
+    if (tracked_store(fd, &state) != 0) {
+      int e = errno ? errno : EMFILE;
+      real_close_call(fd);
+      errno = e;
+      return -1;
+    }
   }
   return 0;
 }
@@ -1619,7 +1631,12 @@ static int force_dns_dgram_fd(int fd) {
     state.proxied = 1;
     state.kind = KIND_UDP_CONNECTED;
     state.hot_ready = 1;
-    tracked_store(fd, &state);
+    if (tracked_store(fd, &state) != 0) {
+      int e = errno ? errno : EMFILE;
+      real_close_call(fd);
+      errno = e;
+      return -1;
+    }
   }
   return 0;
 }
@@ -1671,7 +1688,12 @@ static int replace_fd(int fd, int manager_fd, int kind) {
     state.hot_ready = 1;
     state.saved_fl = fl;
     state.saved_fdfl = fdfl;
-    tracked_store(fd, &state);
+    if (tracked_store(fd, &state) != 0) {
+      int e = errno ? errno : EMFILE;
+      real_close_call(fd);
+      errno = e;
+      return -1;
+    }
   }
   return 0;
 }
@@ -2078,7 +2100,12 @@ static int managed_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
     state.remote_family = AF_INET;
     state.remote_port = (uint16_t)port;
     snprintf(state.remote_ip, sizeof(state.remote_ip), "%s", ip);
-    tracked_store(accepted, &state);
+    if (tracked_store(accepted, &state) != 0) {
+      int e = errno ? errno : EMFILE;
+      real_close_call(accepted);
+      errno = e;
+      return -1;
+    }
   }
   return accepted;
 }
@@ -2103,7 +2130,12 @@ int socket(int domain, int type, int protocol) {
       state.protocol = protocol;
       state.saved_fl = real_fcntl_fn ? real_fcntl_fn(fd, F_GETFL) : 0;
       state.saved_fdfl = real_fcntl_fn ? real_fcntl_fn(fd, F_GETFD) : 0;
-      tracked_store(fd, &state);
+      if (tracked_store(fd, &state) != 0) {
+        int e = errno ? errno : EMFILE;
+        real_close_call(fd);
+        errno = e;
+        return -1;
+      }
     }
   }
   return fd;
@@ -2772,8 +2804,12 @@ int dup(int oldfd) {
   if (cold)
     return (int)cold_syscall(SYS_dup, oldfd, 0, 0, 0, 0, 0);
   int fd = real_dup_call(oldfd);
-  if (fd >= 0)
-    copy_tracking(fd, oldfd);
+  if (fd >= 0 && copy_tracking(fd, oldfd) != 0) {
+    int e = errno ? errno : EMFILE;
+    real_close_call(fd);
+    errno = e;
+    return -1;
+  }
   return fd;
 }
 
@@ -2792,8 +2828,12 @@ int dup2(int oldfd, int newfd) {
     return (int)cold_syscall(SYS_dup3, oldfd, newfd, 0, 0, 0, 0);
 #endif
   int fd = real_dup2_call(oldfd, newfd);
-  if (fd >= 0)
-    copy_tracking(newfd, oldfd);
+  if (fd >= 0 && copy_tracking(newfd, oldfd) != 0) {
+    int e = errno ? errno : EMFILE;
+    real_close_call(newfd);
+    errno = e;
+    return -1;
+  }
   return fd;
 }
 
@@ -2812,8 +2852,12 @@ int dup3(int oldfd, int newfd, int flags) {
     return -1;
   }
   int fd = real_dup3_call(oldfd, newfd, flags);
-  if (fd >= 0)
-    copy_tracking(newfd, oldfd);
+  if (fd >= 0 && copy_tracking(newfd, oldfd) != 0) {
+    int e = errno ? errno : EMFILE;
+    real_close_call(newfd);
+    errno = e;
+    return -1;
+  }
   return fd;
 }
 

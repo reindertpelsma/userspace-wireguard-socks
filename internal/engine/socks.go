@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,12 @@ var (
 	errProxyFallbackDisabled = errors.New("fallback_direct is false")
 	errVirtualSubnetUnrouted = errors.New("destination is inside a WireGuard Address subnet but no peer AllowedIPs route it")
 	errAddressFiltered       = errors.New("destination address is blocked by tunnel address filters")
+	errSOCKSUDPRelayAtLimit  = errors.New("too many SOCKS UDP relay sessions")
+)
+
+var (
+	socksRequestDeadline       = 30 * time.Second
+	maxSOCKSUDPSessionsPerConn = 4096
 )
 
 type socksAddr struct {
@@ -84,9 +91,10 @@ func (e *Engine) serveSOCKSConn(c net.Conn) {
 	if err := e.socksHandshake(c); err != nil {
 		return
 	}
-	_ = c.SetDeadline(time.Time{})
+	_ = c.SetDeadline(time.Now().Add(socksRequestDeadline))
 
 	cmd, dst, err := readSOCKSRequest(c)
+	_ = c.SetDeadline(time.Time{})
 	if err != nil {
 		_ = writeSOCKSReply(c, socksRepGeneralFailure, netip.AddrPort{})
 		return
@@ -261,7 +269,7 @@ func (e *Engine) listenSOCKSUDPAssociatePacketConn(control net.Conn) (net.Packet
 				},
 			}, nil
 		}
-		if errors.Is(err, syscall.EADDRINUSE) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) {
+		if isRetryableUDPBindErr(err) {
 			lastErr = err
 			continue
 		}
@@ -271,6 +279,22 @@ func (e *Engine) listenSOCKSUDPAssociatePacketConn(control net.Conn) (net.Packet
 		lastErr = fmt.Errorf("no free UDP relay port found")
 	}
 	return nil, fmt.Errorf("socks5 udp associate ports %q: %w", e.cfg.Proxy.UDPAssociatePorts, lastErr)
+}
+
+func isRetryableUDPBindErr(err error) bool {
+	if errors.Is(err, syscall.EADDRINUSE) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) {
+		return true
+	}
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	switch errno {
+	case 10048, 10013:
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *Engine) socksUDPRelayPortKnownOccupied(host string, port int) bool {
@@ -386,6 +410,9 @@ func (e *Engine) serveSOCKSUDPRelay(pc net.PacketConn, src netip.AddrPort, done 
 	)
 	if c, ok := pc.(connectablePacketConn); ok {
 		relayConn, canConnect = c, true
+		if runtime.GOOS == "windows" {
+			canConnect = false
+		}
 	}
 	sessions := make(map[string]*socksUDPSession)
 	timeout := e.udpIdleTimeout()
@@ -483,6 +510,10 @@ func (e *Engine) socksUDPSession(ctx context.Context, sessions map[string]*socks
 			touch(sess)
 			mu.Unlock()
 			return sess.conn, target, key, nil
+		}
+		if maxSOCKSUDPSessionsPerConn > 0 && len(sessions) >= maxSOCKSUDPSessionsPerConn {
+			mu.Unlock()
+			return nil, netip.AddrPort{}, "", errSOCKSUDPRelayAtLimit
 		}
 		mu.Unlock()
 		conn, err := e.dialProxyCandidate(ctx, "udp", target, src)

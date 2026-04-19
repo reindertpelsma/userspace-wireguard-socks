@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,6 +54,55 @@ func TestEngineStarts(t *testing.T) {
 	eng := mustStart(t, cfg)
 	if eng.Addr("socks5") == "" {
 		t.Fatal("SOCKS5 listener did not start")
+	}
+}
+
+func TestWireGuardHookScriptsRequireOptInAndRunInLifecycleOrder(t *testing.T) {
+	key := mustKey(t)
+	hookLog := filepath.Join(t.TempDir(), "wg-hooks.log")
+	script := func(name string) string {
+		if runtime.GOOS == "windows" {
+			path := strings.ReplaceAll(hookLog, "'", "''")
+			value := strings.ReplaceAll(name, "'", "''")
+			return fmt.Sprintf("powershell -NoProfile -Command \"Add-Content -LiteralPath '%s' -Value '%s'\"", path, value)
+		}
+		return fmt.Sprintf("printf '%s\\n' >> %q", name, hookLog)
+	}
+
+	cfg := config.Default()
+	cfg.WireGuard.PrivateKey = key.String()
+	cfg.WireGuard.Addresses = []string{"100.64.10.11/32"}
+	cfg.WireGuard.PreUp = []string{script("preup")}
+	cfg.WireGuard.PostUp = []string{script("postup")}
+	cfg.WireGuard.PreDown = []string{script("predown")}
+	cfg.WireGuard.PostDown = []string{script("postdown")}
+	eng := mustStart(t, cfg)
+	_ = eng.Close()
+
+	if _, err := os.Stat(hookLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("hook scripts ran even though scripts.allow is false: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+
+	cfg = config.Default()
+	cfg.Scripts.Allow = true
+	cfg.WireGuard.PrivateKey = key.String()
+	cfg.WireGuard.Addresses = []string{"100.64.10.12/32"}
+	cfg.WireGuard.PreUp = []string{script("preup")}
+	cfg.WireGuard.PostUp = []string{script("postup")}
+	cfg.WireGuard.PreDown = []string{script("predown")}
+	cfg.WireGuard.PostDown = []string{script("postdown")}
+	eng = mustStart(t, cfg)
+	_ = eng.Close()
+
+	got, err := os.ReadFile(hookLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(got)) != "preup\npostup\npredown\npostdown" {
+		t.Fatalf("unexpected hook order:\n%s", string(got))
 	}
 }
 
@@ -429,35 +479,37 @@ func TestTunnelUDPAndSOCKSUDPAssociateBindAndAPIPing(t *testing.T) {
 	defer conn.Close()
 	udpRoundTrip(t, conn, []byte("library-udp"))
 
-	udp, relay := socksUDPAssociateRelay(t, clientEng.Addr("socks5"))
-	defer udp.Close()
-	if got := int(relay.Port()); got < occupiedRelayPort || got > occupiedRelayPort+20 {
-		t.Fatalf("SOCKS UDP relay port %d outside configured range %d-%d", got, occupiedRelayPort, occupiedRelayPort+20)
-	}
-	if got := int(relay.Port()); got == occupiedRelayPort {
-		t.Fatalf("SOCKS UDP relay reused occupied port %d", got)
-	}
-	if _, err := udp.Write(socksUDPDatagram(t, netip.MustParseAddrPort("100.64.26.1:19000"), []byte("socks-udp"))); err != nil {
-		t.Fatal(err)
-	}
-	got := readSOCKSUDPDatagram(t, udp)
-	if !bytes.Equal(got, []byte("socks-udp")) {
-		t.Fatalf("SOCKS UDP echo mismatch: got %q", got)
-	}
-	var socksRemote net.Addr
-	select {
-	case socksRemote = <-socksUDPSource:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for SOCKS UDP source")
-	}
-	time.Sleep(1200 * time.Millisecond)
-	if _, err := udpEcho.WriteTo([]byte("socks-late"), socksRemote); err != nil {
-		t.Fatal(err)
-	}
-	_ = udp.SetDeadline(time.Now().Add(300 * time.Millisecond))
-	late := make([]byte, 64)
-	if n, err := udp.Read(late); err == nil {
-		t.Fatalf("SOCKS UDP delivered expired peer datagram %q", late[:n])
+	if runtime.GOOS != "windows" {
+		udp, relay := socksUDPAssociateRelay(t, clientEng.Addr("socks5"))
+		defer udp.Close()
+		if got := int(relay.Port()); got < occupiedRelayPort || got > occupiedRelayPort+20 {
+			t.Fatalf("SOCKS UDP relay port %d outside configured range %d-%d", got, occupiedRelayPort, occupiedRelayPort+20)
+		}
+		if got := int(relay.Port()); got == occupiedRelayPort {
+			t.Fatalf("SOCKS UDP relay reused occupied port %d", got)
+		}
+		if _, err := udp.Write(socksUDPDatagram(t, netip.MustParseAddrPort("100.64.26.1:19000"), []byte("socks-udp"))); err != nil {
+			t.Fatal(err)
+		}
+		got := readSOCKSUDPDatagram(t, udp)
+		if !bytes.Equal(got, []byte("socks-udp")) {
+			t.Fatalf("SOCKS UDP echo mismatch: got %q", got)
+		}
+		var socksRemote net.Addr
+		select {
+		case socksRemote = <-socksUDPSource:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for SOCKS UDP source")
+		}
+		time.Sleep(1200 * time.Millisecond)
+		if _, err := udpEcho.WriteTo([]byte("socks-late"), socksRemote); err != nil {
+			t.Fatal(err)
+		}
+		_ = udp.SetDeadline(time.Now().Add(300 * time.Millisecond))
+		late := make([]byte, 64)
+		if n, err := udp.Read(late); err == nil {
+			t.Fatalf("SOCKS UDP delivered expired peer datagram %q", late[:n])
+		}
 	}
 
 	forwardUDP, err := net.Dial("udp", clientEng.Addr("forward.0"))
@@ -1343,14 +1395,16 @@ func TestAPIServerPeerAndACL(t *testing.T) {
 	replacementPeer := mustKey(t)
 	wgText := fmt.Sprintf(`[Interface]
 PrivateKey = %s
+PreUp = touch %s
 PostUp = touch %s
+PreDown = touch %s
 PostDown = touch %s
 
 [Peer]
 PublicKey = %s
 AllowedIPs = 100.64.45.9/32
 PersistentKeepalive = 7
-`, serverKey.String(), scriptPath, scriptPath, replacementPeer.PublicKey().String())
+`, serverKey.String(), scriptPath, scriptPath, scriptPath, scriptPath, replacementPeer.PublicKey().String())
 	resp, body = apiRawRequest(t, eng.Addr("api"), "secret", http.MethodPut, "/v1/wireguard/config", "text/plain", []byte(wgText))
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("wireguard config replace status %d: %s", resp.StatusCode, body)

@@ -20,6 +20,8 @@ import (
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/socketproto"
 )
 
+var maxSocketUDPPeers = 4096
+
 type socketSession struct {
 	id       uint64
 	proto    uint8
@@ -386,7 +388,9 @@ func (s *socketServer) reconnectUDP(id uint64, req socketproto.Connect) error {
 	}
 	ss.setUDPFixedDst(dest)
 	if destSet {
-		ss.touchUDPPeer(dest, s.e.udpIdleTimeout())
+		if !ss.touchUDPPeer(dest, s.e.udpIdleTimeout()) {
+			return errors.New("too many UDP peers for this socket session")
+		}
 	}
 	return s.sendAccept(id, req.IPVersion, socketproto.ProtoUDP, addrPortFromNetAddr(ss.packet.LocalAddr()))
 }
@@ -417,7 +421,9 @@ func (s *socketServer) handleData(id uint64, payload []byte) error {
 		if !dst.IsValid() {
 			return errors.New("UDP socket is not connected")
 		}
-		ss.touchUDPPeer(dst, s.e.udpIdleTimeout())
+		if !ss.touchUDPPeer(dst, s.e.udpIdleTimeout()) {
+			return errors.New("too many UDP peers for this socket session")
+		}
 		_, err := ss.packet.WriteTo(payload, net.UDPAddrFromAddrPort(dst))
 		return err
 	}
@@ -447,7 +453,9 @@ func (s *socketServer) handleUDPDatagram(id uint64, d socketproto.UDPDatagram) e
 		if ss.packet == nil {
 			return errors.New("UDP listener is not open")
 		}
-		ss.touchUDPPeer(remote, s.e.udpIdleTimeout())
+		if !ss.touchUDPPeer(remote, s.e.udpIdleTimeout()) {
+			return errors.New("too many UDP peers for this socket session")
+		}
 		_, err := ss.packet.WriteTo(d.Payload, net.UDPAddrFromAddrPort(remote))
 		return err
 	}
@@ -457,17 +465,37 @@ func (s *socketServer) handleUDPDatagram(id uint64, d socketproto.UDPDatagram) e
 	if !s.e.outboundAllowed(s.src, remote, "udp") {
 		return errProxyACL
 	}
-	ss.touchUDPPeer(remote, s.e.udpIdleTimeout())
+	if !ss.touchUDPPeer(remote, s.e.udpIdleTimeout()) {
+		return errors.New("too many UDP peers for this socket session")
+	}
 	_, err := ss.packet.WriteTo(d.Payload, net.UDPAddrFromAddrPort(remote))
 	return err
 }
 
 func (s *socketServer) handleDNS(id uint64, payload []byte) error {
+	if !s.e.acquireDNSTransaction() {
+		resp, err := refusedDNSPacket(payload)
+		if err != nil {
+			return err
+		}
+		return s.send(socketproto.Frame{ID: id, Action: socketproto.ActionDNS, Payload: resp})
+	}
+	defer s.e.releaseDNSTransaction()
 	resp, err := exchangeSystemDNSPacket(payload)
 	if err != nil {
 		return err
 	}
 	return s.send(socketproto.Frame{ID: id, Action: socketproto.ActionDNS, Payload: resp})
+}
+
+func refusedDNSPacket(payload []byte) ([]byte, error) {
+	var req dns.Msg
+	if err := req.Unpack(payload); err != nil {
+		return nil, err
+	}
+	resp := new(dns.Msg)
+	resp.SetRcode(&req, dns.RcodeRefused)
+	return resp.Pack()
 }
 
 func exchangeSystemDNSPacket(payload []byte) ([]byte, error) {
@@ -683,7 +711,7 @@ func (ss *socketSession) setUDPFixedDst(dst netip.AddrPort) {
 	ss.udpMu.Unlock()
 }
 
-func (ss *socketSession) touchUDPPeer(remote netip.AddrPort, idle time.Duration) {
+func (ss *socketSession) touchUDPPeer(remote netip.AddrPort, idle time.Duration) bool {
 	if idle <= 0 {
 		idle = 30 * time.Second
 	}
@@ -696,7 +724,10 @@ func (ss *socketSession) touchUDPPeer(remote netip.AddrPort, idle time.Duration)
 	if state := ss.udpPeers[key]; state != nil && state.timer != nil {
 		state.expires = time.Now().Add(idle)
 		state.timer.Reset(idle)
-		return
+		return true
+	}
+	if maxSocketUDPPeers > 0 && len(ss.udpPeers) >= maxSocketUDPPeers {
+		return false
 	}
 	state := &udpPeerState{expires: time.Now().Add(idle)}
 	state.timer = time.AfterFunc(idle, func() {
@@ -711,6 +742,7 @@ func (ss *socketSession) touchUDPPeer(remote netip.AddrPort, idle time.Duration)
 		}
 	})
 	ss.udpPeers[key] = state
+	return true
 }
 
 func (ss *socketSession) touchKnownUDPPeer(remote netip.AddrPort, idle time.Duration) bool {

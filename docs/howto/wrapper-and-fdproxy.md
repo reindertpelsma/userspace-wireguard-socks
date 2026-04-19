@@ -51,6 +51,13 @@ application
 Prefer SOCKS or HTTP for applications that already support them. Use the
 wrapper only when the application cannot be configured that way.
 
+`uwgwrapper` is a compatibility layer, not an application sandbox. A process
+running under the wrapper still has the normal privileges of its Unix user and
+can intentionally choose direct networking or inspect its own address space.
+The preload shared-state and passthrough secret are there to coordinate the hot
+path with ptrace/seccomp, not to prevent a malicious local application from
+escaping the tunnel.
+
 ## Current Capabilities
 
 - TCP and UDP sockets

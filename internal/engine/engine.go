@@ -21,6 +21,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -290,19 +291,22 @@ func (e *Engine) Start() error {
 	if err := e.dev.IpcSet(uapi); err != nil {
 		return fmt.Errorf("wireguard config: %w", err)
 	}
+	if e.cfg.Scripts.Allow {
+		if (e.cfg.WireGuard.ConfigFile != "" || e.cfg.WireGuard.Config != "") &&
+			(len(e.cfg.WireGuard.PreUp) > 0 || len(e.cfg.WireGuard.PostUp) > 0 ||
+				len(e.cfg.WireGuard.PreDown) > 0 || len(e.cfg.WireGuard.PostDown) > 0) {
+			e.log.Printf("warning: scripts.allow is enabled and WireGuard hook scripts came from wg-quick input; only use this with trusted local configs")
+		}
+		for _, cmd := range e.cfg.WireGuard.PreUp {
+			if err := runShell(cmd); err != nil {
+				return fmt.Errorf("PreUp %q: %w", cmd, err)
+			}
+		}
+	}
 	if err := e.dev.Up(); err != nil {
 		return fmt.Errorf("wireguard up: %w", err)
 	}
 	go e.watchStaticEndpointFallback()
-	if e.cfg.Scripts.Allow {
-		for _, cmd := range e.cfg.WireGuard.PostUp {
-			if err := runShell(cmd); err != nil {
-				return fmt.Errorf("PostUp %q: %w", cmd, err)
-			}
-		}
-	} else if len(e.cfg.WireGuard.PostUp) > 0 || len(e.cfg.WireGuard.PostDown) > 0 {
-		e.log.Printf("warning: PostUp/PostDown are present but scripts.allow is false; commands were not executed")
-	}
 
 	if err := e.startProxies(); err != nil {
 		return err
@@ -318,6 +322,16 @@ func (e *Engine) Start() error {
 	}
 	if err := e.startAPIServer(); err != nil {
 		return err
+	}
+	if e.cfg.Scripts.Allow {
+		for _, cmd := range e.cfg.WireGuard.PostUp {
+			if err := runShell(cmd); err != nil {
+				return fmt.Errorf("PostUp %q: %w", cmd, err)
+			}
+		}
+	} else if len(e.cfg.WireGuard.PreUp) > 0 || len(e.cfg.WireGuard.PostUp) > 0 ||
+		len(e.cfg.WireGuard.PreDown) > 0 || len(e.cfg.WireGuard.PostDown) > 0 {
+		e.log.Printf("warning: WireGuard hook scripts are present but scripts.allow is false; commands were not executed")
 	}
 	return nil
 }
@@ -375,6 +389,13 @@ func (e *Engine) Close() error {
 	default:
 		close(e.closed)
 	}
+	if e.cfg.Scripts.Allow {
+		for _, cmd := range e.cfg.WireGuard.PreDown {
+			if err := runShell(cmd); err != nil {
+				e.log.Printf("PreDown %q failed: %v", cmd, err)
+			}
+		}
+	}
 	e.listenersMu.Lock()
 	for _, l := range e.listeners {
 		_ = l.Close()
@@ -389,11 +410,6 @@ func (e *Engine) Close() error {
 				e.log.Printf("tun down %q failed: %v", cmd, err)
 			}
 		}
-		for _, cmd := range e.cfg.WireGuard.PostDown {
-			if err := runShell(cmd); err != nil {
-				e.log.Printf("PostDown %q failed: %v", cmd, err)
-			}
-		}
 	}
 	if e.hostTun != nil {
 		_ = e.hostTun.Close()
@@ -405,6 +421,13 @@ func (e *Engine) Close() error {
 		e.dev.Close()
 	} else if e.tun != nil {
 		_ = e.tun.Close()
+	}
+	if e.cfg.Scripts.Allow {
+		for _, cmd := range e.cfg.WireGuard.PostDown {
+			if err := runShell(cmd); err != nil {
+				e.log.Printf("PostDown %q failed: %v", cmd, err)
+			}
+		}
 	}
 	return nil
 }
@@ -2578,7 +2601,13 @@ func isClosedErr(err error) bool {
 }
 
 func runShell(command string) error {
-	cmd := exec.Command("/bin/sh", "-c", command)
+	shell := "/bin/sh"
+	args := []string{"-c", command}
+	if runtime.GOOS == "windows" {
+		shell = "cmd.exe"
+		args = []string{"/C", command}
+	}
+	cmd := exec.Command(shell, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))

@@ -48,11 +48,15 @@ PersistentKeepalive = 25
 
 Supported fields:
 
-- `[Interface]`: `PrivateKey`, `ListenPort`, `Address`, `DNS`, `MTU`, `PostUp`, `PostDown`
+- `[Interface]`: `PrivateKey`, `ListenPort`, `Address`, `DNS`, `MTU`, `PreUp`, `PostUp`, `PreDown`, `PostDown`
 - `[Peer]`: `PublicKey`, `PresharedKey`, `Endpoint`, `AllowedIPs`, `PersistentKeepalive`
 
 Accepted but ignored because this runtime never changes the host routing table:
-`PreUp`, `PreDown`, `Table`, `SaveConfig`.
+`Table`, `SaveConfig`.
+
+All four hook lists are parsed but ignored unless `scripts.allow: true` or
+`--allow-scripts` is set. Runtime API replacement via `/v1/wireguard/config`
+always strips them, even when scripts are enabled.
 
 To restrict server-mode listening to specific local IPs:
 

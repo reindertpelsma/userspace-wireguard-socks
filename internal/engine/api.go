@@ -568,7 +568,7 @@ func (e *Engine) RemovePeer(publicKey string) error {
 }
 
 // SetWireGuardConfigText applies a wg-quick-style WireGuard device config at
-// runtime without executing PostUp/PostDown. It replaces the live WireGuard
+// runtime without executing or retaining PreUp/PostUp/PreDown/PostDown. It replaces the live WireGuard
 // private key/listen port/peer set, while rejecting Address/DNS/MTU changes
 // because those require rebuilding the userspace netstack.
 func (e *Engine) SetWireGuardConfigText(text string) error {
@@ -594,7 +594,9 @@ func (e *Engine) SetWireGuardConfig(wg config.WireGuard) error {
 		next.ListenPort = wg.ListenPort
 	}
 	next.Peers = append([]config.Peer(nil), wg.Peers...)
+	next.PreUp = nil
 	next.PostUp = nil
+	next.PreDown = nil
 	next.PostDown = nil
 
 	if err := validateWireGuardConfig(next); err != nil {

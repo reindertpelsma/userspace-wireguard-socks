@@ -28,8 +28,8 @@ MTU = 1280
 ListenPort = 51820
 PostUp = echo up
 PostDown = echo down
-PreUp = ignored
-PreDown = ignored
+PreUp = echo pre-up
+PreDown = echo pre-down
 Table = off
 SaveConfig = false
 
@@ -52,8 +52,11 @@ PersistentKeepalive = 25
 	if strings.Join(wg.DNS, ",") != "100.64.70.1" {
 		t.Fatalf("DNS parse mismatch: %#v", wg.DNS)
 	}
-	if len(wg.PostUp) != 1 || wg.PostUp[0] != "echo up" || len(wg.PostDown) != 1 || wg.PostDown[0] != "echo down" {
-		t.Fatalf("PostUp/PostDown parse mismatch: %+v", wg)
+	if len(wg.PreUp) != 1 || wg.PreUp[0] != "echo pre-up" ||
+		len(wg.PostUp) != 1 || wg.PostUp[0] != "echo up" ||
+		len(wg.PreDown) != 1 || wg.PreDown[0] != "echo pre-down" ||
+		len(wg.PostDown) != 1 || wg.PostDown[0] != "echo down" {
+		t.Fatalf("script hook parse mismatch: %+v", wg)
 	}
 	if len(wg.Peers) != 1 {
 		t.Fatalf("peers parse mismatch: %+v", wg.Peers)

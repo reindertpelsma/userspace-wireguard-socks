@@ -28,9 +28,11 @@ import (
 )
 
 const (
-	listenerProtoTCP = socketproto.ProtoTCP
-	listenerProtoUDP = socketproto.ProtoUDP
-	connectProtoICMP = socketproto.ProtoICMP
+	listenerProtoTCP         = socketproto.ProtoTCP
+	listenerProtoUDP         = socketproto.ProtoUDP
+	connectProtoICMP         = socketproto.ProtoICMP
+	maxUDPListenerPeerOwners = 4096
+	maxRecvRightsFDs         = 16
 )
 
 type Options struct {
@@ -129,8 +131,20 @@ type udpListenerGroup struct {
 	mu        sync.Mutex
 	members   map[string]net.Conn
 	order     []string
-	peerOwner map[string]string
+	peerOwner map[string]udpPeerOwnerEntry
+	peerLRU   []udpPeerOwnerStamp
+	peerSeq   uint64
 	closed    chan struct{}
+}
+
+type udpPeerOwnerEntry struct {
+	token string
+	seq   uint64
+}
+
+type udpPeerOwnerStamp struct {
+	key string
+	seq uint64
 }
 
 func Listen(path, api, token string, logger *log.Logger) (*Server, error) {
@@ -710,26 +724,49 @@ func (g *tcpListenerGroup) close() {
 	default:
 		close(g.closed)
 	}
+	g.mu.Lock()
+	members := make(map[string]*tcpListenerMember, len(g.members))
+	for token, member := range g.members {
+		members[token] = member
+		delete(g.members, token)
+	}
+	accepts := make(map[uint64]*tcpAcceptedConn, len(g.accepts))
+	for id, accepted := range g.accepts {
+		accepts[id] = accepted
+		delete(g.accepts, id)
+	}
+	g.mu.Unlock()
+
 	g.server.mu.Lock()
 	if current := g.server.tcpGroups[g.key]; current == g {
 		delete(g.server.tcpGroups, g.key)
 	}
-	for token, member := range g.members {
+	for token := range members {
 		delete(g.server.tcpMembers, token)
-		if member != nil {
-			_ = member.local.Close()
-		}
 	}
 	g.server.mu.Unlock()
+
+	for _, member := range members {
+		if member == nil {
+			continue
+		}
+		select {
+		case <-member.closed:
+		default:
+			close(member.closed)
+		}
+		_ = member.local.Close()
+	}
 	if g.up != nil {
 		_ = g.up.Close()
 	}
 	if g.loop != nil {
 		_ = g.loop.Close()
 	}
-	g.mu.Lock()
-	for id, accepted := range g.accepts {
-		delete(g.accepts, id)
+	for _, accepted := range accepts {
+		if accepted == nil {
+			continue
+		}
 		if accepted.host != nil {
 			_ = accepted.host.Close()
 		}
@@ -737,7 +774,6 @@ func (g *tcpListenerGroup) close() {
 			_ = accepted.attached.Close()
 		}
 	}
-	g.mu.Unlock()
 }
 
 func (g *tcpListenerGroup) serveLoopback() {
@@ -981,7 +1017,7 @@ func (s *Server) addUDPListenerMember(local net.Conn, req connectRequest) (*udpL
 		requestBind: netip.AddrPortFrom(req.bindIP, req.bindPort),
 		reusable:    reusable,
 		members:     make(map[string]net.Conn),
-		peerOwner:   make(map[string]string),
+		peerOwner:   make(map[string]udpPeerOwnerEntry),
 		closed:      make(chan struct{}),
 	}
 	token := s.nextToken("udp-member-")
@@ -1196,15 +1232,28 @@ func (g *udpListenerGroup) randomMemberToken() string {
 }
 
 func (g *udpListenerGroup) recordPeerOwner(remote netip.AddrPort, token string) {
+	key := remote.String()
 	g.mu.Lock()
-	g.peerOwner[remote.String()] = token
+	g.peerSeq++
+	seq := g.peerSeq
+	g.peerOwner[key] = udpPeerOwnerEntry{token: token, seq: seq}
+	g.peerLRU = append(g.peerLRU, udpPeerOwnerStamp{key: key, seq: seq})
+	for len(g.peerOwner) > maxUDPListenerPeerOwners && len(g.peerLRU) > 0 {
+		oldest := g.peerLRU[0]
+		g.peerLRU = g.peerLRU[1:]
+		entry, ok := g.peerOwner[oldest.key]
+		if !ok || entry.seq != oldest.seq {
+			continue
+		}
+		delete(g.peerOwner, oldest.key)
+	}
 	g.mu.Unlock()
 }
 
 func (g *udpListenerGroup) ownerFor(remote netip.AddrPort) string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.peerOwner[remote.String()]
+	return g.peerOwner[remote.String()].token
 }
 
 func (g *udpListenerGroup) removeMember(token string) {
@@ -1224,7 +1273,7 @@ func (g *udpListenerGroup) removeMember(token string) {
 		}
 	}
 	for peer, owner := range g.peerOwner {
-		if owner == token {
+		if owner.token == token {
 			delete(g.peerOwner, peer)
 		}
 	}
@@ -1659,7 +1708,7 @@ func writeUint16LocalPacket(w io.Writer, p []byte) error {
 
 func recvRequest(c *net.UnixConn) (string, int, error) {
 	data := make([]byte, 4096)
-	oob := make([]byte, syscall.CmsgSpace(4))
+	oob := make([]byte, syscall.CmsgSpace(maxRecvRightsFDs*4))
 	n, oobn, _, _, err := c.ReadMsgUnix(data, oob)
 	if err != nil {
 		return "", -1, err
@@ -1675,6 +1724,9 @@ func recvRequest(c *net.UnixConn) (string, int, error) {
 				continue
 			}
 			if len(fds) > 0 {
+				for _, extra := range fds[1:] {
+					_ = syscall.Close(extra)
+				}
 				return strings.TrimSpace(string(data[:n])), fds[0], nil
 			}
 		}

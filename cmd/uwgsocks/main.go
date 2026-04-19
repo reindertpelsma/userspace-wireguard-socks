@@ -215,7 +215,7 @@ func main() {
 	flag.StringVar(&apiListen, "api-listen", "", "optional management API listen address, or unix:///path/to/socket")
 	flag.StringVar(&apiToken, "api-token", "", "bearer token for the management API")
 	flag.BoolVar(&apiAllowUnixNoToken, "api-allow-unauthenticated-unix", true, "allow API requests without a bearer token when api-listen is a Unix socket")
-	flag.BoolVar(&allowScripts, "allow-scripts", false, "run wg-quick PostUp/PostDown commands from config")
+	flag.BoolVar(&allowScripts, "allow-scripts", false, "run wg-quick PreUp/PostUp/PreDown/PostDown and tun up/down commands from config")
 	flag.BoolVar(&verbose, "verbose", false, "verbose WireGuard logging")
 	flag.BoolVar(&checkOnly, "check", false, "start, then immediately stop after successful initialization")
 	flag.Parse()

@@ -58,9 +58,8 @@ type WireGuard struct {
 	Config     string `yaml:"config"`
 
 	// These fields mirror the wg-quick [Interface] and [Peer] values that make
-	// sense for a userspace, no-TUN runtime. Table/SaveConfig/PreUp/PreDown are
-	// accepted but ignored by the parser because the process never mutates the
-	// host routing table.
+	// sense for a userspace, no-TUN runtime. Table/SaveConfig are accepted but
+	// ignored because the process never mutates the host routing table.
 	PrivateKey string `yaml:"private_key"`
 	ListenPort *int   `yaml:"listen_port"`
 	// ListenAddresses restrict server-mode WireGuard UDP sockets to specific
@@ -74,7 +73,9 @@ type WireGuard struct {
 	// roaming if the live endpoint stops handshaking for this long. Peers
 	// without Endpoint= remain dynamic and are not affected.
 	RoamFallbackSeconds int      `yaml:"roam_fallback_seconds"`
+	PreUp               []string `yaml:"pre_up"`
 	PostUp              []string `yaml:"post_up"`
+	PreDown             []string `yaml:"pre_down"`
 	PostDown            []string `yaml:"post_down"`
 	Peers               []Peer   `yaml:"peers"`
 
@@ -311,6 +312,8 @@ type DNSServer struct {
 }
 
 type Scripts struct {
+	// Allow is opt-in because this userspace runtime does not need shell hooks
+	// for ordinary routing or firewall setup.
 	Allow bool `yaml:"allow"`
 }
 
@@ -366,6 +369,7 @@ func Default() Config {
 		API: API{
 			AllowUnauthenticatedUnix: true,
 		},
+		Scripts:   Scripts{Allow: false},
 		DNSServer: DNSServer{MaxInflight: 1024},
 	}
 }
@@ -1161,11 +1165,15 @@ func setInterface(wg *WireGuard, key, value string) error {
 			return fmt.Errorf("invalid MTU %q", value)
 		}
 		wg.MTU = n
+	case "preup":
+		wg.PreUp = append(wg.PreUp, value)
 	case "postup":
 		wg.PostUp = append(wg.PostUp, value)
+	case "predown":
+		wg.PreDown = append(wg.PreDown, value)
 	case "postdown":
 		wg.PostDown = append(wg.PostDown, value)
-	case "preup", "predown", "table", "saveconfig":
+	case "table", "saveconfig":
 		// wg-quick settings that do not map to this userspace runtime.
 	default:
 		return fmt.Errorf("unsupported interface key %q", key)

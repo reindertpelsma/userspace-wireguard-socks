@@ -347,8 +347,12 @@ func markPacketECN(packet []byte) bool {
 		if len(packet) < 20 {
 			return false
 		}
+		ihl := int(packet[0]&0x0f) * 4
+		if ihl < 20 || ihl > len(packet) {
+			return false
+		}
 		packet[10], packet[11] = 0, 0
-		sum := ipv4HeaderChecksum(packet[:int(packet[0]&0x0f)*4])
+		sum := ipv4HeaderChecksum(packet[:ihl])
 		binary.BigEndian.PutUint16(packet[10:12], sum)
 		return true
 	case 6:
