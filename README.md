@@ -111,13 +111,18 @@ absolute-form HTTPS proxy verification controls.
 
 ## Build And Test
 
-Requirements: Go, gcc, and npm only when building `uwgsocks-ui`.
+Requirements: Go, gcc on Linux when building `uwgwrapper`, and npm only when
+building `uwgsocks-ui`.
 
 ```bash
+export GOTOOLCHAIN=auto
 bash compile.sh
 go test ./...
 go test -race ./internal/config ./internal/engine ./tests/malicious ./tests/preload
 ```
+
+On macOS, `bash compile.sh` builds `uwgsocks` and skips the Linux-only
+`uwgwrapper`. On Windows, use `compile.bat`, which builds `uwgsocks.exe`.
 
 The test suite runs rootless local WireGuard instances and covers proxy paths,
 raw socket API, wrapper preload/ptrace paths, IPv6, ICMP, relay ACLs, DNS,

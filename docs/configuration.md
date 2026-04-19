@@ -200,6 +200,7 @@ transports:
       server_sni: vpn.example.com
     websocket:
       path: /wireguard
+      upgrade_mode: websocket
       host_header: vpn.example.com
       sni_hostname: ""
     proxy:
@@ -236,6 +237,9 @@ Shared nested blocks:
   infer from the destination hostname, explicit `null` means do not send SNI,
   and a string forces that SNI.
 - `websocket`: used by HTTP-based transports. `path` defaults to `/`.
+  `upgrade_mode` controls the client-side HTTP upgrade protocol:
+  `websocket` (default) or `proxyguard` for native `Upgrade: UoTLV/1`.
+  Listen mode always accepts both WebSocket and `UoTLV/1` on the same path.
   `host_header` overrides the HTTP Host header. `sni_hostname` is deprecated in
   favor of `tls.server_sni`.
 - `proxy.type`: `none`, `turn`, `socks5`, or `http`.

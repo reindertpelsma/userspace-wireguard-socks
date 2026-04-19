@@ -18,15 +18,22 @@ import (
 	"time"
 )
 
+type HTTPUpgradeMode string
+
+const (
+	HTTPUpgradeModeWebSocket  HTTPUpgradeMode = "websocket"
+	HTTPUpgradeModeProxyGuard HTTPUpgradeMode = "proxyguard"
+)
+
 // WebSocketTransport is a connection-oriented transport that carries WireGuard
-// packets as WebSocket binary frames (one frame = one WireGuard packet).
+// packets over an HTTP upgrade.
 //
 // It supports:
-//   - ws://  (HTTP upgrade, plain TCP)
-//   - wss:// (HTTP upgrade over TLS)
+//   - ws:// / wss:// WebSocket framing
+//   - ProxyGuard UoTLV/1 native HTTP upgrade with TCP-style 2-byte framing
 //
 // In listen mode an embedded HTTP server is started that upgrades inbound
-// connections; in client mode a WebSocket dial is performed.
+// connections; in client mode the configured HTTP upgrade protocol is used.
 //
 // Certificate validation mirrors TLSTransport: disabled by default because
 // WireGuard already authenticates peers, but can be enabled with verifyPeer.
@@ -45,6 +52,8 @@ type WebSocketTransport struct {
 	// hostHeader overrides the HTTP Host header (inner host for domain
 	// fronting). When empty, the target host is used.
 	hostHeader string
+	// upgradeMode selects the client-side HTTP upgrade protocol.
+	upgradeMode HTTPUpgradeMode
 }
 
 type WebSocketOption func(*WebSocketTransport)
@@ -74,6 +83,19 @@ func WithWebSocketConnectHost(host string) WebSocketOption {
 	}
 }
 
+func WithWebSocketUpgradeMode(mode HTTPUpgradeMode) WebSocketOption {
+	return func(t *WebSocketTransport) {
+		switch mode {
+		case "", HTTPUpgradeModeWebSocket:
+			t.upgradeMode = HTTPUpgradeModeWebSocket
+		case HTTPUpgradeModeProxyGuard:
+			t.upgradeMode = HTTPUpgradeModeProxyGuard
+		default:
+			t.upgradeMode = HTTPUpgradeModeWebSocket
+		}
+	}
+}
+
 func WithWebSocketSNIHostname(name string) WebSocketOption {
 	return func(t *WebSocketTransport) {
 		t.tlsCfg.ServerSNI = OptionalString{
@@ -94,6 +116,7 @@ func NewWebSocketTransport(name, scheme string, dialer ProxyDialer, listenAddrs 
 		tlsCfg:      tlsCfg,
 		useTLS:      scheme == "https",
 		path:        "/",
+		upgradeMode: HTTPUpgradeModeWebSocket,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -144,12 +167,22 @@ func (t *WebSocketTransport) Dial(ctx context.Context, target string) (Session, 
 		conn = tlsConn
 	}
 
-	wsConn, err := upgradeWebSocketClient(ctx, conn, target, scheme, t.path, t.hostHeader)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("ws transport %s: upgrade: %w", t.name, err)
+	switch t.upgradeMode {
+	case HTTPUpgradeModeProxyGuard:
+		upgraded, err := upgradeProxyGuardClient(ctx, conn, target, scheme, t.path, t.hostHeader)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("ws transport %s: ProxyGuard upgrade: %w", t.name, err)
+		}
+		return newStreamSession(upgraded, target, tcpIdleTimeout), nil
+	default:
+		wsConn, err := upgradeWebSocketClient(ctx, conn, target, scheme, t.path, t.hostHeader)
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("ws transport %s: upgrade: %w", t.name, err)
+		}
+		return &wsSession{conn: wsConn, remote: target}, nil
 	}
-	return &wsSession{conn: wsConn, remote: target}, nil
 }
 
 // Listen starts a WebSocket server.
@@ -159,9 +192,9 @@ func (t *WebSocketTransport) Listen(_ context.Context, port int) (Listener, erro
 		addrs = []string{"0.0.0.0"}
 	}
 
-	acceptCh := make(chan wsAcceptResult, 64)
+	acceptCh := make(chan httpUpgradeAcceptResult, 64)
 	mux := http.NewServeMux()
-	mux.HandleFunc(t.path, makeWSHandler(acceptCh))
+	mux.HandleFunc(t.path, makeHTTPUpgradeHandler(acceptCh))
 
 	var listeners []net.Listener
 	chosen := port
@@ -410,25 +443,53 @@ func upgradeWebSocketClient(ctx context.Context, conn net.Conn, target, scheme, 
 	return &wsConn{conn: wrapped, remote: target, clientSide: true}, nil
 }
 
-// makeWSHandler returns an http.HandlerFunc that upgrades connections and
-// feeds them into acceptCh.
-func makeWSHandler(acceptCh chan wsAcceptResult) http.HandlerFunc {
+func upgradeProxyGuardClient(ctx context.Context, conn net.Conn, target, scheme, path, hostHeader string) (net.Conn, error) {
+	host, _, _ := net.SplitHostPort(target)
+	if hostHeader == "" {
+		hostHeader = host
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+target+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Host = hostHeader
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "UoTLV/1")
+	if err := req.Write(conn); err != nil {
+		return nil, err
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		return nil, fmt.Errorf("ProxyGuard upgrade failed: %s", resp.Status)
+	}
+	if !strings.EqualFold(resp.Header.Get("Upgrade"), "UoTLV/1") {
+		return nil, fmt.Errorf("ProxyGuard upgrade failed: unexpected Upgrade header %q", resp.Header.Get("Upgrade"))
+	}
+	if !headerContainsToken(resp.Header, "Connection", "Upgrade") {
+		return nil, fmt.Errorf("ProxyGuard upgrade failed: missing Connection: Upgrade")
+	}
+	if br.Buffered() == 0 {
+		return conn, nil
+	}
+	return &bufferedConn{Conn: conn, r: br}, nil
+}
+
+// makeHTTPUpgradeHandler returns an http.HandlerFunc that upgrades inbound
+// HTTP requests to either WebSocket or ProxyGuard UoTLV/1 and feeds the
+// resulting sessions into acceptCh.
+func makeHTTPUpgradeHandler(acceptCh chan httpUpgradeAcceptResult) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "GET required", http.StatusMethodNotAllowed)
 			return
 		}
-		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-			http.Error(w, "websocket upgrade required", http.StatusBadRequest)
-			return
-		}
 		if !headerContainsToken(r.Header, "Connection", "Upgrade") {
 			http.Error(w, "connection upgrade required", http.StatusBadRequest)
-			return
-		}
-		key := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
-		if key == "" {
-			http.Error(w, "missing Sec-WebSocket-Key", http.StatusBadRequest)
 			return
 		}
 		hj, ok := w.(http.Hijacker)
@@ -440,25 +501,45 @@ func makeWSHandler(acceptCh chan wsAcceptResult) http.HandlerFunc {
 		if err != nil {
 			return
 		}
-		// Send 101 switching protocols.
-		_, _ = fmt.Fprintf(conn, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", websocketAcceptKey(key))
-		ws := &wsConn{conn: conn, remote: conn.RemoteAddr().String(), clientSide: false}
-		select {
-		case acceptCh <- wsAcceptResult{ws: ws}:
+		upgrade := strings.TrimSpace(r.Header.Get("Upgrade"))
+		switch {
+		case strings.EqualFold(upgrade, "websocket"):
+			key := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
+			if key == "" {
+				_, _ = io.WriteString(conn, "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nmissing Sec-WebSocket-Key")
+				_ = conn.Close()
+				return
+			}
+			_, _ = fmt.Fprintf(conn, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", websocketAcceptKey(key))
+			ws := &wsConn{conn: conn, remote: conn.RemoteAddr().String(), clientSide: false}
+			select {
+			case acceptCh <- httpUpgradeAcceptResult{sess: &wsSession{conn: ws, remote: ws.remote}}:
+			default:
+				_ = conn.Close()
+			}
+		case strings.EqualFold(upgrade, "UoTLV/1"):
+			_, _ = io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: UoTLV/1\r\n\r\n")
+			sess := newStreamSession(conn, conn.RemoteAddr().String(), tcpIdleTimeout)
+			select {
+			case acceptCh <- httpUpgradeAcceptResult{sess: sess}:
+			default:
+				_ = conn.Close()
+			}
 		default:
-			conn.Close()
+			_, _ = io.WriteString(conn, "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nwebsocket or UoTLV/1 upgrade required on this path")
+			_ = conn.Close()
 		}
 	}
 }
 
-type wsAcceptResult struct {
-	ws  *wsConn
-	err error
+type httpUpgradeAcceptResult struct {
+	sess Session
+	err  error
 }
 
 // wsListener wraps the acceptCh from the embedded HTTP servers.
 type wsListener struct {
-	acceptCh  chan wsAcceptResult
+	acceptCh  chan httpUpgradeAcceptResult
 	listeners []net.Listener
 }
 
@@ -473,7 +554,7 @@ func (l *wsListener) Accept(ctx context.Context) (Session, error) {
 		if r.err != nil {
 			return nil, r.err
 		}
-		return &wsSession{conn: r.ws, remote: r.ws.remote}, nil
+		return r.sess, nil
 	}
 }
 

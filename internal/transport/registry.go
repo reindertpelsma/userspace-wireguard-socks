@@ -44,6 +44,9 @@ func BuildRegistry(
 		if err := ValidateProxyType(cfg.Proxy.Type); err != nil {
 			return nil, fmt.Errorf("transport %q: %w", cfg.Name, err)
 		}
+		if err := ValidateWebSocketUpgradeMode(cfg.WebSocket.UpgradeMode); err != nil {
+			return nil, fmt.Errorf("transport %q: %w", cfg.Name, err)
+		}
 
 		// Validate UDP listen address count.
 		if cfg.Base == "" || cfg.Base == "udp" {
@@ -146,6 +149,9 @@ func buildBaseTransport(cfg Config, dialer ProxyDialer, wgPubKey [32]byte) (Tran
 	var wsOpts []WebSocketOption
 	if cfg.WebSocket.Path != "" {
 		wsOpts = append(wsOpts, WithWebSocketPath(cfg.WebSocket.Path))
+	}
+	if cfg.WebSocket.UpgradeMode != "" {
+		wsOpts = append(wsOpts, WithWebSocketUpgradeMode(HTTPUpgradeMode(cfg.WebSocket.UpgradeMode)))
 	}
 	if cfg.WebSocket.ConnectHost != "" {
 		wsOpts = append(wsOpts, WithWebSocketConnectHost(cfg.WebSocket.ConnectHost))

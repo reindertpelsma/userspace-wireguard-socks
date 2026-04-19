@@ -8,10 +8,13 @@
 You can download release binaries, or build locally with Go 1.25 or newer:
 
 ```bash
+export GOTOOLCHAIN=auto
 bash compile.sh
 ```
 
-This produces `uwgsocks` and `uwgwrapper`.
+On Linux this produces `uwgsocks` and `uwgwrapper`. On macOS it produces
+`uwgsocks` and skips the Linux-only wrapper. On Windows use `compile.bat` to
+build `uwgsocks.exe`.
 
 ## Quick Start
 

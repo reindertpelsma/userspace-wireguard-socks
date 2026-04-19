@@ -511,6 +511,76 @@ func TestWebSocketTransportTLSSNIOverride(t *testing.T) {
 	}
 }
 
+func TestHTTPTransportAcceptsWebSocketAndProxyGuardUpgrades(t *testing.T) {
+	listenerTransport := transport.NewWebSocketTransport(
+		"http-upgrade-test",
+		"http",
+		loopbackDialer{},
+		[]string{"127.0.0.1"},
+		nil,
+		transport.TLSConfig{},
+		transport.WithWebSocketPath("/wireguard"),
+	)
+
+	ctx := context.Background()
+	ln, err := listenerTransport.Listen(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	runRoundTrip := func(client transport.Transport) {
+		t.Helper()
+		serverSessCh := make(chan transport.Session, 1)
+		serverErrCh := make(chan error, 1)
+		go func() {
+			sess, err := ln.Accept(ctx)
+			if err != nil {
+				serverErrCh <- err
+				return
+			}
+			serverSessCh <- sess
+		}()
+
+		clientSess, err := client.Dial(ctx, ln.Addr().String())
+		if err != nil {
+			t.Fatalf("client dial: %v", err)
+		}
+		defer clientSess.Close()
+
+		select {
+		case err := <-serverErrCh:
+			t.Fatalf("server accept: %v", err)
+		case srvSess := <-serverSessCh:
+			defer srvSess.Close()
+			sendRecv(t, clientSess, srvSess, 10)
+		case <-time.After(5 * time.Second):
+			t.Fatal("timeout waiting for upgraded HTTP transport session")
+		}
+	}
+
+	runRoundTrip(transport.NewWebSocketTransport(
+		"http-upgrade-ws-client",
+		"http",
+		loopbackDialer{},
+		nil,
+		nil,
+		transport.TLSConfig{},
+		transport.WithWebSocketPath("/wireguard"),
+	))
+
+	runRoundTrip(transport.NewWebSocketTransport(
+		"http-upgrade-pg-client",
+		"http",
+		loopbackDialer{},
+		nil,
+		nil,
+		transport.TLSConfig{},
+		transport.WithWebSocketPath("/wireguard"),
+		transport.WithWebSocketUpgradeMode(transport.HTTPUpgradeModeProxyGuard),
+	))
+}
+
 // --------------------------------------------------------------------------
 // SOCKS5 proxy dialer tests
 // --------------------------------------------------------------------------

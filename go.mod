@@ -7,8 +7,11 @@ go 1.25.0
 
 require (
 	github.com/miekg/dns v1.1.72
+	github.com/pion/dtls/v3 v3.0.7
 	github.com/pion/logging v0.2.4
 	github.com/pion/turn/v4 v4.1.4
+	github.com/quic-go/quic-go v0.59.0
+	github.com/quic-go/webtransport-go v0.10.0
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/net v0.52.0
 	golang.org/x/sys v0.43.0
@@ -21,15 +24,11 @@ require (
 require (
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/google/btree v1.1.2 // indirect
-	github.com/kr/pretty v0.3.1 // indirect
-	github.com/pion/dtls/v3 v3.0.7 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/stun/v3 v3.0.1 // indirect
 	github.com/pion/transport/v3 v3.0.8 // indirect
 	github.com/pion/transport/v4 v4.0.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.59.0 // indirect
-	github.com/quic-go/webtransport-go v0.10.0 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
@@ -39,5 +38,4 @@ require (
 	golang.org/x/time v0.10.0 // indirect
 	golang.org/x/tools v0.43.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )

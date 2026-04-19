@@ -72,6 +72,13 @@ type TLSConfig struct {
 type WebSocketConfig struct {
 	// Path is the HTTP path used for the WebSocket upgrade. Defaults to "/".
 	Path string `yaml:"path,omitempty" json:"path,omitempty"`
+	// UpgradeMode selects the HTTP upgrade protocol used by client-mode
+	// HTTP/HTTPS transports:
+	//   "" | "websocket" → RFC 6455 WebSocket upgrade (default)
+	//   "proxyguard"     → ProxyGuard UoTLV/1 native HTTP upgrade
+	//
+	// Listen mode always accepts both WebSocket and UoTLV/1 on the same path.
+	UpgradeMode string `yaml:"upgrade_mode,omitempty" json:"upgrade_mode,omitempty"`
 	// ConnectHost overrides the host used for DNS lookup and TCP/QUIC
 	// connection. When empty the peer endpoint host is used. This is the
 	// first of three independently configurable host values for domain
@@ -193,6 +200,14 @@ func ValidateProxyType(t string) error {
 		return nil
 	}
 	return &ConfigError{Field: "proxy.type", Value: t, Msg: "must be one of: none turn socks5 http"}
+}
+
+func ValidateWebSocketUpgradeMode(mode string) error {
+	switch mode {
+	case "", "websocket", "proxyguard":
+		return nil
+	}
+	return &ConfigError{Field: "websocket.upgrade_mode", Value: mode, Msg: "must be one of: websocket proxyguard"}
 }
 
 // ConfigError is returned when a transport configuration field is invalid.
