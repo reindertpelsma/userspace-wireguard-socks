@@ -273,7 +273,14 @@ func (e *Engine) Start() error {
 		e.updateTURNPermissions()
 		bind = tb
 	} else if e.cfg.WireGuard.ListenPort == nil {
-		bind = wgbind.NewOutboundOnlyBind()
+		// The custom outbound-only bind keeps Linux clients fully rootless and
+		// avoids a fixed host UDP listener. On Windows and macOS, the standard
+		// bind with port 0 is more interoperable for the live UDP client path.
+		if runtime.GOOS == "linux" || runtime.GOOS == "android" {
+			bind = wgbind.NewOutboundOnlyBind()
+		} else {
+			bind = &wgbind.ResolverBind{Inner: conn.NewStdNetBind()}
+		}
 	} else if len(e.cfg.WireGuard.ListenAddresses) > 0 {
 		bind = &wgbind.ResolverBind{Inner: &wgbind.ListenBind{Addresses: e.cfg.WireGuard.ListenAddresses}}
 	} else {
