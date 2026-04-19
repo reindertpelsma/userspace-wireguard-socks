@@ -1444,6 +1444,10 @@ AllowedIPs = 100.64.45.9/32
 func TestAPIUnixSocketCanOptOutOfToken(t *testing.T) {
 	key := mustKey(t)
 	socketPath := t.TempDir() + "/uwg-api.sock"
+	if runtime.GOOS == "darwin" {
+		socketPath = filepath.Join(os.TempDir(), fmt.Sprintf("uwg-api-%d-%d.sock", os.Getpid(), mrand.Int()))
+		t.Cleanup(func() { _ = os.Remove(socketPath) })
+	}
 	cfg := config.Default()
 	cfg.WireGuard.PrivateKey = key.String()
 	cfg.WireGuard.Addresses = []string{"100.64.45.10/32"}
