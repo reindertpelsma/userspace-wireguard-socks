@@ -76,7 +76,7 @@ Secundary platforms: Then the following platforms uwgsocks worked and tested:
 - Windows arm64, arm64 VM on Raspberry PI
 
 Limitations on secundary platforms:
-- no uwgwrapper, so you cannot route existing applications without system VPN
+- no uwgwrapper, so you cannot transperantly route existing applications that do not support SOCKS5/HTTP proxy without system VPN rootless
 - tun device is not yet supported, for Windows requires wintun
 
 ## Routing Model
