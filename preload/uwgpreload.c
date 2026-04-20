@@ -1522,6 +1522,13 @@ static int dns_mode_libc(void) {
   return v && strcmp(v, "libc") == 0;
 }
 
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((unused))
+#endif
+static int dns_mode_libc_unused_marker(void) {
+  return dns_mode_libc();
+}
+
 static int dns_mode_none(void) {
   const char *v = getenv("UWGS_DNS_MODE");
   return v && strcmp(v, "none") == 0;

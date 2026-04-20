@@ -588,7 +588,7 @@ func buildWrapperArtifacts(t *testing.T) wrapperArtifacts {
 	repo := filepath.Clean(filepath.Join("..", ".."))
 	tmp := t.TempDir()
 	embeddedPreloadDir := filepath.Join(repo, "cmd", "uwgwrapper", "assets")
-	embeddedPreload := filepath.Join(embeddedPreloadDir, "uwgpreload.so")
+	embeddedPreload := filepath.Join("cmd", "uwgwrapper", "assets", "uwgpreload.so")
 	art := wrapperArtifacts{
 		wrapper:      filepath.Join(tmp, "uwgwrapper"),
 		preload:      filepath.Join(tmp, "uwgpreload.so"),
