@@ -5,6 +5,7 @@ package engine
 
 import (
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -78,6 +79,9 @@ func (e *Engine) startAPIServer() error {
 	mux.HandleFunc("/v1/wireguard/config", e.handleAPIWireGuardConfig)
 	mux.HandleFunc("/v1/interface_ips", e.handleAPIInterfaceIPs)
 	mux.HandleFunc("/v1/socket", e.handleAPISocket)
+	mux.HandleFunc("/uwg/socket", e.handleAPISocket)
+	mux.HandleFunc("/v1/resolve", e.handleAPIResolve)
+	mux.HandleFunc("/uwg/resolve", e.handleAPIResolve)
 	mux.HandleFunc("/v1/status", e.handleAPIStatus)
 	mux.HandleFunc("/v1/ping", e.handleAPIPing)
 	mux.HandleFunc("/v1/transports", e.handleAPITransports)
@@ -128,6 +132,52 @@ func (e *Engine) handleAPIWireGuardConfig(w http.ResponseWriter, r *http.Request
 		w.Header().Set("Allow", "PUT, POST")
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (e *Engine) handleAPIResolve(w http.ResponseWriter, r *http.Request) {
+	var payload []byte
+	switch r.Method {
+	case http.MethodPost:
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		payload = body
+	case http.MethodGet:
+		raw := strings.TrimSpace(r.URL.Query().Get("dns"))
+		if raw == "" {
+			writeAPIError(w, http.StatusBadRequest, "dns query parameter is required")
+			return
+		}
+		decoded, err := base64.RawURLEncoding.DecodeString(raw)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid dns query parameter")
+			return
+		}
+		payload = decoded
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if len(payload) == 0 {
+		writeAPIError(w, http.StatusBadRequest, "dns request body is required")
+		return
+	}
+	if !e.acquireDNSTransaction() {
+		writeAPIError(w, http.StatusTooManyRequests, "too many in-flight DNS requests")
+		return
+	}
+	defer e.releaseDNSTransaction()
+	resp, err := exchangeSystemDNSPacket(payload)
+	if err != nil {
+		writeAPIError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/dns-message")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(resp)
 }
 
 func readAPIWireGuardConfigBody(r *http.Request) (string, error) {

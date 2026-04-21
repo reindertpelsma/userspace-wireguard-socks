@@ -815,6 +815,20 @@ func (c *Config) synthesizeDirectiveTransports() error {
 	// Per-peer directives.
 	for i := range c.WireGuard.Peers {
 		peer := &c.WireGuard.Peers[i]
+		if parsed, ok, err := parsePeerEndpointTransport(fmt.Sprintf("_wg-endpoint-%d", i), peer.Endpoint); err != nil {
+			return fmt.Errorf("wireguard.peers[%d].endpoint: %w", i, err)
+		} else if ok {
+			if peer.Transport != "" {
+				return fmt.Errorf("wireguard.peers[%d].endpoint transport scheme cannot be combined with explicit transport", i)
+			}
+			if peer.ConnectURL != "" {
+				return fmt.Errorf("wireguard.peers[%d].endpoint transport scheme cannot be combined with #!URL", i)
+			}
+			c.Transports = append(c.Transports, parsed.Transport)
+			peer.Endpoint = parsed.Endpoint
+			peer.Transport = parsed.Transport.Name
+			continue
+		}
 		if peer.Transport != "" {
 			continue // explicit transport already set; directives are informational only
 		}
@@ -842,42 +856,6 @@ func (c *Config) synthesizeDirectiveTransports() error {
 		}
 	}
 	return nil
-}
-
-// parseTURNDirectiveURL parses a #!TURN= URL into a transport.Config.
-// Supported schemes: turn (UDP), turns (TLS), turn+udp, turn+tcp, turn+tls,
-// turn+dtls, turn+http, turn+https, and turn+quic.
-func parseTURNDirectiveURL(name, rawURL string) (transport.Config, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return transport.Config{}, fmt.Errorf("invalid TURN URL %q: %w", rawURL, err)
-	}
-	scheme := strings.ToLower(u.Scheme)
-	proto := "udp"
-	switch {
-	case scheme == "turns":
-		proto = "tls"
-	case strings.HasPrefix(scheme, "turn+"):
-		proto = strings.TrimPrefix(scheme, "turn+")
-	}
-	username := u.User.Username()
-	password, _ := u.User.Password()
-	if u.Host == "" {
-		return transport.Config{}, fmt.Errorf("TURN URL %q missing host", rawURL)
-	}
-	return transport.Config{
-		Name: name,
-		Base: "turn",
-		TURN: transport.TURNConfig{
-			Server:   u.Host,
-			Username: username,
-			Password: password,
-			Protocol: proto,
-		},
-		WebSocket: transport.WebSocketConfig{
-			Path: u.Path,
-		},
-	}, nil
 }
 
 // normalizeTransports validates transport configs and checks per-peer

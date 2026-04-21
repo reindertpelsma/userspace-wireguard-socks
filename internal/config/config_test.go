@@ -505,6 +505,106 @@ AllowedIPs = 0.0.0.0/0
 	}
 }
 
+func TestParseTURNDirectiveTaggedSchemes(t *testing.T) {
+	cases := []struct {
+		name        string
+		raw         string
+		wantProto   string
+		wantUpgrade string
+		wantPath    string
+	}{
+		{name: "http ws", raw: "http://alice:secret@turn.example.com:80/turn", wantProto: "http", wantUpgrade: "websocket", wantPath: "/turn"},
+		{name: "http raw", raw: "http+raw://alice:secret@turn.example.com:80/turn", wantProto: "http", wantUpgrade: "proxyguard", wantPath: "/turn"},
+		{name: "https ws", raw: "turn+wss://alice:secret@turn.example.com:443/turn", wantProto: "https", wantUpgrade: "websocket", wantPath: "/turn"},
+		{name: "tls", raw: "tls://alice:secret@turn.example.com:5349", wantProto: "tls"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := parseTURNDirectiveURL("_wg-turn", tc.raw)
+			if err != nil {
+				t.Fatalf("parseTURNDirectiveURL(%q): %v", tc.raw, err)
+			}
+			if cfg.TURN.Protocol != tc.wantProto {
+				t.Fatalf("protocol = %q, want %q", cfg.TURN.Protocol, tc.wantProto)
+			}
+			if cfg.WebSocket.UpgradeMode != tc.wantUpgrade {
+				t.Fatalf("upgrade mode = %q, want %q", cfg.WebSocket.UpgradeMode, tc.wantUpgrade)
+			}
+			if cfg.WebSocket.Path != tc.wantPath {
+				t.Fatalf("path = %q, want %q", cfg.WebSocket.Path, tc.wantPath)
+			}
+		})
+	}
+}
+
+func TestSynthesizeEndpointTransportFromTaggedEndpoint(t *testing.T) {
+	priv := mustConfigKey(t)
+	peer := mustConfigKey(t)
+
+	text := `
+[Interface]
+PrivateKey = ` + priv.String() + `
+Address = 10.0.0.1/24
+
+[Peer]
+PublicKey = ` + peer.PublicKey().String() + `
+Endpoint = https://vpn.example.com/wg
+AllowedIPs = 0.0.0.0/0
+`
+	cfg := &Config{}
+	if err := MergeWGQuick(&cfg.WireGuard, text); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Transports) != 1 {
+		t.Fatalf("expected 1 synthesized transport, got %d", len(cfg.Transports))
+	}
+	if cfg.Transports[0].Base != "url" || cfg.Transports[0].URL != "https://vpn.example.com/wg" {
+		t.Fatalf("unexpected synthesized transport: %+v", cfg.Transports[0])
+	}
+	if cfg.WireGuard.Peers[0].Endpoint != "vpn.example.com:443" {
+		t.Fatalf("normalized endpoint = %q, want vpn.example.com:443", cfg.WireGuard.Peers[0].Endpoint)
+	}
+	if cfg.WireGuard.Peers[0].Transport != "_wg-endpoint-0" {
+		t.Fatalf("peer transport = %q, want _wg-endpoint-0", cfg.WireGuard.Peers[0].Transport)
+	}
+}
+
+func TestSynthesizeEndpointTransportFromTaggedRawHTTP(t *testing.T) {
+	priv := mustConfigKey(t)
+	peer := mustConfigKey(t)
+
+	text := `
+[Interface]
+PrivateKey = ` + priv.String() + `
+Address = 10.0.0.1/24
+
+[Peer]
+PublicKey = ` + peer.PublicKey().String() + `
+Endpoint = http+raw://vpn.example.com/wg
+AllowedIPs = 0.0.0.0/0
+`
+	cfg := &Config{}
+	if err := MergeWGQuick(&cfg.WireGuard, text); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Transports) != 1 {
+		t.Fatalf("expected 1 synthesized transport, got %d", len(cfg.Transports))
+	}
+	tr := cfg.Transports[0]
+	if tr.Base != "http" || tr.WebSocket.UpgradeMode != "proxyguard" || tr.WebSocket.Path != "/wg" {
+		t.Fatalf("unexpected synthesized transport: %+v", tr)
+	}
+	if cfg.WireGuard.Peers[0].Endpoint != "vpn.example.com:80" {
+		t.Fatalf("normalized endpoint = %q, want vpn.example.com:80", cfg.WireGuard.Peers[0].Endpoint)
+	}
+}
+
 func mustConfigKey(t *testing.T) wgtypes.Key {
 	t.Helper()
 	key, err := wgtypes.GeneratePrivateKey()

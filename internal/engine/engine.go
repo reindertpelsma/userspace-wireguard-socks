@@ -908,6 +908,10 @@ func (e *Engine) httpProxyHandler() http.Handler {
 			e.handleSocketUpgrade(w, r, src)
 			return
 		}
+		if r.URL.Path == "/uwg/resolve" {
+			e.handleAPIResolve(w, r)
+			return
+		}
 		if r.Method == http.MethodConnect {
 			e.handleHTTPConnect(w, r, src)
 			return

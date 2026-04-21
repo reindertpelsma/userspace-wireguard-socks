@@ -4,9 +4,12 @@
 package engine
 
 import (
+	"bytes"
+	"encoding/base64"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"net/netip"
 	"testing"
 	"time"
@@ -184,6 +187,157 @@ func TestHTTPProxyClosesIdleIncompleteRequest(t *testing.T) {
 		return
 	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
 		t.Fatal("idle incomplete HTTP request unexpectedly stayed open")
+	}
+}
+
+func TestAPIResolveReturnsDNSMessage(t *testing.T) {
+	oldExchange := systemDNSExchange
+	systemDNSExchange = func(req *dns.Msg, tcp bool) (*dns.Msg, error) {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		resp.Answer = append(resp.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: "resolve.test.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
+			A:   net.ParseIP("203.0.113.10"),
+		})
+		return resp, nil
+	}
+	defer func() { systemDNSExchange = oldExchange }()
+
+	key, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.API.Listen = "127.0.0.1:0"
+	cfg.API.Token = "secret"
+	cfg.WireGuard.PrivateKey = key.String()
+	cfg.WireGuard.Addresses = []string{"100.64.96.1/32"}
+	eng, err := New(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	if err := eng.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	reqMsg := new(dns.Msg)
+	reqMsg.SetQuestion("resolve.test.", dns.TypeA)
+	payload, err := reqMsg.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://"+eng.Addr("api")+"/v1/resolve", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/dns-message")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("resolve status = %d body=%q", resp.StatusCode, string(body))
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/dns-message" {
+		t.Fatalf("content-type = %q, want application/dns-message", ct)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dnsResp dns.Msg
+	if err := dnsResp.Unpack(body); err != nil {
+		t.Fatal(err)
+	}
+	if len(dnsResp.Answer) != 1 {
+		t.Fatalf("DNS answer count = %d, want 1", len(dnsResp.Answer))
+	}
+}
+
+func TestProxyResolveRequiresAndAcceptsBasicAuth(t *testing.T) {
+	oldExchange := systemDNSExchange
+	systemDNSExchange = func(req *dns.Msg, tcp bool) (*dns.Msg, error) {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		resp.Answer = append(resp.Answer, &dns.TXT{
+			Hdr: dns.RR_Header{Name: "proxy.test.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 30},
+			Txt: []string{"through proxy auth"},
+		})
+		return resp, nil
+	}
+	defer func() { systemDNSExchange = oldExchange }()
+
+	key, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Proxy.HTTP = "127.0.0.1:0"
+	cfg.Proxy.Username = "alice"
+	cfg.Proxy.Password = "secret"
+	cfg.WireGuard.PrivateKey = key.String()
+	cfg.WireGuard.Addresses = []string{"100.64.96.1/32"}
+	eng, err := New(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+	if err := eng.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	reqMsg := new(dns.Msg)
+	reqMsg.SetQuestion("proxy.test.", dns.TypeTXT)
+	payload, err := reqMsg.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := "http://" + eng.Addr("http") + "/uwg/resolve"
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("unauthenticated resolve status = %d body=%q", resp.StatusCode, string(body))
+	}
+	resp.Body.Close()
+
+	req, err = http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("alice:secret")))
+	req.Header.Set("Content-Type", "application/dns-message")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("authenticated resolve status = %d body=%q", resp.StatusCode, string(body))
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dnsResp dns.Msg
+	if err := dnsResp.Unpack(body); err != nil {
+		t.Fatal(err)
+	}
+	if len(dnsResp.Answer) != 1 {
+		t.Fatalf("DNS answer count = %d, want 1", len(dnsResp.Answer))
 	}
 }
 
