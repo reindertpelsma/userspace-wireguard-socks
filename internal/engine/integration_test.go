@@ -34,6 +34,7 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/buildcfg"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/engine"
 	"golang.org/x/net/proxy"
@@ -1581,6 +1582,9 @@ func TestWireGuardSourceIPEnforced(t *testing.T) {
 }
 
 func TestTrafficShaperAppliesToTunnelTCP(t *testing.T) {
+	if buildcfg.Lite {
+		t.Skip("traffic shaper is not built in lite mode")
+	}
 	serverKey, clientKey := mustKey(t), mustKey(t)
 	serverPort := freeUDPPort(t)
 
@@ -1645,6 +1649,9 @@ func TestTrafficShaperAppliesToTunnelTCP(t *testing.T) {
 }
 
 func TestMeshControlServerBindsInsideTunnel(t *testing.T) {
+	if buildcfg.Lite {
+		t.Skip("mesh control is not built in lite mode")
+	}
 	serverKey, clientKey := mustKey(t), mustKey(t)
 	serverPort := freeUDPPort(t)
 

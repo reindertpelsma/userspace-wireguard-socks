@@ -787,7 +787,7 @@ func (c *Config) Normalize() error {
 	if err := c.normalizeTransports(); err != nil {
 		return err
 	}
-	return nil
+	return validateBuildConfig(c)
 }
 
 // synthesizeDirectiveTransports converts #! directive fields on WireGuard and

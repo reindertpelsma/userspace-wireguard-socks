@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	trafficshape "github.com/reindertpelsma/userspace-wireguard-socks/internal"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/netstackex"
@@ -2415,15 +2414,8 @@ func (e *Engine) allowRelayPacketMeta(packet []byte, meta relayPacketMeta) bool 
 	if !allowed {
 		return false
 	}
-	if peer := e.peerTrafficForIP(meta.dst.Addr()); peer != nil && peer.shaper != nil {
-		hash := trafficshape.HashFlow(meta.src, meta.dst)
-		allowPacket, markECN := peer.shaper.ShapeUploadECN(packet, hash, packetECNCapable(packet))
-		if !allowPacket {
-			return false
-		}
-		if markECN {
-			_ = markPacketECN(packet)
-		}
+	if !e.allowRelayTrafficPacket(packet, meta) {
+		return false
 	}
 	return true
 }

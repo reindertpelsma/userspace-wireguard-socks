@@ -1,6 +1,8 @@
 // Copyright (c) 2026 Reindert Pelsma
 // SPDX-License-Identifier: ISC
 
+//go:build !lite
+
 package engine
 
 import (
@@ -210,6 +212,20 @@ func (c *peerTrafficConn) Read(p []byte) (int, error) {
 		}
 	}
 	return n, err
+}
+
+func (e *Engine) allowRelayTrafficPacket(packet []byte, meta relayPacketMeta) bool {
+	if peer := e.peerTrafficForIP(meta.dst.Addr()); peer != nil && peer.shaper != nil {
+		hash := trafficshape.HashFlow(meta.src, meta.dst)
+		allowPacket, markECN := peer.shaper.ShapeUploadECN(packet, hash, packetECNCapable(packet))
+		if !allowPacket {
+			return false
+		}
+		if markECN {
+			_ = markPacketECN(packet)
+		}
+	}
+	return true
 }
 
 func (c *peerTrafficConn) Write(p []byte) (int, error) {

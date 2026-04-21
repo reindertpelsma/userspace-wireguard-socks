@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/buildcfg"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 )
 
@@ -246,6 +247,9 @@ func TestRelayConntrackIPv6TCP(t *testing.T) {
 }
 
 func TestRelayStatelessFallbackRequiresBothPeersToAcceptDynamicACLs(t *testing.T) {
+	if buildcfg.Lite {
+		t.Skip("mesh control is not built in lite mode")
+	}
 	e := testRelayEngineWithPeers(t, acl.List{
 		Default: acl.Deny,
 		Rules: []acl.Rule{{
@@ -284,6 +288,9 @@ func TestRelayStatelessFallbackRequiresBothPeersToAcceptDynamicACLs(t *testing.T
 }
 
 func TestRelayStatelessFallbackAllowsForwardDirectionWhenBothPeersAcceptDynamicACLs(t *testing.T) {
+	if buildcfg.Lite {
+		t.Skip("mesh control is not built in lite mode")
+	}
 	e := testRelayEngineWithPeers(t, acl.List{
 		Default: acl.Deny,
 		Rules: []acl.Rule{{
@@ -304,6 +311,9 @@ func TestRelayStatelessFallbackAllowsForwardDirectionWhenBothPeersAcceptDynamicA
 }
 
 func TestRelayStatelessFallbackAllowsTrustedPeers(t *testing.T) {
+	if buildcfg.Lite {
+		t.Skip("mesh control is not built in lite mode")
+	}
 	e := testRelayEngineWithPeers(t, acl.List{
 		Default: acl.Deny,
 		Rules: []acl.Rule{{
@@ -324,6 +334,9 @@ func TestRelayStatelessFallbackAllowsTrustedPeers(t *testing.T) {
 }
 
 func TestRelayStatelessFallbackTrustedIfDynamicACLsRequiresCapablePeer(t *testing.T) {
+	if buildcfg.Lite {
+		t.Skip("mesh control is not built in lite mode")
+	}
 	e := testRelayEngineWithPeers(t, acl.List{
 		Default: acl.Deny,
 		Rules: []acl.Rule{{
@@ -360,6 +373,9 @@ func TestRelayStatelessFallbackTrustedIfDynamicACLsRequiresCapablePeer(t *testin
 }
 
 func TestMeshInboundACLAppliesToStaticParentAndDynamicChildSources(t *testing.T) {
+	if buildcfg.Lite {
+		t.Skip("mesh control is not built in lite mode")
+	}
 	e := testRelayEngineWithPeers(t, acl.List{Default: acl.Allow}, []config.Peer{
 		{PublicKey: "parent", AllowedIPs: []string{"100.64.50.1/32"}, MeshAcceptACLs: true},
 	})
@@ -397,6 +413,9 @@ func TestMeshInboundACLAppliesToStaticParentAndDynamicChildSources(t *testing.T)
 }
 
 func TestMeshTrustedPeerOutboundACLIsEnforced(t *testing.T) {
+	if buildcfg.Lite {
+		t.Skip("mesh control is not built in lite mode")
+	}
 	e := testRelayEngineWithPeers(t, acl.List{Default: acl.Allow}, []config.Peer{
 		{PublicKey: "peer-a", AllowedIPs: []string{"100.64.2.2/32"}, MeshTrust: config.MeshTrustTrustedAlways},
 	})
