@@ -36,6 +36,8 @@ type apiPeer struct {
 	AllowedIPs          []string             `json:"allowed_ips"`
 	PersistentKeepalive int                  `json:"persistent_keepalive,omitempty"`
 	TrafficShaper       config.TrafficShaper `json:"traffic_shaper,omitempty"`
+	ControlURL          string               `json:"control_url,omitempty"`
+	MeshEnabled         bool                 `json:"mesh_enabled,omitempty"`
 	MeshAcceptACLs      bool                 `json:"mesh_accept_acls,omitempty"`
 	MeshTrust           config.MeshTrust     `json:"mesh_trust,omitempty"`
 }
@@ -845,6 +847,8 @@ func peerToAPI(p config.Peer) apiPeer {
 		AllowedIPs:          append([]string(nil), p.AllowedIPs...),
 		PersistentKeepalive: p.PersistentKeepalive,
 		TrafficShaper:       p.TrafficShaper,
+		ControlURL:          p.ControlURL,
+		MeshEnabled:         p.MeshEnabled,
 		MeshAcceptACLs:      p.MeshAcceptACLs,
 		MeshTrust:           p.MeshTrust,
 	}
@@ -858,6 +862,8 @@ func peerFromAPI(p apiPeer) config.Peer {
 		AllowedIPs:          append([]string(nil), p.AllowedIPs...),
 		PersistentKeepalive: p.PersistentKeepalive,
 		TrafficShaper:       p.TrafficShaper,
+		ControlURL:          p.ControlURL,
+		MeshEnabled:         p.MeshEnabled,
 		MeshAcceptACLs:      p.MeshAcceptACLs,
 		MeshTrust:           p.MeshTrust,
 	}

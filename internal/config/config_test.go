@@ -384,6 +384,7 @@ AllowedIPs = 0.0.0.0/0
 #!TCP=required
 #!SkipVerifyTLS=yes
 #!URL=https://vpn.example.com/wg
+#!Control=http://10.0.0.1:8787
 `
 	var wg WireGuard
 	if err := MergeWGQuick(&wg, text); err != nil {
@@ -407,6 +408,9 @@ AllowedIPs = 0.0.0.0/0
 	}
 	if p.ConnectURL != "https://vpn.example.com/wg" {
 		t.Fatalf("ConnectURL: want https://vpn.example.com/wg, got %q", p.ConnectURL)
+	}
+	if p.ControlURL != "http://10.0.0.1:8787" || !p.MeshEnabled {
+		t.Fatalf("ControlURL/MeshEnabled not parsed: %+v", p)
 	}
 }
 

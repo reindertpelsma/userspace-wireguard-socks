@@ -1223,6 +1223,16 @@ func applyWGDirective(dst *WireGuard, peer *Peer, section, directive string, lin
 			return fmt.Errorf("wg config line %d: #!URL requires a URL value", lineNo)
 		}
 		peer.ConnectURL = value
+
+	case "CONTROL":
+		if peer == nil {
+			return fmt.Errorf("wg config line %d: #!Control is only valid in [Peer]", lineNo)
+		}
+		if !hasValue || value == "" {
+			return fmt.Errorf("wg config line %d: #!Control requires a URL value", lineNo)
+		}
+		peer.ControlURL = value
+		peer.MeshEnabled = true
 	}
 	return nil
 }
