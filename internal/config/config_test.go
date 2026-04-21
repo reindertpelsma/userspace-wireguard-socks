@@ -471,6 +471,40 @@ AllowedIPs = 0.0.0.0/0
 	}
 }
 
+func TestSynthesizeDirectiveTURNHTTPPath(t *testing.T) {
+	priv := mustConfigKey(t)
+	peer := mustConfigKey(t)
+
+	text := `
+[Interface]
+PrivateKey = ` + priv.String() + `
+Address = 10.0.0.1/24
+#!TURN=turn+https://bob:pass@relay.example.com:443/turn
+
+[Peer]
+PublicKey = ` + peer.PublicKey().String() + `
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0
+`
+	cfg := &Config{}
+	if err := MergeWGQuick(&cfg.WireGuard, text); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Transports) != 1 {
+		t.Fatalf("expected 1 synthesized transport, got %d", len(cfg.Transports))
+	}
+	tr := cfg.Transports[0]
+	if tr.TURN.Protocol != "https" {
+		t.Fatalf("turn protocol = %q, want https", tr.TURN.Protocol)
+	}
+	if tr.WebSocket.Path != "/turn" {
+		t.Fatalf("turn websocket path = %q, want /turn", tr.WebSocket.Path)
+	}
+}
+
 func mustConfigKey(t *testing.T) wgtypes.Key {
 	t.Helper()
 	key, err := wgtypes.GeneratePrivateKey()

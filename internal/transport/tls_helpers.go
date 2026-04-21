@@ -36,6 +36,10 @@ func buildCertManager(tlsCfg TLSConfig, autoGenerate bool) (*CertManager, error)
 	return mgr, nil
 }
 
+func NewCertManager(tlsCfg TLSConfig, autoGenerate bool) (*CertManager, error) {
+	return buildCertManager(tlsCfg, autoGenerate)
+}
+
 func parseTLSReloadInterval(raw string) (time.Duration, error) {
 	if raw == "" {
 		return 0, nil
@@ -69,6 +73,10 @@ func buildTLSServerConfig(tlsCfg TLSConfig, certMgr *CertManager) (*tls.Config, 
 	cfg.ClientAuth = tls.RequireAndVerifyClientCert
 	cfg.ClientCAs = pool
 	return cfg, nil
+}
+
+func BuildTLSServerConfigForServer(tlsCfg TLSConfig, certMgr *CertManager) (*tls.Config, error) {
+	return buildTLSServerConfig(tlsCfg, certMgr)
 }
 
 func buildTLSClientConfig(tlsCfg TLSConfig, certMgr *CertManager, defaultServerName string, defaultVerifyPeer bool) (*tls.Config, error) {

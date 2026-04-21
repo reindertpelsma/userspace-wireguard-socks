@@ -96,7 +96,7 @@ type WireGuard struct {
 type TURN struct {
 	// Server is the TURN server address (host:port).
 	Server string `yaml:"server"`
-	// Protocol is how to reach the TURN server: udp | tcp | tls | dtls.
+	// Protocol is how to reach the TURN server: udp | tcp | tls | dtls | http | https | quic.
 	Protocol string `yaml:"protocol"`
 	// Username for TURN authentication.
 	Username string `yaml:"username"`
@@ -845,7 +845,8 @@ func (c *Config) synthesizeDirectiveTransports() error {
 }
 
 // parseTURNDirectiveURL parses a #!TURN= URL into a transport.Config.
-// Supported schemes: turn (UDP), turns (TLS), turn+udp, turn+tcp, turn+tls, turn+dtls.
+// Supported schemes: turn (UDP), turns (TLS), turn+udp, turn+tcp, turn+tls,
+// turn+dtls, turn+http, turn+https, and turn+quic.
 func parseTURNDirectiveURL(name, rawURL string) (transport.Config, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -872,6 +873,9 @@ func parseTURNDirectiveURL(name, rawURL string) (transport.Config, error) {
 			Username: username,
 			Password: password,
 			Protocol: proto,
+		},
+		WebSocket: transport.WebSocketConfig{
+			Path: u.Path,
 		},
 	}, nil
 }

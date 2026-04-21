@@ -401,7 +401,7 @@ func newTURNTransport(cfg config.Config) (*transport.TURNTransport, error) {
 		publicKey := privateKey.PublicKey()
 		copy(wgPubKey[:], publicKey[:])
 	}
-	return transport.NewTURNTransport("turn", turnCfg, transport.NewDirectDialer(false, netip.Prefix{}), wgPubKey)
+	return transport.NewTURNTransport("turn", turnCfg, transport.WebSocketConfig{}, transport.NewDirectDialer(false, netip.Prefix{}), wgPubKey)
 }
 
 func (e *Engine) newTURNTransport(cfg config.Config) (*transport.TURNTransport, error) {
@@ -424,7 +424,7 @@ func (e *Engine) newTURNTransport(cfg config.Config) (*transport.TURNTransport, 
 		publicKey := privateKey.PublicKey()
 		copy(wgPubKey[:], publicKey[:])
 	}
-	return transport.NewTURNTransport("turn", turnCfg, e.transportDirectDialer(false, netip.Prefix{}), wgPubKey)
+	return transport.NewTURNTransport("turn", turnCfg, transport.WebSocketConfig{}, e.transportDirectDialer(false, netip.Prefix{}), wgPubKey)
 }
 
 func (e *Engine) transportDirectDialer(ipv6Translate bool, prefix netip.Prefix) transport.ProxyDialer {

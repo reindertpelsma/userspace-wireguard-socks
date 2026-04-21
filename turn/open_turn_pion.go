@@ -83,6 +83,7 @@ type ListenConfig struct {
 type TURNListenerConfig struct {
 	Type           string `yaml:"type"`
 	Listen         string `yaml:"listen"`
+	Path           string `yaml:"path,omitempty"`
 	CertFile       string `yaml:"cert_file,omitempty"`
 	KeyFile        string `yaml:"key_file,omitempty"`
 	VerifyPeer     bool   `yaml:"verify_peer,omitempty"`
@@ -267,9 +268,12 @@ func normalizedTURNListeners(cfg Config) ([]TURNListenerConfig, error) {
 			return nil, fmt.Errorf("listener %d: listen is required", i)
 		}
 		switch listeners[i].Type {
-		case "udp", "tcp", "tls", "dtls":
+		case "udp", "tcp", "tls", "dtls", "http", "https", "quic":
 		default:
 			return nil, fmt.Errorf("listener %d: unknown type %q", i, listeners[i].Type)
+		}
+		if listeners[i].Path == "" && (listeners[i].Type == "http" || listeners[i].Type == "https" || listeners[i].Type == "quic") {
+			listeners[i].Path = "/turn"
 		}
 	}
 	return listeners, nil
@@ -1098,6 +1102,79 @@ func buildPionServer(cfg Config) (*openRelayPion, error) {
 				PermissionHandler:     permissionHandler,
 			})
 			wrapper.recordListener(listener.Type, ln.Addr())
+		case "http":
+			rawListener, err := net.Listen("tcp", listener.Listen)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			httpServer, err := newTurnHTTPServer(rawListener, listener.Path)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			packetConnConfigs = append(packetConnConfigs, turn.PacketConnConfig{
+				PacketConn:            httpServer.PacketConn,
+				RelayAddressGenerator: relayGen,
+				PermissionHandler:     permissionHandler,
+			})
+			listenerConfigs = append(listenerConfigs, turn.ListenerConfig{
+				Listener:              httpServer.Listener,
+				RelayAddressGenerator: relayGen,
+				PermissionHandler:     permissionHandler,
+			})
+			wrapper.recordListener(listener.Type, httpServer.Addr())
+		case "https":
+			certMgr, err := newTurnCertManager(listener)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			wrapper.certManagers = append(wrapper.certManagers, certMgr)
+			rawListener, err := net.Listen("tcp", listener.Listen)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			serverTLS, err := buildTurnTLSServerConfig(listener, certMgr)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			httpServer, err := newTurnHTTPServer(tls.NewListener(rawListener, serverTLS), listener.Path)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			packetConnConfigs = append(packetConnConfigs, turn.PacketConnConfig{
+				PacketConn:            httpServer.PacketConn,
+				RelayAddressGenerator: relayGen,
+				PermissionHandler:     permissionHandler,
+			})
+			listenerConfigs = append(listenerConfigs, turn.ListenerConfig{
+				Listener:              httpServer.Listener,
+				RelayAddressGenerator: relayGen,
+				PermissionHandler:     permissionHandler,
+			})
+			wrapper.recordListener(listener.Type, httpServer.Addr())
+		case "quic":
+			certMgr, err := newTurnCertManager(listener)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			wrapper.certManagers = append(wrapper.certManagers, certMgr)
+			server, err := newTurnQUICServer(listener, certMgr)
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			packetConnConfigs = append(packetConnConfigs, turn.PacketConnConfig{
+				PacketConn:            server.PacketConn,
+				RelayAddressGenerator: relayGen,
+				PermissionHandler:     permissionHandler,
+			})
+			wrapper.recordListener(listener.Type, server.Addr())
 		}
 	}
 	server, err := turn.NewServer(turn.ServerConfig{

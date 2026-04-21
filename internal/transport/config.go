@@ -113,7 +113,7 @@ type TURNConfig struct {
 	Username string `yaml:"username" json:"username"`
 	Password string `yaml:"password" json:"password"`
 	Realm    string `yaml:"realm,omitempty" json:"realm,omitempty"`
-	// Protocol is how to reach the TURN server: udp | tcp | tls | dtls
+	// Protocol is how to reach the TURN server: udp | tcp | tls | dtls | http | https | quic
 	// Note: TURN does not need encryption for security, its only to bypass firewalls or hide the VPN as web traffic
 	Protocol string `yaml:"protocol,omitempty" json:"protocol,omitempty"`
 	// NoCreatePermission skips CreatePermission calls (open relays).

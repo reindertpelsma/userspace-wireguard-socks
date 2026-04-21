@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +42,7 @@ const (
 type TURNTransport struct {
 	name     string
 	cfg      TURNConfig
+	wsCfg    WebSocketConfig
 	dialer   ProxyDialer
 	wgPubKey [32]byte // injected when IncludeWGPublicKey is set
 	certMgr  *CertManager
@@ -59,7 +61,7 @@ type TURNTransport struct {
 }
 
 // NewTURNTransport creates a TURNTransport from the given transport config.
-func NewTURNTransport(name string, cfg TURNConfig, dialer ProxyDialer, wgPubKey [32]byte) (*TURNTransport, error) {
+func NewTURNTransport(name string, cfg TURNConfig, wsCfg WebSocketConfig, dialer ProxyDialer, wgPubKey [32]byte) (*TURNTransport, error) {
 	autoGenerate := cfg.Protocol == "dtls"
 	certMgr, err := buildCertManager(cfg.TLS, autoGenerate)
 	if err != nil {
@@ -71,6 +73,7 @@ func NewTURNTransport(name string, cfg TURNConfig, dialer ProxyDialer, wgPubKey 
 	return &TURNTransport{
 		name:            name,
 		cfg:             cfg,
+		wsCfg:           wsCfg,
 		dialer:          dialer,
 		wgPubKey:        wgPubKey,
 		certMgr:         certMgr,
@@ -241,6 +244,46 @@ func (t *TURNTransport) dialCarrier(ctx context.Context) (net.PacketConn, error)
 		}
 		t.carrierRemoteAddr = t.cfg.Server
 		return turn.NewSTUNConn(dtlsConn), nil
+
+	case "http":
+		if strings.EqualFold(strings.TrimSpace(t.wsCfg.UpgradeMode), string(HTTPUpgradeModeProxyGuard)) {
+			conn, err := DialTURNHTTPStreamConn(ctx, t.cfg.Server, false, t.dialer, t.certMgr, t.cfg.TLS, t.wsCfg)
+			if err != nil {
+				return nil, err
+			}
+			t.carrierRemoteAddr = addrString(conn.RemoteAddr())
+			return turn.NewSTUNConn(conn), nil
+		}
+		pc, err := DialTURNHTTPPacketConn(ctx, t.cfg.Server, false, t.dialer, t.certMgr, t.cfg.TLS, t.wsCfg)
+		if err != nil {
+			return nil, err
+		}
+		t.carrierRemoteAddr = t.cfg.Server
+		return pc, nil
+
+	case "https":
+		if strings.EqualFold(strings.TrimSpace(t.wsCfg.UpgradeMode), string(HTTPUpgradeModeProxyGuard)) {
+			conn, err := DialTURNHTTPStreamConn(ctx, t.cfg.Server, true, t.dialer, t.certMgr, t.cfg.TLS, t.wsCfg)
+			if err != nil {
+				return nil, err
+			}
+			t.carrierRemoteAddr = addrString(conn.RemoteAddr())
+			return turn.NewSTUNConn(conn), nil
+		}
+		pc, err := DialTURNHTTPPacketConn(ctx, t.cfg.Server, true, t.dialer, t.certMgr, t.cfg.TLS, t.wsCfg)
+		if err != nil {
+			return nil, err
+		}
+		t.carrierRemoteAddr = t.cfg.Server
+		return pc, nil
+
+	case "quic":
+		pc, err := DialTURNQUICPacketConn(ctx, t.cfg.Server, t.dialer, t.certMgr, t.cfg.TLS, t.wsCfg)
+		if err != nil {
+			return nil, err
+		}
+		t.carrierRemoteAddr = t.cfg.Server
+		return pc, nil
 	}
 	return nil, fmt.Errorf("turn: unknown carrier protocol %q", t.cfg.Protocol)
 }

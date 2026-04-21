@@ -203,7 +203,7 @@ func buildBaseTransport(cfg Config, dialer ProxyDialer, wgPubKey [32]byte) (Tran
 		return NewUDPTransport(cfg.Name, listenAddrs, d), nil
 
 	case "turn":
-		return NewTURNTransport(cfg.Name, cfg.TURN, dialer, wgPubKey)
+		return NewTURNTransport(cfg.Name, cfg.TURN, cfg.WebSocket, dialer, wgPubKey)
 
 	case "tcp":
 		return NewTCPTransport(cfg.Name, dialer, listenAddrs), nil

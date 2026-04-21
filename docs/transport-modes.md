@@ -164,6 +164,9 @@ TURN supports the following transport modes:
 * TURN TCP
 * TURN TLS
 * TURN DTLS
+* TURN HTTP over WebSocket or raw HTTP upgrade
+* TURN HTTPS over WebSocket or raw HTTP upgrade
+* TURN QUIC over WebTransport datagrams, with RFC 9220 WebSocket over HTTP/3 also accepted on the same path
 
 TURN is also used by WebRTC so TURN traffic is very unlikely to be blocked/affected by firewalls as many web applications and apps legitemately use this for multimedia streaming, even the normal TURN UDP which does not use any kind of concealing/obfuscation.
 
@@ -177,13 +180,18 @@ transports:
       username: wg
       password: secret # password is not sent over clear in turn, but used to authenticate the connection with a hash
       realm: example
-      protocol: udp # udp, tcp, tls, dtls
+      protocol: udp # udp, tcp, tls, dtls, http, https, quic
       no_create_permission: false
       include_wg_public_key: false
       permissions: [198.51.100.10/32]
       
       # a TLS section can be put for TURN as well
 ```
+
+For TURN over HTTP/HTTPS/QUIC the default path is `/turn`. The same TURN
+listener accepts both WebSocket framing and a raw `Upgrade: TURN` stream on
+that path, so reverse proxies can choose between WebSocket compatibility and
+plain upgraded-stream backpressure semantics.
 
 # Proxy
 

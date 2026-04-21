@@ -6,7 +6,7 @@ It is built on Pion TURN and adds:
 - fixed relay ports per user
 - username-as-port range mode
 - per-user dynamic port ranges
-- multiple TURN listeners: UDP, TCP, TLS, and DTLS
+- multiple TURN listeners: UDP, TCP, TLS, DTLS, HTTP, HTTPS, and QUIC
 - auto-generated TLS/DTLS certs when no files are configured, plus hot reload for certificate files
 - optional mapped/public relay addresses
 - internal relay-to-relay routing optimization
@@ -57,12 +57,19 @@ Top-level fields:
 ### Listeners
 
 At least one listener is required. Each listener declares:
-- `type`: `udp`, `tcp`, `tls`, or `dtls`
+- `type`: `udp`, `tcp`, `tls`, `dtls`, `http`, `https`, or `quic`
 - `listen`: bind address, for example `0.0.0.0:3478`
-- `cert_file` and `key_file` for `tls` or `dtls` listeners
+- `path` for `http`, `https`, or `quic` listeners, default `/turn`
+- `cert_file` and `key_file` for `tls`, `dtls`, `https`, or `quic` listeners
 - `reload_interval` to periodically reload renewed certificate files
 
-If a `tls` or `dtls` listener is configured without certificate files, the server generates a self-signed certificate automatically at startup.
+If a `tls`, `dtls`, `https`, or `quic` listener is configured without certificate files, the server generates a self-signed certificate automatically at startup.
+
+HTTP-carried listeners accept both:
+- WebSocket framing with `Sec-WebSocket-Protocol: turn`, one TURN message per frame
+- raw upgraded streams with `Upgrade: TURN`, carrying ordinary TURN-over-TCP framing
+
+QUIC listeners accept WebTransport datagrams for TURN messages and also RFC 9220 WebSocket over HTTP/3 on the same path.
 
 ```yaml
 listen:
