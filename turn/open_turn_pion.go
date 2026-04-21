@@ -33,6 +33,7 @@ type Config struct {
 	NonceTTL           string               `yaml:"nonce_ttl"`
 	PreopenSinglePorts bool                 `yaml:"preopen_single_ports"`
 	Listen             ListenConfig         `yaml:"listen"`
+	API                APIConfig            `yaml:"api"`
 	Listeners          []TURNListenerConfig `yaml:"listeners"`
 	Users              []UserConfig         `yaml:"users"`
 	PortRanges         []RangeConfig        `yaml:"port_ranges"`
@@ -281,40 +282,50 @@ func normalizedTURNListeners(cfg Config) ([]TURNListenerConfig, error) {
 }
 
 func newOpenRelayPion(cfg Config) (*openRelayPion, error) {
+	userRules, rangeRules, err := buildAuthState(cfg)
+	if err != nil {
+		return nil, err
+	}
 	o := &openRelayPion{
 		cfg:                 cfg,
-		userRules:           map[string]*turnAuthRule{},
+		userRules:           userRules,
+		rangeRules:          rangeRules,
 		reservations:        map[string]*relayReservation{},
 		clientReservations:  map[string]*relayReservation{},
 		activeRelays:        map[string]*relayPacketConn{},
 		reservedPublicAddrs: map[string]struct{}{},
 	}
+	return o, nil
+}
+
+func buildAuthState(cfg Config) (map[string]*turnAuthRule, []turnRangeRule, error) {
+	userRules := map[string]*turnAuthRule{}
 	for _, u := range cfg.Users {
 		if err := validateUserConfig(u); err != nil {
-			return nil, fmt.Errorf("user %q: %w", u.Username, err)
+			return nil, nil, fmt.Errorf("user %q: %w", u.Username, err)
 		}
 		nets, err := parseCIDRs(u.SourceNetworks)
 		if err != nil {
-			return nil, fmt.Errorf("user %q source_networks: %w", u.Username, err)
+			return nil, nil, fmt.Errorf("user %q source_networks: %w", u.Username, err)
 		}
 		mapped, err := parseMappedAddress(u.MappedAddress)
 		if err != nil {
-			return nil, fmt.Errorf("user %q mapped_address: %w", u.Username, err)
+			return nil, nil, fmt.Errorf("user %q mapped_address: %w", u.Username, err)
 		}
 		mappedIP, mappedStart, err := parseMappedRange(u.MappedRange, u.PortRangeEnd-u.PortRangeStart)
 		if err != nil {
-			return nil, fmt.Errorf("user %q mapped_range: %w", u.Username, err)
+			return nil, nil, fmt.Errorf("user %q mapped_range: %w", u.Username, err)
 		}
 		var guard *WireguardGuard
 		if u.WireguardPublicKey != "" {
 			pk, err := decodePublicKey(u.WireguardPublicKey)
 			if err != nil {
-				return nil, fmt.Errorf("user %q wireguard_public_key: %w", u.Username, err)
+				return nil, nil, fmt.Errorf("user %q wireguard_public_key: %w", u.Username, err)
 			}
 			guard = NewWireguardGuard(pk)
 			guard.MaxSessions = u.MaxSessions
 		}
-		o.userRules[u.Username] = &turnAuthRule{
+		userRules[u.Username] = &turnAuthRule{
 			Username:         u.Username,
 			Password:         u.Password,
 			RequestedPort:    u.Port,
@@ -332,28 +343,30 @@ func newOpenRelayPion(cfg Config) (*openRelayPion, error) {
 			InternalOnly:     u.InternalOnly,
 		}
 	}
+
+	rangeRules := make([]turnRangeRule, 0, len(cfg.PortRanges))
 	for _, r := range cfg.PortRanges {
 		if err := validateRangeConfig(r); err != nil {
-			return nil, fmt.Errorf("range %d-%d: %w", r.Start, r.End, err)
+			return nil, nil, fmt.Errorf("range %d-%d: %w", r.Start, r.End, err)
 		}
 		nets, err := parseCIDRs(r.SourceNetworks)
 		if err != nil {
-			return nil, fmt.Errorf("range %d-%d source_networks: %w", r.Start, r.End, err)
+			return nil, nil, fmt.Errorf("range %d-%d source_networks: %w", r.Start, r.End, err)
 		}
 		mappedIP, mappedStart, err := parseMappedRange(r.MappedRange, r.End-r.Start)
 		if err != nil {
-			return nil, fmt.Errorf("range %d-%d mapped_range: %w", r.Start, r.End, err)
+			return nil, nil, fmt.Errorf("range %d-%d mapped_range: %w", r.Start, r.End, err)
 		}
 		var guard *WireguardGuard
 		if r.WireguardPublicKey != "" {
 			pk, err := decodePublicKey(r.WireguardPublicKey)
 			if err != nil {
-				return nil, fmt.Errorf("range %d-%d wireguard_public_key: %w", r.Start, r.End, err)
+				return nil, nil, fmt.Errorf("range %d-%d wireguard_public_key: %w", r.Start, r.End, err)
 			}
 			guard = NewWireguardGuard(pk)
 			guard.MaxSessions = r.MaxSessions
 		}
-		o.rangeRules = append(o.rangeRules, turnRangeRule{
+		rangeRules = append(rangeRules, turnRangeRule{
 			Start:          r.Start,
 			End:            r.End,
 			Password:       r.Password,
@@ -368,8 +381,8 @@ func newOpenRelayPion(cfg Config) (*openRelayPion, error) {
 			InternalOnly:   r.InternalOnly,
 		})
 	}
-	sort.Slice(o.rangeRules, func(i, j int) bool { return o.rangeRules[i].Start < o.rangeRules[j].Start })
-	return o, nil
+	sort.Slice(rangeRules, func(i, j int) bool { return rangeRules[i].Start < rangeRules[j].Start })
+	return userRules, rangeRules, nil
 }
 
 func validateUserConfig(cfg UserConfig) error {
@@ -402,6 +415,93 @@ func validateRangeConfig(cfg RangeConfig) error {
 		return errors.New("invalid port range")
 	}
 	return nil
+}
+
+func (o *openRelayPion) usersSnapshot() []UserConfig {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return append([]UserConfig(nil), o.cfg.Users...)
+}
+
+func (o *openRelayPion) portRangesSnapshot() []RangeConfig {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return append([]RangeConfig(nil), o.cfg.PortRanges...)
+}
+
+func (o *openRelayPion) replaceAuthState(users []UserConfig, ranges []RangeConfig) error {
+	nextCfg := o.cfg
+	nextCfg.Users = append([]UserConfig(nil), users...)
+	nextCfg.PortRanges = append([]RangeConfig(nil), ranges...)
+	userRules, rangeRules, err := buildAuthState(nextCfg)
+	if err != nil {
+		return err
+	}
+	o.mu.Lock()
+	o.cfg.Users = nextCfg.Users
+	o.cfg.PortRanges = nextCfg.PortRanges
+	o.userRules = userRules
+	o.rangeRules = rangeRules
+	o.mu.Unlock()
+	return nil
+}
+
+func (o *openRelayPion) upsertUser(user UserConfig) error {
+	users := o.usersSnapshot()
+	for i := range users {
+		if users[i].Username == user.Username {
+			users[i] = user
+			return o.replaceAuthState(users, o.portRangesSnapshot())
+		}
+	}
+	users = append(users, user)
+	return o.replaceAuthState(users, o.portRangesSnapshot())
+}
+
+func (o *openRelayPion) deleteUser(username string) error {
+	users := o.usersSnapshot()
+	out := users[:0]
+	found := false
+	for _, user := range users {
+		if user.Username == username {
+			found = true
+			continue
+		}
+		out = append(out, user)
+	}
+	if !found {
+		return fmt.Errorf("user %q not found", username)
+	}
+	return o.replaceAuthState(out, o.portRangesSnapshot())
+}
+
+func (o *openRelayPion) upsertPortRange(r RangeConfig) error {
+	ranges := o.portRangesSnapshot()
+	for i := range ranges {
+		if ranges[i].Start == r.Start && ranges[i].End == r.End {
+			ranges[i] = r
+			return o.replaceAuthState(o.usersSnapshot(), ranges)
+		}
+	}
+	ranges = append(ranges, r)
+	return o.replaceAuthState(o.usersSnapshot(), ranges)
+}
+
+func (o *openRelayPion) deletePortRange(start, end int) error {
+	ranges := o.portRangesSnapshot()
+	out := ranges[:0]
+	found := false
+	for _, current := range ranges {
+		if current.Start == start && current.End == end {
+			found = true
+			continue
+		}
+		out = append(out, current)
+	}
+	if !found {
+		return fmt.Errorf("port range %d-%d not found", start, end)
+	}
+	return o.replaceAuthState(o.usersSnapshot(), out)
 }
 
 func (o *openRelayPion) authHandler(username, realm string, srcAddr net.Addr) ([]byte, bool) {
@@ -469,6 +569,8 @@ func (o *openRelayPion) authHandler(username, realm string, srcAddr net.Addr) ([
 }
 
 func (o *openRelayPion) lookup(username string) (*authLookup, error) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
 	if u := o.userRules[username]; u != nil {
 		return &authLookup{
 			Password:         u.Password,
@@ -1496,6 +1598,19 @@ func main() {
 			log.Printf("close server: %v", err)
 		}
 	}()
+
+	apiServer, err := startAPIServer(cfg.API, srv)
+	if err != nil {
+		log.Fatalf("start TURN API: %v", err)
+	}
+	if apiServer != nil {
+		defer func() {
+			if err := apiServer.Close(); err != nil {
+				log.Printf("close TURN API: %v", err)
+			}
+		}()
+		log.Printf("TURN API listening on %s", apiServer.Addr())
+	}
 
 	log.Printf("TURN server listening on %s with relay IP %s and realm %s", cfg.Listen.TurnListen, cfg.Listen.RelayIP, cfg.Realm)
 	select {}

@@ -13,6 +13,7 @@ It is built on Pion TURN and adds:
 - `outbound_only` users that may only receive replies after they send first
 - `internal_only` users that may only talk to other TURN allocations on the same server
 - optional WireGuard packet filtering on each relay port
+- optional local management API for status, user updates, and username-as-port range updates
 
 ## Quick Start
 
@@ -50,6 +51,8 @@ Top-level fields:
 - `allocation_ttl`
 - `nonce_ttl`
 - `preopen_single_ports`
+- `api.listen`
+- `api.token`
 - `listen.relay_ip`
 - `listeners`
 - `max_sessions`
@@ -70,6 +73,29 @@ HTTP-carried listeners accept both:
 - raw upgraded streams with `Upgrade: TURN`, carrying ordinary TURN-over-TCP framing
 
 QUIC listeners accept WebTransport datagrams for TURN messages and also RFC 9220 WebSocket over HTTP/3 on the same path.
+
+### Local Management API
+
+The standalone binary can expose a small authenticated local API:
+
+```yaml
+api:
+  listen: "unix:///var/run/turn.sock"
+  token: "replace-me"
+```
+
+Supported endpoints:
+- `GET /v1/status`
+- `GET /v1/users`
+- `PUT /v1/users`
+- `POST /v1/users`
+- `DELETE /v1/users?username=...`
+- `GET /v1/port-ranges`
+- `PUT /v1/port-ranges`
+- `POST /v1/port-ranges`
+- `DELETE /v1/port-ranges?start=...&end=...`
+
+This API is intended for local control planes such as `uwgsocks-ui`. Listener changes still require restart; user and port-range updates can be pushed live.
 
 ```yaml
 listen:
