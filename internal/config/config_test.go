@@ -176,6 +176,14 @@ reverse_forwards:
 dns_server:
   listen: 100.64.71.2:53
   max_inflight: 32
+mesh_control:
+  listen: 100.64.71.2:8787
+  challenge_rotate_seconds: 180
+  active_peer_window_seconds: 240
+  notify_window_seconds: 300
+  notify_min_interval_seconds: 45
+  subscribe_max_lifetime_seconds: 600
+  advertise_self: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +230,9 @@ dns_server:
 	if cfg.DNSServer.Listen != "100.64.71.2:53" || cfg.DNSServer.MaxInflight != 32 {
 		t.Fatalf("DNS server option mismatch: %+v", cfg.DNSServer)
 	}
+	if cfg.MeshControl.Listen != "100.64.71.2:8787" || cfg.MeshControl.ChallengeRotateSeconds != 180 || cfg.MeshControl.ActivePeerWindowSeconds != 240 || cfg.MeshControl.NotifyWindowSeconds != 300 || cfg.MeshControl.NotifyMinIntervalSeconds != 45 || cfg.MeshControl.SubscribeMaxLifetimeSeconds != 600 || !cfg.MeshControl.AdvertiseSelf {
+		t.Fatalf("mesh control option mismatch: %+v", cfg.MeshControl)
+	}
 }
 
 func TestLoadYAMLInlineWGQuick(t *testing.T) {
@@ -256,6 +267,55 @@ func TestNormalizeRejectsHostForwardRedirectIPAndTUN(t *testing.T) {
 	cfg.HostForward.Proxy.RedirectTUN = true
 	if err := cfg.Normalize(); err == nil || !strings.Contains(err.Error(), "redirect_ip and redirect_tun") {
 		t.Fatalf("Normalize err=%v, want redirect conflict", err)
+	}
+}
+
+func TestNormalizeRejectsInvalidControlURL(t *testing.T) {
+	cfg := Default()
+	cfg.WireGuard.PrivateKey = mustConfigKey(t).String()
+	cfg.WireGuard.Addresses = []string{"100.64.73.1/32"}
+	cfg.WireGuard.Peers = []Peer{{
+		PublicKey:  mustConfigKey(t).PublicKey().String(),
+		AllowedIPs: []string{"100.64.73.2/32"},
+		ControlURL: "ftp://100.64.73.1:8787",
+	}}
+	if err := cfg.Normalize(); err == nil || !strings.Contains(err.Error(), "control_url") {
+		t.Fatalf("Normalize err=%v, want control_url rejection", err)
+	}
+}
+
+func TestNormalizeEnablesMeshACLsByDefaultForControlPeers(t *testing.T) {
+	cfg := Default()
+	cfg.WireGuard.PrivateKey = mustConfigKey(t).String()
+	cfg.WireGuard.Addresses = []string{"100.64.73.1/32"}
+	cfg.WireGuard.Peers = []Peer{{
+		PublicKey:   mustConfigKey(t).PublicKey().String(),
+		AllowedIPs:  []string{"100.64.73.2/32"},
+		ControlURL:  "http://100.64.73.2:8787",
+		MeshEnabled: true,
+	}}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.WireGuard.Peers[0].MeshAcceptACLs {
+		t.Fatal("mesh_accept_acls was not enabled by default for mesh control peer")
+	}
+
+	cfg = Default()
+	cfg.WireGuard.PrivateKey = mustConfigKey(t).String()
+	cfg.WireGuard.Addresses = []string{"100.64.73.1/32"}
+	cfg.WireGuard.Peers = []Peer{{
+		PublicKey:       mustConfigKey(t).PublicKey().String(),
+		AllowedIPs:      []string{"100.64.73.2/32"},
+		ControlURL:      "http://100.64.73.2:8787",
+		MeshEnabled:     true,
+		MeshDisableACLs: true,
+	}}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WireGuard.Peers[0].MeshAcceptACLs {
+		t.Fatal("mesh_disable_acls did not disable mesh_accept_acls")
 	}
 }
 

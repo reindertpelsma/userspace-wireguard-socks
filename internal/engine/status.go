@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,11 +20,21 @@ import (
 // safe to expose through the management API: private and preshared keys from
 // the WireGuard UAPI dump are deliberately ignored while parsing.
 type Status struct {
-	Running           bool              `json:"running"`
-	ListenPort        int               `json:"listen_port,omitempty"`
-	ActiveConnections int               `json:"active_connections"`
-	Peers             []PeerStatus      `json:"peers"`
-	Transports        []TransportStatus `json:"transports,omitempty"`
+	Running           bool                `json:"running"`
+	ListenPort        int                 `json:"listen_port,omitempty"`
+	ActiveConnections int                 `json:"active_connections"`
+	Peers             []PeerStatus        `json:"peers"`
+	DynamicPeers      []DynamicPeerStatus `json:"dynamic_peers,omitempty"`
+	Transports        []TransportStatus   `json:"transports,omitempty"`
+}
+
+type DynamicPeerStatus struct {
+	PublicKey       string   `json:"public_key"`
+	ParentPublicKey string   `json:"parent_public_key"`
+	Endpoint        string   `json:"endpoint,omitempty"`
+	AllowedIPs      []string `json:"allowed_ips,omitempty"`
+	Active          bool     `json:"active"`
+	LastControlTime string   `json:"last_control_time,omitempty"`
 }
 
 // PeerStatus mirrors the operational counters reported by wireguard-go for a
@@ -46,6 +57,10 @@ type PeerStatus struct {
 	TransportEndpoint          string   `json:"transport_endpoint,omitempty"`
 	TransportSourceAddr        string   `json:"transport_source_addr,omitempty"`
 	TransportCarrierRemoteAddr string   `json:"transport_carrier_remote_addr,omitempty"`
+	Dynamic                    bool     `json:"dynamic,omitempty"`
+	ParentPublicKey            string   `json:"parent_public_key,omitempty"`
+	MeshActive                 bool     `json:"mesh_active,omitempty"`
+	MeshAcceptACLs             bool     `json:"mesh_accept_acls,omitempty"`
 }
 
 // Status returns a live snapshot of configured peers, transfer counters,
@@ -70,6 +85,7 @@ func (e *Engine) Status() (Status, error) {
 	parsed.ActiveConnections = st.ActiveConnections
 	parsed.Transports = e.GetTransportStatus()
 	e.annotatePeerTransportStatus(&parsed)
+	e.annotateDynamicPeerStatus(&parsed)
 	return parsed, nil
 }
 
@@ -250,6 +266,49 @@ func (e *Engine) annotatePeerTransportStatus(st *Status) {
 			ps.TransportEndpoint = stripTransportPrefix(ps.Endpoint)
 		}
 	}
+}
+
+func (e *Engine) annotateDynamicPeerStatus(st *Status) {
+	e.dynamicMu.RLock()
+	defer e.dynamicMu.RUnlock()
+	if len(e.dynamicPeers) == 0 {
+		return
+	}
+	for i := range st.Peers {
+		if dp := e.dynamicPeers[st.Peers[i].PublicKey]; dp != nil {
+			st.Peers[i].Dynamic = true
+			st.Peers[i].ParentPublicKey = dp.ParentPublicKey
+			st.Peers[i].MeshActive = dp.Active
+			st.Peers[i].MeshAcceptACLs = dp.Peer.MeshAcceptACLs
+			continue
+		}
+		if peer, _, ok := e.meshPeerConfig(st.Peers[i].PublicKey); ok {
+			st.Peers[i].MeshAcceptACLs = peer.MeshAcceptACLs
+		}
+	}
+	st.DynamicPeers = st.DynamicPeers[:0]
+	for _, dp := range e.dynamicPeers {
+		if dp == nil {
+			continue
+		}
+		item := DynamicPeerStatus{
+			PublicKey:       dp.Peer.PublicKey,
+			ParentPublicKey: dp.ParentPublicKey,
+			Endpoint:        dp.Peer.Endpoint,
+			AllowedIPs:      append([]string(nil), dp.Peer.AllowedIPs...),
+			Active:          dp.Active,
+		}
+		if !dp.LastControl.IsZero() {
+			item.LastControlTime = dp.LastControl.UTC().Format(time.RFC3339Nano)
+		}
+		st.DynamicPeers = append(st.DynamicPeers, item)
+	}
+	sort.Slice(st.DynamicPeers, func(i, j int) bool {
+		if st.DynamicPeers[i].ParentPublicKey == st.DynamicPeers[j].ParentPublicKey {
+			return st.DynamicPeers[i].PublicKey < st.DynamicPeers[j].PublicKey
+		}
+		return st.DynamicPeers[i].ParentPublicKey < st.DynamicPeers[j].ParentPublicKey
+	})
 }
 
 func matchPeerSnapshot(ps *PeerStatus, configuredTransport, configuredEndpoint string, snapshots []transport.SessionSnapshot) (transport.SessionSnapshot, bool) {

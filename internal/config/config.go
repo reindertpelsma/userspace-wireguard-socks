@@ -26,6 +26,7 @@ type Config struct {
 	Proxy         Proxy         `yaml:"proxy"`
 	Inbound       Inbound       `yaml:"inbound"`
 	HostForward   HostForward   `yaml:"host_forward"`
+	MeshControl   MeshControl   `yaml:"mesh_control"`
 	Routing       Routing       `yaml:"routing"`
 	TUN           TUN           `yaml:"tun"`
 	Filtering     Filtering     `yaml:"filtering"`
@@ -121,6 +122,11 @@ type Peer struct {
 	AllowedIPs          []string      `yaml:"allowed_ips"`
 	PersistentKeepalive int           `yaml:"persistent_keepalive"`
 	TrafficShaper       TrafficShaper `yaml:"traffic_shaper"`
+	ControlURL          string        `yaml:"control_url,omitempty"`
+	MeshEnabled         bool          `yaml:"mesh_enabled,omitempty"`
+	MeshAdvertise       *bool         `yaml:"mesh_advertise,omitempty"`
+	MeshDisableACLs     bool          `yaml:"mesh_disable_acls,omitempty"`
+	MeshAcceptACLs      bool          `yaml:"mesh_accept_acls,omitempty"`
 	// Transport is the name of a transport from the top-level transports list.
 	// Empty means use the default transport (first entry, or legacy UDP).
 	Transport string `yaml:"transport,omitempty"`
@@ -311,6 +317,16 @@ type DNSServer struct {
 	MaxInflight int    `yaml:"max_inflight"`
 }
 
+type MeshControl struct {
+	Listen                      string `yaml:"listen"`
+	ChallengeRotateSeconds      int    `yaml:"challenge_rotate_seconds"`
+	ActivePeerWindowSeconds     int    `yaml:"active_peer_window_seconds"`
+	NotifyWindowSeconds         int    `yaml:"notify_window_seconds"`
+	NotifyMinIntervalSeconds    int    `yaml:"notify_min_interval_seconds"`
+	SubscribeMaxLifetimeSeconds int    `yaml:"subscribe_max_lifetime_seconds"`
+	AdvertiseSelf               bool   `yaml:"advertise_self"`
+}
+
 type Scripts struct {
 	// Allow is opt-in because this userspace runtime does not need shell hooks
 	// for ordinary routing or firewall setup.
@@ -369,8 +385,17 @@ func Default() Config {
 		API: API{
 			AllowUnauthenticatedUnix: true,
 		},
-		Scripts:   Scripts{Allow: false},
-		DNSServer: DNSServer{MaxInflight: 1024},
+		Scripts: Scripts{Allow: false},
+		DNSServer: DNSServer{
+			MaxInflight: 1024,
+		},
+		MeshControl: MeshControl{
+			ChallengeRotateSeconds:      120,
+			ActivePeerWindowSeconds:     120,
+			NotifyWindowSeconds:         120,
+			NotifyMinIntervalSeconds:    60,
+			SubscribeMaxLifetimeSeconds: 300,
+		},
 	}
 }
 
@@ -625,6 +650,57 @@ func (c *Config) Normalize() error {
 	}
 	if c.DNSServer.MaxInflight < 0 {
 		return fmt.Errorf("dns_server.max_inflight must be >= 0")
+	}
+	if c.MeshControl.ChallengeRotateSeconds == 0 {
+		c.MeshControl.ChallengeRotateSeconds = 120
+	}
+	if c.MeshControl.ChallengeRotateSeconds < 0 {
+		return fmt.Errorf("mesh_control.challenge_rotate_seconds must be >= 0")
+	}
+	if c.MeshControl.ActivePeerWindowSeconds == 0 {
+		c.MeshControl.ActivePeerWindowSeconds = 120
+	}
+	if c.MeshControl.ActivePeerWindowSeconds < 0 {
+		return fmt.Errorf("mesh_control.active_peer_window_seconds must be >= 0")
+	}
+	if c.MeshControl.NotifyWindowSeconds == 0 {
+		c.MeshControl.NotifyWindowSeconds = 120
+	}
+	if c.MeshControl.NotifyWindowSeconds < 0 {
+		return fmt.Errorf("mesh_control.notify_window_seconds must be >= 0")
+	}
+	if c.MeshControl.NotifyMinIntervalSeconds == 0 {
+		c.MeshControl.NotifyMinIntervalSeconds = 60
+	}
+	if c.MeshControl.NotifyMinIntervalSeconds < 0 {
+		return fmt.Errorf("mesh_control.notify_min_interval_seconds must be >= 0")
+	}
+	if c.MeshControl.SubscribeMaxLifetimeSeconds == 0 {
+		c.MeshControl.SubscribeMaxLifetimeSeconds = 300
+	}
+	if c.MeshControl.SubscribeMaxLifetimeSeconds < 0 {
+		return fmt.Errorf("mesh_control.subscribe_max_lifetime_seconds must be >= 0")
+	}
+	for i := range c.WireGuard.Peers {
+		if c.WireGuard.Peers[i].ControlURL == "" {
+			continue
+		}
+		u, err := url.Parse(c.WireGuard.Peers[i].ControlURL)
+		if err != nil {
+			return fmt.Errorf("wireguard.peers[%d].control_url: %w", i, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("wireguard.peers[%d].control_url must use http or https", i)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("wireguard.peers[%d].control_url host is required", i)
+		}
+		if c.WireGuard.Peers[i].MeshEnabled && !c.WireGuard.Peers[i].MeshDisableACLs {
+			c.WireGuard.Peers[i].MeshAcceptACLs = true
+		}
+		if c.WireGuard.Peers[i].MeshDisableACLs {
+			c.WireGuard.Peers[i].MeshAcceptACLs = false
+		}
 	}
 	if c.Relay.Enabled == nil {
 		f := false

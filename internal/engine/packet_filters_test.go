@@ -245,6 +245,101 @@ func TestRelayConntrackIPv6TCP(t *testing.T) {
 	}
 }
 
+func TestRelayStatelessFallbackRequiresBothPeersToAcceptDynamicACLs(t *testing.T) {
+	e := testRelayEngineWithPeers(t, acl.List{
+		Default: acl.Deny,
+		Rules: []acl.Rule{{
+			Action:      acl.Allow,
+			Source:      "100.64.2.2/32",
+			Destination: "100.64.2.3/32",
+			DestPort:    "443",
+			Protocol:    "tcp",
+		}},
+	}, []config.Peer{
+		{PublicKey: "peer-a", AllowedIPs: []string{"100.64.2.2/32"}, MeshAcceptACLs: true},
+		{PublicKey: "peer-b", AllowedIPs: []string{"100.64.2.3/32"}, MeshAcceptACLs: false},
+	})
+
+	if e.allowRelayPacket(testIPv4TCPPacketFlags("100.64.2.3", "100.64.2.2", 443, 40000, tcpFlagACK)) {
+		t.Fatal("stateless reverse fallback was allowed even though only one peer accepts dynamic ACLs")
+	}
+
+	e = testRelayEngineWithPeers(t, acl.List{
+		Default: acl.Deny,
+		Rules: []acl.Rule{{
+			Action:      acl.Allow,
+			Source:      "100.64.2.2/32",
+			Destination: "100.64.2.3/32",
+			DestPort:    "443",
+			Protocol:    "tcp",
+		}},
+	}, []config.Peer{
+		{PublicKey: "peer-a", AllowedIPs: []string{"100.64.2.2/32"}, MeshAcceptACLs: true},
+		{PublicKey: "peer-b", AllowedIPs: []string{"100.64.2.3/32"}, MeshAcceptACLs: true},
+	})
+
+	if !e.allowRelayPacket(testIPv4TCPPacketFlags("100.64.2.3", "100.64.2.2", 443, 40000, tcpFlagACK)) {
+		t.Fatal("stateless reverse fallback was denied even though both peers accept dynamic ACLs")
+	}
+}
+
+func TestRelayStatelessFallbackAllowsForwardDirectionWhenBothPeersAcceptDynamicACLs(t *testing.T) {
+	e := testRelayEngineWithPeers(t, acl.List{
+		Default: acl.Deny,
+		Rules: []acl.Rule{{
+			Action:      acl.Allow,
+			Source:      "100.64.2.2/32",
+			Destination: "100.64.2.3/32",
+			DestPort:    "80",
+			Protocol:    "tcp",
+		}},
+	}, []config.Peer{
+		{PublicKey: "peer-a", AllowedIPs: []string{"100.64.2.2/32"}, MeshAcceptACLs: true},
+		{PublicKey: "peer-b", AllowedIPs: []string{"100.64.2.3/32"}, MeshAcceptACLs: true},
+	})
+
+	if !e.allowRelayPacket(testIPv4TCPPacketFlags("100.64.2.2", "100.64.2.3", 40000, 80, tcpFlagACK)) {
+		t.Fatal("forward stateless fallback was denied for two ACL-capable peers")
+	}
+}
+
+func TestMeshInboundACLAppliesToStaticParentAndDynamicChildSources(t *testing.T) {
+	e := testRelayEngineWithPeers(t, acl.List{Default: acl.Allow}, []config.Peer{
+		{PublicKey: "parent", AllowedIPs: []string{"100.64.50.1/32"}, MeshAcceptACLs: true},
+	})
+	e.localAddrs = []netip.Addr{netip.MustParseAddr("100.64.50.9")}
+	e.dynamicPeers["child"] = &dynamicPeer{
+		ParentPublicKey: "parent",
+		Peer: config.Peer{
+			PublicKey:      "child",
+			AllowedIPs:     []string{"100.64.50.2/32"},
+			MeshAcceptACLs: true,
+		},
+	}
+	if err := e.applyMeshACLsWithDefault("parent", acl.Deny, []acl.Rule{
+		{Action: acl.Allow, Source: "100.64.50.1/32", Destination: "100.64.50.9/32", DestPort: "80", Protocol: "tcp"},
+		{Action: acl.Allow, Source: "100.64.50.2/32", Destination: "100.64.50.9/32", DestPort: "80", Protocol: "tcp"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !e.allowTunnelPacket(testIPv4TCPPacketFlags("100.64.50.1", "100.64.50.9", 40000, 80, tcpFlagSYN)) {
+		t.Fatal("mesh inbound ACL did not allow static parent packet matching rule")
+	}
+	if e.allowTunnelPacket(testIPv4TCPPacketFlags("100.64.50.1", "100.64.50.9", 40000, 81, tcpFlagSYN)) {
+		t.Fatal("mesh inbound ACL allowed static parent packet outside rule")
+	}
+	if !e.allowTunnelPacket(testIPv4TCPPacketFlags("100.64.50.2", "100.64.50.9", 40000, 80, tcpFlagSYN)) {
+		t.Fatal("mesh inbound ACL did not allow dynamic child packet matching rule")
+	}
+	if e.allowTunnelPacket(testIPv4TCPPacketFlags("100.64.50.2", "100.64.50.9", 40000, 81, tcpFlagSYN)) {
+		t.Fatal("mesh inbound ACL allowed dynamic child packet outside rule")
+	}
+	if !e.allowTunnelPacket(testIPv4TCPPacketFlags("198.51.100.9", "100.64.50.9", 40000, 81, tcpFlagSYN)) {
+		t.Fatal("mesh inbound ACL incorrectly applied to unrelated source")
+	}
+}
+
 func TestOutboundProxyMatchingUsesMostSpecificSubnet(t *testing.T) {
 	cfg := config.Default()
 	honorEnv := false
@@ -287,6 +382,31 @@ func testRelayEngine(t *testing.T, rel acl.List, allowed []netip.Prefix) *Engine
 		relACL:     rel,
 		allowed:    allowed,
 		localAddrs: []netip.Addr{netip.MustParseAddr("100.64.0.1"), netip.MustParseAddr("fd00:64::1")},
+	}
+}
+
+func testRelayEngineWithPeers(t *testing.T, rel acl.List, peers []config.Peer) *Engine {
+	t.Helper()
+	cfg := config.Default()
+	cfg.WireGuard.Peers = append([]config.Peer(nil), peers...)
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rel.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	allowed, routes, traffic, err := buildPeerTrafficState(cfg.WireGuard.Peers, cfg.TrafficShaper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Engine{
+		cfg:          cfg,
+		relACL:       rel,
+		allowed:      allowed,
+		peerRoutes:   routes,
+		peerTraffic:  traffic,
+		localAddrs:   []netip.Addr{netip.MustParseAddr("100.64.0.1"), netip.MustParseAddr("fd00:64::1")},
+		dynamicPeers: make(map[string]*dynamicPeer),
 	}
 }
 

@@ -1644,6 +1644,70 @@ func TestTrafficShaperAppliesToTunnelTCP(t *testing.T) {
 	}
 }
 
+func TestMeshControlServerBindsInsideTunnel(t *testing.T) {
+	serverKey, clientKey := mustKey(t), mustKey(t)
+	serverPort := freeUDPPort(t)
+
+	serverCfg := config.Default()
+	serverCfg.WireGuard.PrivateKey = serverKey.String()
+	serverCfg.WireGuard.ListenPort = &serverPort
+	serverCfg.WireGuard.Addresses = []string{"100.64.59.1/32"}
+	serverCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:  clientKey.PublicKey().String(),
+		AllowedIPs: []string{"100.64.59.2/32"},
+	}}
+	serverCfg.MeshControl.Listen = "100.64.59.1:8787"
+	serverEng := mustStart(t, serverCfg)
+	defer serverEng.Close()
+
+	clientCfg := config.Default()
+	clientCfg.WireGuard.PrivateKey = clientKey.String()
+	clientCfg.WireGuard.Addresses = []string{"100.64.59.2/32"}
+	clientCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:           serverKey.PublicKey().String(),
+		Endpoint:            fmt.Sprintf("127.0.0.1:%d", serverPort),
+		AllowedIPs:          []string{"100.64.59.1/32"},
+		PersistentKeepalive: 1,
+		ControlURL:          "http://100.64.59.1:8787",
+		MeshEnabled:         true,
+	}}
+	clientEng := mustStart(t, clientCfg)
+	defer clientEng.Close()
+
+	if got := serverEng.Addr("mesh-control"); got != "100.64.59.1:8787" {
+		t.Fatalf("mesh-control addr = %q, want %q", got, "100.64.59.1:8787")
+	}
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return clientEng.DialTunnelContext(ctx, network, addr)
+			},
+		},
+	}
+	resp, err := client.Get("http://100.64.59.1:8787/v1/challenge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("mesh control challenge status %d: %s", resp.StatusCode, body)
+	}
+	var challenge struct {
+		ServerPublicKey    string `json:"server_public_key"`
+		ChallengePublicKey string `json:"challenge_public_key"`
+		ExpiresUnix        int64  `json:"expires_unix"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&challenge); err != nil {
+		t.Fatal(err)
+	}
+	if challenge.ServerPublicKey != serverKey.PublicKey().String() || challenge.ChallengePublicKey == "" || challenge.ExpiresUnix <= 0 {
+		t.Fatalf("unexpected mesh challenge: %+v", challenge)
+	}
+}
+
 func TestRelayForwardingMultiPeer(t *testing.T) {
 	serverKey, c1Key, c2Key := mustKey(t), mustKey(t), mustKey(t)
 	serverPort := freeUDPPort(t)

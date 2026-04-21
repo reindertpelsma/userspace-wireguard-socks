@@ -36,6 +36,7 @@ type apiPeer struct {
 	AllowedIPs          []string             `json:"allowed_ips"`
 	PersistentKeepalive int                  `json:"persistent_keepalive,omitempty"`
 	TrafficShaper       config.TrafficShaper `json:"traffic_shaper,omitempty"`
+	MeshAcceptACLs      bool                 `json:"mesh_accept_acls,omitempty"`
 }
 
 type apiACL struct {
@@ -526,6 +527,7 @@ func (e *Engine) AddPeer(peer config.Peer) error {
 	if err := e.applyPeerTrafficState(next); err != nil {
 		return err
 	}
+	e.reconcileDynamicPeersWithStatic()
 	e.updateTURNPermissions()
 	return nil
 }
@@ -563,6 +565,7 @@ func (e *Engine) RemovePeer(publicKey string) error {
 	if err := e.applyPeerTrafficState(next); err != nil {
 		return err
 	}
+	e.reconcileDynamicPeersWithStatic()
 	e.updateTURNPermissions()
 	return nil
 }
@@ -620,6 +623,7 @@ func (e *Engine) SetWireGuardConfig(wg config.WireGuard) error {
 	if err := e.applyPeerTrafficState(next.Peers); err != nil {
 		return err
 	}
+	e.reconcileDynamicPeersWithStatic()
 	e.updateTURNPermissions()
 	return nil
 }
@@ -840,6 +844,7 @@ func peerToAPI(p config.Peer) apiPeer {
 		AllowedIPs:          append([]string(nil), p.AllowedIPs...),
 		PersistentKeepalive: p.PersistentKeepalive,
 		TrafficShaper:       p.TrafficShaper,
+		MeshAcceptACLs:      p.MeshAcceptACLs,
 	}
 }
 
@@ -851,6 +856,7 @@ func peerFromAPI(p apiPeer) config.Peer {
 		AllowedIPs:          append([]string(nil), p.AllowedIPs...),
 		PersistentKeepalive: p.PersistentKeepalive,
 		TrafficShaper:       p.TrafficShaper,
+		MeshAcceptACLs:      p.MeshAcceptACLs,
 	}
 }
 

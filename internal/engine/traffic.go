@@ -92,7 +92,15 @@ func (e *Engine) applyPeerTrafficState(peers []config.Peer) error {
 	e.cfgMu.RLock()
 	global := e.cfg.TrafficShaper
 	e.cfgMu.RUnlock()
-	allowed, routes, traffic, err := buildPeerTrafficState(peers, global)
+	e.dynamicMu.RLock()
+	allPeers := append([]config.Peer(nil), peers...)
+	for _, dp := range e.dynamicPeers {
+		if dp != nil && dp.Active {
+			allPeers = append(allPeers, dp.Peer)
+		}
+	}
+	e.dynamicMu.RUnlock()
+	allowed, routes, traffic, err := buildPeerTrafficState(allPeers, global)
 	if err != nil {
 		return err
 	}

@@ -1,0 +1,1552 @@
+// Copyright (c) 2026 Reindert Pelsma
+// SPDX-License-Identifier: ISC
+
+package engine
+
+import (
+	"context"
+	"crypto/ecdh"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"slices"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/transport"
+	"golang.org/x/crypto/chacha20poly1305"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+)
+
+const (
+	meshTokenVersion     = 1
+	meshAuthContextLabel = "uwgsocks-mesh-auth"
+	meshBodyContextLabel = "uwgsocks-mesh-body"
+)
+
+type meshChallengeResponse struct {
+	ServerPublicKey    string `json:"server_public_key"`
+	ChallengePublicKey string `json:"challenge_public_key"`
+	ExpiresUnix        int64  `json:"expires_unix"`
+}
+
+type meshDiscoveredPeer struct {
+	PublicKey  string   `json:"public_key"`
+	Endpoint   string   `json:"endpoint,omitempty"`
+	AllowedIPs []string `json:"allowed_ips,omitempty"`
+	PSK        string   `json:"psk,omitempty"`
+}
+
+type meshACLResponse struct {
+	Default acl.Action `json:"default"`
+	Relay   []acl.Rule `json:"relay"`
+}
+
+type meshAuthResult struct {
+	PeerPublicKey string
+	PeerIndex     int
+	SharedSecret  []byte
+}
+
+type dynamicPeer struct {
+	Peer            config.Peer
+	ParentPublicKey string
+	Active          bool
+	LastControl     time.Time
+}
+
+type meshAuthenticator interface {
+	Challenge(now time.Time) (meshChallengeResponse, error)
+	Verify(r *http.Request) (meshAuthResult, error)
+}
+
+type meshChallengeState struct {
+	priv    *ecdh.PrivateKey
+	pub     []byte
+	expires time.Time
+}
+
+type meshControlAuthenticator struct {
+	e      *Engine
+	curve  ecdh.Curve
+	pubKey wgtypes.Key
+
+	mu      sync.Mutex
+	current meshChallengeState
+	prev    meshChallengeState
+}
+
+func newMeshControlAuthenticator(e *Engine) (*meshControlAuthenticator, error) {
+	pub, err := e.wgPublicKey()
+	if err != nil {
+		return nil, err
+	}
+	return &meshControlAuthenticator{
+		e:      e,
+		curve:  ecdh.X25519(),
+		pubKey: wgtypes.Key(pub),
+	}, nil
+}
+
+func (a *meshControlAuthenticator) Challenge(now time.Time) (meshChallengeResponse, error) {
+	state, _, err := a.challengeState(now)
+	if err != nil {
+		return meshChallengeResponse{}, err
+	}
+	return meshChallengeResponse{
+		ServerPublicKey:    a.pubKey.String(),
+		ChallengePublicKey: base64.StdEncoding.EncodeToString(state.pub),
+		ExpiresUnix:        state.expires.Unix(),
+	}, nil
+}
+
+func (a *meshControlAuthenticator) Verify(r *http.Request) (meshAuthResult, error) {
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return meshAuthResult{}, errors.New("missing bearer token")
+	}
+	token, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(strings.TrimPrefix(auth, "Bearer ")))
+	if err != nil {
+		return meshAuthResult{}, errors.New("invalid bearer token encoding")
+	}
+	if len(token) < 1+32+32+24+16+32 {
+		return meshAuthResult{}, errors.New("invalid bearer token length")
+	}
+	if token[0] != meshTokenVersion {
+		return meshAuthResult{}, errors.New("unsupported bearer token version")
+	}
+	ephPub := token[1:33]
+	quick := token[33:65]
+	body := token[65 : len(token)-32]
+	wantHash := token[len(token)-32:]
+
+	addrBinding, err := meshAddrBindingFromRemote(r.RemoteAddr)
+	if err != nil {
+		return meshAuthResult{}, err
+	}
+	now := time.Now()
+	states, serverPubBytes, err := a.challengeCandidates(now)
+	if err != nil {
+		return meshAuthResult{}, err
+	}
+	for _, state := range states {
+		if subtle.ConstantTimeCompare(meshQuickCheck(serverPubBytes, state.pub, addrBinding), quick) != 1 {
+			continue
+		}
+		res, err := a.verifyWithState(state, ephPub, body, wantHash, addrBinding, r.RemoteAddr)
+		if err == nil {
+			return res, nil
+		}
+	}
+	return meshAuthResult{}, errors.New("invalid bearer token")
+}
+
+func (a *meshControlAuthenticator) verifyWithState(state meshChallengeState, ephPub, body, wantHash, addrBinding []byte, remote string) (meshAuthResult, error) {
+	eph, err := a.curve.NewPublicKey(append([]byte(nil), ephPub...))
+	if err != nil {
+		return meshAuthResult{}, err
+	}
+	k1, err := state.priv.ECDH(eph)
+	if err != nil {
+		return meshAuthResult{}, err
+	}
+	plain, err := meshOpen(body, k1, meshAuthContextLabel)
+	if err != nil {
+		return meshAuthResult{}, err
+	}
+	if len(plain) != 32 {
+		return meshAuthResult{}, errors.New("invalid mesh auth identity size")
+	}
+	peerKey := wgtypes.Key(plain)
+	peer, idx, ok := a.e.meshPeerConfig(peerKey.String())
+	if !ok || !peer.MeshEnabled {
+		return meshAuthResult{}, errors.New("mesh peer not enabled")
+	}
+	src := addrFromNetAddr(mustResolveTCPAddr(remote))
+	if !src.IsValid() || a.e.peerKeyForIP(src) != peer.PublicKey {
+		return meshAuthResult{}, errors.New("mesh peer source mismatch")
+	}
+	peerPub, err := a.curve.NewPublicKey(plain)
+	if err != nil {
+		return meshAuthResult{}, err
+	}
+	k2, err := state.priv.ECDH(peerPub)
+	if err != nil {
+		return meshAuthResult{}, err
+	}
+	secret := meshSharedSecret(k1, k2, meshPeerPSKBytes(peer), addrBinding)
+	gotHash := sha256.Sum256(secret)
+	if subtle.ConstantTimeCompare(gotHash[:], wantHash) != 1 {
+		return meshAuthResult{}, errors.New("mesh shared secret mismatch")
+	}
+	return meshAuthResult{
+		PeerPublicKey: peer.PublicKey,
+		PeerIndex:     idx,
+		SharedSecret:  secret,
+	}, nil
+}
+
+func (a *meshControlAuthenticator) challengeState(now time.Time) (meshChallengeState, []byte, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	rotate := time.Duration(a.e.cfg.MeshControl.ChallengeRotateSeconds) * time.Second
+	if rotate <= 0 {
+		rotate = 120 * time.Second
+	}
+	if a.current.priv == nil || !now.Before(a.current.expires) {
+		a.prev = a.current
+		priv, err := a.curve.GenerateKey(rand.Reader)
+		if err != nil {
+			return meshChallengeState{}, nil, err
+		}
+		a.current = meshChallengeState{
+			priv:    priv,
+			pub:     append([]byte(nil), priv.PublicKey().Bytes()...),
+			expires: now.Add(rotate),
+		}
+	}
+	return a.current, a.pubKey[:], nil
+}
+
+func (a *meshControlAuthenticator) challengeCandidates(now time.Time) ([]meshChallengeState, []byte, error) {
+	current, serverPubBytes, err := a.challengeState(now)
+	if err != nil {
+		return nil, nil, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	states := []meshChallengeState{current}
+	if a.prev.priv != nil && now.Before(a.prev.expires.Add(time.Duration(a.e.cfg.MeshControl.ChallengeRotateSeconds)*time.Second)) {
+		states = append(states, a.prev)
+	}
+	return states, serverPubBytes, nil
+}
+
+// startMeshControlServer binds the opt-in mesh control HTTP service inside the
+// userspace WireGuard netstack. It is intentionally tunnel-only, similar to
+// dns_server.listen, and does not expose a host listener.
+func (e *Engine) startMeshControlServer() error {
+	if e.cfg.MeshControl.Listen == "" {
+		return nil
+	}
+	addr, err := netip.ParseAddrPort(e.cfg.MeshControl.Listen)
+	if err != nil {
+		return err
+	}
+	baseLn, err := e.net.ListenTCPAddrPort(addr)
+	if err != nil {
+		return fmt.Errorf("mesh control listen: %w", err)
+	}
+	auth, err := newMeshControlAuthenticator(e)
+	if err != nil {
+		_ = baseLn.Close()
+		return err
+	}
+	e.meshAuth = auth
+	ln := e.wrapPeerListener(baseLn)
+	e.addListener("mesh-control", ln)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/challenge", e.handleMeshControlChallenge)
+	mux.HandleFunc("/v1/peers", e.handleMeshControlPeers)
+	mux.HandleFunc("/v1/acls", e.handleMeshControlACLs)
+	mux.HandleFunc("/v1/subscribe", e.handleMeshControlNotImplemented)
+
+	server := e.proxyHTTPServer(mux)
+	go func() {
+		if err := server.Serve(ln); err != nil && !isClosedErr(err) {
+			e.log.Printf("mesh control stopped: %v", err)
+		}
+	}()
+	return nil
+}
+
+func (e *Engine) handleMeshControlChallenge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if e.meshAuth == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "mesh control is not available")
+		return
+	}
+	resp, err := e.meshAuth.Challenge(time.Now())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, resp)
+}
+
+func (e *Engine) handleMeshControlPeers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if e.meshAuth == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "mesh control is not available")
+		return
+	}
+	authRes, err := e.meshAuth.Verify(r)
+	if err != nil {
+		writeAPIError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	peers, err := e.meshPeersForRequester(authRes.PeerPublicKey)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	payload, err := json.Marshal(peers)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sealed, err := meshSealRandom(payload, authRes.SharedSecret, meshBodyContextLabel)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(sealed)
+}
+
+func (e *Engine) handleMeshControlACLs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if e.meshAuth == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "mesh control is not available")
+		return
+	}
+	authRes, err := e.meshAuth.Verify(r)
+	if err != nil {
+		writeAPIError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	resp, err := e.meshACLsForRequester(authRes.PeerPublicKey)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sealed, err := meshSealRandom(payload, authRes.SharedSecret, meshBodyContextLabel)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(sealed)
+}
+
+func (e *Engine) handleMeshControlNotImplemented(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotImplemented)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error": "mesh control endpoint is not implemented yet",
+	})
+}
+
+func (e *Engine) meshPeersForRequester(requester string) ([]meshDiscoveredPeer, error) {
+	status, err := e.Status()
+	if err != nil {
+		return nil, err
+	}
+	requesterPeer, _, ok := e.meshPeerConfig(requester)
+	if !ok || !requesterPeer.MeshAcceptACLs {
+		return nil, nil
+	}
+	e.cfgMu.RLock()
+	configPeers := append([]config.Peer(nil), e.cfg.WireGuard.Peers...)
+	window := time.Duration(e.cfg.MeshControl.ActivePeerWindowSeconds) * time.Second
+	advertiseSelf := e.cfg.MeshControl.AdvertiseSelf
+	e.cfgMu.RUnlock()
+	if window <= 0 {
+		window = 120 * time.Second
+	}
+	now := time.Now()
+	statusByKey := make(map[string]PeerStatus, len(status.Peers))
+	for _, st := range status.Peers {
+		statusByKey[st.PublicKey] = st
+	}
+
+	out := make([]meshDiscoveredPeer, 0, len(configPeers))
+	for _, peer := range configPeers {
+		if peer.PublicKey == requester {
+			continue
+		}
+		if !peer.MeshAcceptACLs {
+			continue
+		}
+		if !advertiseSelf && peer.PublicKey == e.meshServerPublicKey() {
+			continue
+		}
+		if peer.MeshAdvertise != nil && !*peer.MeshAdvertise {
+			continue
+		}
+		st, ok := statusByKey[peer.PublicKey]
+		if !ok || !st.HasHandshake || st.Endpoint == "" {
+			continue
+		}
+		if last := time.Unix(st.LastHandshakeTimeSec, st.LastHandshakeTimeNsec); now.Sub(last) > window {
+			continue
+		}
+		allowed := slices.Clone(peer.AllowedIPs)
+		sort.Strings(allowed)
+		psk, err := e.meshPairPSK(requester, peer.PublicKey)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, meshDiscoveredPeer{
+			PublicKey:  peer.PublicKey,
+			Endpoint:   st.Endpoint,
+			AllowedIPs: allowed,
+			PSK:        base64.StdEncoding.EncodeToString(psk),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PublicKey < out[j].PublicKey })
+	return out, nil
+}
+
+func (e *Engine) meshACLsForRequester(requester string) (meshACLResponse, error) {
+	peer, _, ok := e.meshPeerConfig(requester)
+	if !ok || !peer.MeshAcceptACLs {
+		return meshACLResponse{}, nil
+	}
+	requesterPrefixes, err := config.PeerAllowedPrefixes([]config.Peer{peer})
+	if err != nil {
+		return meshACLResponse{}, err
+	}
+	e.aclMu.RLock()
+	rules := append([]acl.Rule(nil), e.relACL.Rules...)
+	def := e.relACL.Default
+	e.aclMu.RUnlock()
+	out := make([]acl.Rule, 0, len(rules))
+	for _, rule := range rules {
+		projected, ok := meshProjectRelayRule(rule, requesterPrefixes)
+		if ok {
+			out = append(out, projected)
+		}
+	}
+	return meshACLResponse{Default: def, Relay: out}, nil
+}
+
+func (e *Engine) meshServerPublicKey() string {
+	pub, err := e.wgPublicKey()
+	if err != nil {
+		return ""
+	}
+	return wgtypes.Key(pub).String()
+}
+
+func (e *Engine) meshPeerConfig(publicKey string) (config.Peer, int, bool) {
+	e.cfgMu.RLock()
+	defer e.cfgMu.RUnlock()
+	for i, peer := range e.cfg.WireGuard.Peers {
+		if peer.PublicKey == publicKey {
+			return peer, i, true
+		}
+	}
+	return config.Peer{}, -1, false
+}
+
+func (e *Engine) dynamicPeer(publicKey string) *dynamicPeer {
+	e.dynamicMu.RLock()
+	defer e.dynamicMu.RUnlock()
+	return e.dynamicPeers[publicKey]
+}
+
+func (e *Engine) meshStaticPeers() []config.Peer {
+	e.cfgMu.RLock()
+	defer e.cfgMu.RUnlock()
+	return append([]config.Peer(nil), e.cfg.WireGuard.Peers...)
+}
+
+func (e *Engine) startMeshPolling() {
+	peers := e.meshStaticPeers()
+	enabled := false
+	for _, peer := range peers {
+		if peer.MeshEnabled && peer.MeshAcceptACLs && peer.ControlURL != "" {
+			enabled = true
+			break
+		}
+	}
+	if !enabled {
+		return
+	}
+	go e.meshPollingLoop()
+}
+
+func (e *Engine) meshPollingLoop() {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-e.closed:
+			return
+		case <-ticker.C:
+			e.runMeshPolling()
+		}
+	}
+}
+
+func (e *Engine) runMeshPolling() {
+	peers := e.meshStaticPeers()
+	for _, parent := range peers {
+		if !parent.MeshEnabled || !parent.MeshAcceptACLs || parent.ControlURL == "" {
+			continue
+		}
+		e.cfgMu.RLock()
+		hasTransports := len(e.cfg.Transports) > 0
+		e.cfgMu.RUnlock()
+		if hasTransports {
+			e.log.Printf("mesh control: skipping peer %s because dynamic peers over custom transports are not supported yet", parent.PublicKey)
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		client, err := e.newMeshControlClient(ctx, parent)
+		if err == nil {
+			local := e.meshSourceAddr()
+			if local.IsValid() {
+				remote := netip.AddrPortFrom(local, 0)
+				var peers []meshDiscoveredPeer
+				peers, err = client.fetchPeers(ctx, remote)
+				if err == nil {
+					err = e.applyMeshDiscoveredPeers(parent, peers)
+				}
+				if err == nil {
+					var aclResp meshACLResponse
+					aclResp, err = client.fetchACLs(ctx, remote)
+					if err == nil {
+						err = e.applyMeshACLsWithDefault(parent.PublicKey, aclResp.Default, aclResp.Relay)
+					}
+				}
+			} else {
+				err = errors.New("no local WireGuard address for mesh control")
+			}
+		}
+		cancel()
+		if err != nil {
+			e.log.Printf("mesh control poll for %s failed: %v", parent.PublicKey, err)
+		}
+	}
+	e.refreshDynamicPeerActivity()
+}
+
+func (e *Engine) meshSourceAddr() netip.Addr {
+	for _, addr := range e.localAddrs {
+		if addr.IsValid() {
+			return addr
+		}
+	}
+	return netip.Addr{}
+}
+
+func (e *Engine) applyMeshDiscoveredPeers(parent config.Peer, discovered []meshDiscoveredPeer) error {
+	now := time.Now()
+	parentPrefixes, err := config.PeerAllowedPrefixes([]config.Peer{parent})
+	if err != nil {
+		return err
+	}
+	static := e.meshStaticPeers()
+	staticKeys := make(map[string]struct{}, len(static))
+	for _, peer := range static {
+		staticKeys[peer.PublicKey] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(discovered))
+	type update struct {
+		key  string
+		peer config.Peer
+	}
+	var upserts []update
+	var removals []string
+
+	e.dynamicMu.Lock()
+	for _, disc := range discovered {
+		if disc.PublicKey == parent.PublicKey {
+			continue
+		}
+		if _, ok := staticKeys[disc.PublicKey]; ok {
+			continue
+		}
+		allowed := meshTrimAllowedIPs(disc.AllowedIPs, parentPrefixes)
+		if len(allowed) == 0 || disc.Endpoint == "" {
+			continue
+		}
+		seen[disc.PublicKey] = struct{}{}
+		dp, exists := e.dynamicPeers[disc.PublicKey]
+		if exists && dp.ParentPublicKey != parent.PublicKey {
+			continue
+		}
+		endpoint := disc.Endpoint
+		if exists && dp.Active && dp.Peer.Endpoint != "" {
+			endpoint = dp.Peer.Endpoint
+		}
+		peer := config.Peer{
+			PublicKey:           disc.PublicKey,
+			PresharedKey:        disc.PSK,
+			Endpoint:            endpoint,
+			AllowedIPs:          allowed,
+			PersistentKeepalive: meshDynamicKeepalive(parent),
+			MeshAcceptACLs:      true,
+		}
+		if !exists {
+			dp = &dynamicPeer{ParentPublicKey: parent.PublicKey}
+			e.dynamicPeers[disc.PublicKey] = dp
+		}
+		dp.Peer = peer
+		dp.LastControl = now
+		upserts = append(upserts, update{key: disc.PublicKey, peer: peer})
+	}
+	for key, dp := range e.dynamicPeers {
+		if dp.ParentPublicKey == parent.PublicKey {
+			if _, ok := seen[key]; !ok {
+				removals = append(removals, key)
+				delete(e.dynamicPeers, key)
+			}
+		}
+	}
+	e.dynamicMu.Unlock()
+
+	for _, up := range upserts {
+		if err := e.upsertDynamicPeerDevice(up.peer); err != nil {
+			return err
+		}
+	}
+	for _, key := range removals {
+		if err := e.removeDynamicPeerDevice(key); err != nil {
+			return err
+		}
+	}
+	return e.reconcileDynamicPeerPriority()
+}
+
+func meshDynamicKeepalive(parent config.Peer) int {
+	if parent.PersistentKeepalive > 0 {
+		return parent.PersistentKeepalive
+	}
+	return 15
+}
+
+func meshTrimAllowedIPs(raw []string, parents []netip.Prefix) []string {
+	out := make([]string, 0, len(raw))
+	for _, s := range raw {
+		prefix, err := netip.ParsePrefix(s)
+		if err != nil {
+			continue
+		}
+		prefix = prefix.Masked()
+		for _, parent := range parents {
+			if parent.Addr().BitLen() != prefix.Addr().BitLen() {
+				continue
+			}
+			if parent.Bits() <= prefix.Bits() && parent.Contains(prefix.Addr()) {
+				out = append(out, prefix.String())
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return slices.Compact(out)
+}
+
+func meshProjectRelayRule(rule acl.Rule, allowed []netip.Prefix) (acl.Rule, bool) {
+	projected := rule
+	projectedDsts := meshProjectDestinations(rule.Destination, rule.Destinations, allowed)
+	if len(projectedDsts) == 0 {
+		return acl.Rule{}, false
+	}
+	projected.Destination = ""
+	projected.Destinations = projectedDsts
+	if err := projected.Normalize(); err != nil {
+		return acl.Rule{}, false
+	}
+	return projected, true
+}
+
+func meshProjectDestinations(single string, many []string, allowed []netip.Prefix) []string {
+	raws := make([]string, 0, 1+len(many))
+	if single != "" {
+		raws = append(raws, single)
+	}
+	raws = append(raws, many...)
+	if len(raws) == 0 {
+		for _, prefix := range allowed {
+			raws = append(raws, prefix.Masked().String())
+		}
+	}
+	out := make([]string, 0, len(raws))
+	for _, raw := range raws {
+		if raw == "" {
+			continue
+		}
+		prefix, ok := meshParseCIDROrAddr(raw)
+		if !ok {
+			continue
+		}
+		prefix = prefix.Masked()
+		for _, allow := range allowed {
+			allow = allow.Masked()
+			projected, ok := meshPrefixIntersection(prefix, allow)
+			if ok {
+				out = append(out, projected.String())
+			}
+		}
+	}
+	sort.Strings(out)
+	return slices.Compact(out)
+}
+
+func meshAnyPrefixIntersects(prefix netip.Prefix, allowed []netip.Prefix) bool {
+	for _, want := range allowed {
+		if prefix.Addr().BitLen() != want.Addr().BitLen() {
+			continue
+		}
+		if prefix.Bits() <= want.Bits() && prefix.Contains(want.Addr()) {
+			return true
+		}
+		if want.Bits() <= prefix.Bits() && want.Contains(prefix.Addr()) {
+			return true
+		}
+	}
+	return false
+}
+
+func meshPrefixIntersection(a, b netip.Prefix) (netip.Prefix, bool) {
+	if a.Addr().BitLen() != b.Addr().BitLen() {
+		return netip.Prefix{}, false
+	}
+	a = a.Masked()
+	b = b.Masked()
+	if a.Bits() <= b.Bits() && a.Contains(b.Addr()) {
+		return b, true
+	}
+	if b.Bits() <= a.Bits() && b.Contains(a.Addr()) {
+		return a, true
+	}
+	return netip.Prefix{}, false
+}
+
+func meshParseCIDROrAddr(raw string) (netip.Prefix, bool) {
+	if p, err := netip.ParsePrefix(raw); err == nil {
+		return p.Masked(), true
+	}
+	if ip, err := netip.ParseAddr(raw); err == nil {
+		bits := 128
+		if ip.Is4() {
+			bits = 32
+		}
+		return netip.PrefixFrom(ip.Unmap(), bits), true
+	}
+	return netip.Prefix{}, false
+}
+
+func (e *Engine) upsertDynamicPeerDevice(peer config.Peer) error {
+	if e.dev == nil {
+		return nil
+	}
+	uapi, err := peerUAPI(peer, false, nil, "")
+	if err != nil {
+		return err
+	}
+	return e.dev.IpcSet(uapi)
+}
+
+func (e *Engine) removeDynamicPeerDevice(publicKey string) error {
+	if e.dev == nil {
+		return nil
+	}
+	key, err := wgtypes.ParseKey(publicKey)
+	if err != nil {
+		return err
+	}
+	return e.dev.IpcSet(fmt.Sprintf("public_key=%s\nremove=true\n", base64ToHex(key[:])))
+}
+
+func base64ToHex(b []byte) string {
+	const hexdigits = "0123456789abcdef"
+	out := make([]byte, len(b)*2)
+	for i, v := range b {
+		out[i*2] = hexdigits[v>>4]
+		out[i*2+1] = hexdigits[v&0x0f]
+	}
+	return string(out)
+}
+
+func (e *Engine) reconcileDynamicPeerPriority() error {
+	if e.dev == nil {
+		return e.applyPeerTrafficState(e.meshStaticPeers())
+	}
+	static := e.meshStaticPeers()
+	type orderedDynamic struct {
+		parentIndex int
+		peer        config.Peer
+	}
+	var active []orderedDynamic
+	e.dynamicMu.RLock()
+	for _, dp := range e.dynamicPeers {
+		if dp == nil || !dp.Active {
+			continue
+		}
+		active = append(active, orderedDynamic{
+			parentIndex: e.meshStaticPeerIndex(dp.ParentPublicKey, static),
+			peer:        dp.Peer,
+		})
+	}
+	e.dynamicMu.RUnlock()
+	sort.Slice(active, func(i, j int) bool {
+		if active[i].parentIndex == active[j].parentIndex {
+			return active[i].peer.PublicKey < active[j].peer.PublicKey
+		}
+		return active[i].parentIndex < active[j].parentIndex
+	})
+	e.cfgMu.RLock()
+	transports := append([]transport.Config(nil), e.cfg.Transports...)
+	defaultTransport := transport.ResolveDefaultTransportName(transports, e.cfg.WireGuard.DefaultTransport)
+	e.cfgMu.RUnlock()
+	for _, parent := range static {
+		hasChild := false
+		e.dynamicMu.RLock()
+		for _, dp := range e.dynamicPeers {
+			if dp != nil && dp.ParentPublicKey == parent.PublicKey {
+				hasChild = true
+				break
+			}
+		}
+		e.dynamicMu.RUnlock()
+		if !hasChild {
+			continue
+		}
+		uapi, err := peerUAPI(parent, false, transports, defaultTransport)
+		if err != nil {
+			return err
+		}
+		if err := e.dev.IpcSet(uapi); err != nil {
+			return err
+		}
+	}
+	for _, item := range active {
+		uapi, err := peerUAPI(item.peer, false, nil, "")
+		if err != nil {
+			return err
+		}
+		if err := e.dev.IpcSet(uapi); err != nil {
+			return err
+		}
+	}
+	return e.applyPeerTrafficState(static)
+}
+
+func (e *Engine) meshStaticPeerIndex(publicKey string, peers []config.Peer) int {
+	for i, peer := range peers {
+		if peer.PublicKey == publicKey {
+			return i
+		}
+	}
+	return len(peers)
+}
+
+func (e *Engine) refreshDynamicPeerActivity() {
+	status, err := e.Status()
+	if err != nil {
+		return
+	}
+	window := time.Duration(e.cfg.MeshControl.ActivePeerWindowSeconds) * time.Second
+	if window <= 0 {
+		window = 120 * time.Second
+	}
+	now := time.Now()
+	byKey := make(map[string]PeerStatus, len(status.Peers))
+	for _, st := range status.Peers {
+		byKey[st.PublicKey] = st
+	}
+	changed := false
+	e.dynamicMu.Lock()
+	for key, dp := range e.dynamicPeers {
+		st, ok := byKey[key]
+		active := ok && st.HasHandshake && now.Sub(time.Unix(st.LastHandshakeTimeSec, st.LastHandshakeTimeNsec)) <= window
+		if dp.Active != active {
+			dp.Active = active
+			changed = true
+		}
+	}
+	e.dynamicMu.Unlock()
+	if changed {
+		_ = e.reconcileDynamicPeerPriority()
+	}
+}
+
+func (e *Engine) reconcileDynamicPeersWithStatic() {
+	static := e.meshStaticPeers()
+	staticKeys := make(map[string]struct{}, len(static))
+	staticParents := make(map[string]config.Peer, len(static))
+	for _, peer := range static {
+		staticKeys[peer.PublicKey] = struct{}{}
+		staticParents[peer.PublicKey] = peer
+	}
+	var removals []string
+	e.dynamicMu.Lock()
+	for key, dp := range e.dynamicPeers {
+		if dp == nil {
+			continue
+		}
+		if _, clash := staticKeys[key]; clash {
+			removals = append(removals, key)
+			delete(e.dynamicPeers, key)
+			continue
+		}
+		parent, ok := staticParents[dp.ParentPublicKey]
+		if !ok {
+			removals = append(removals, key)
+			delete(e.dynamicPeers, key)
+			continue
+		}
+		if !parent.MeshAcceptACLs {
+			removals = append(removals, key)
+			delete(e.dynamicPeers, key)
+			continue
+		}
+		parentPrefixes, err := config.PeerAllowedPrefixes([]config.Peer{parent})
+		if err != nil {
+			continue
+		}
+		dp.Peer.AllowedIPs = meshTrimAllowedIPs(dp.Peer.AllowedIPs, parentPrefixes)
+		if len(dp.Peer.AllowedIPs) == 0 {
+			removals = append(removals, key)
+			delete(e.dynamicPeers, key)
+		}
+	}
+	e.dynamicMu.Unlock()
+	for _, key := range removals {
+		_ = e.removeDynamicPeerDevice(key)
+	}
+	_ = e.reconcileDynamicPeerPriority()
+}
+
+func (e *Engine) applyMeshACLs(parentPublicKey string, rules []acl.Rule) error {
+	return e.applyMeshACLsWithDefault(parentPublicKey, acl.Deny, rules)
+}
+
+func (e *Engine) applyMeshACLsWithDefault(parentPublicKey string, def acl.Action, rules []acl.Rule) error {
+	list := acl.List{Default: def, Rules: append([]acl.Rule(nil), rules...)}
+	if err := list.Normalize(); err != nil {
+		return err
+	}
+	e.meshACLMu.Lock()
+	if e.meshACLs == nil {
+		e.meshACLs = make(map[string]acl.List)
+	}
+	if e.meshACLFlows == nil {
+		e.meshACLFlows = make(map[string]map[relayFlowKey]*relayFlow)
+	}
+	if e.meshACLLastSweep == nil {
+		e.meshACLLastSweep = make(map[string]time.Time)
+	}
+	e.meshACLs[parentPublicKey] = list
+	if _, ok := e.meshACLFlows[parentPublicKey]; !ok {
+		e.meshACLFlows[parentPublicKey] = make(map[relayFlowKey]*relayFlow)
+	}
+	e.meshACLMu.Unlock()
+	return nil
+}
+
+func (e *Engine) meshInboundACLAllowed(meta relayPacketMeta) bool {
+	parent, rules, ok := e.meshACLParentForPeerIP(meta.src.Addr())
+	if !ok {
+		return true
+	}
+	return e.allowMeshACLTracked(parent, rules, meta, time.Now())
+}
+
+func (e *Engine) meshTrackLocalACL(meta relayPacketMeta) {
+	if !e.localAddrContains(meta.src.Addr()) {
+		return
+	}
+	parent, rules, ok := e.meshACLParentForPeerIP(meta.dst.Addr())
+	if !ok {
+		return
+	}
+	e.trackMeshACLOutbound(parent, rules, meta, time.Now())
+}
+
+func (e *Engine) meshACLParentForPeerIP(ip netip.Addr) (string, acl.List, bool) {
+	ip = ip.Unmap()
+	bestParent := ""
+	bestBits := -1
+	e.dynamicMu.RLock()
+	for _, dp := range e.dynamicPeers {
+		if dp == nil {
+			continue
+		}
+		for _, raw := range dp.Peer.AllowedIPs {
+			prefix, ok := meshParseCIDROrAddr(raw)
+			if !ok {
+				continue
+			}
+			prefix = prefix.Masked()
+			if prefix.Contains(ip) && prefix.Bits() > bestBits {
+				bestBits = prefix.Bits()
+				bestParent = dp.ParentPublicKey
+			}
+		}
+	}
+	e.dynamicMu.RUnlock()
+	if bestParent == "" {
+		e.cfgMu.RLock()
+		for _, peer := range e.cfg.WireGuard.Peers {
+			if !peer.MeshAcceptACLs {
+				continue
+			}
+			for _, raw := range peer.AllowedIPs {
+				prefix, ok := meshParseCIDROrAddr(raw)
+				if !ok {
+					continue
+				}
+				prefix = prefix.Masked()
+				if prefix.Contains(ip) && prefix.Bits() > bestBits {
+					bestBits = prefix.Bits()
+					bestParent = peer.PublicKey
+				}
+			}
+		}
+		e.cfgMu.RUnlock()
+	}
+	if bestParent == "" {
+		return "", acl.List{}, false
+	}
+	e.meshACLMu.Lock()
+	defer e.meshACLMu.Unlock()
+	list, ok := e.meshACLs[bestParent]
+	return bestParent, list, ok
+}
+
+func (e *Engine) allowMeshACLTracked(parent string, rules acl.List, meta relayPacketMeta, now time.Time) bool {
+	if meta.icmpErr {
+		e.meshACLMu.Lock()
+		defer e.meshACLMu.Unlock()
+		e.ensureMeshACLFlowsLocked(parent)
+		e.meshACLSweepLocked(parent, now)
+		return e.allowMeshACLICMPErrorLocked(parent, meta, now)
+	}
+	if !relayTrackable(meta) {
+		return rules.Allowed(meta.src, meta.dst, meta.network)
+	}
+
+	e.meshACLMu.Lock()
+	e.ensureMeshACLFlowsLocked(parent)
+	e.meshACLSweepLocked(parent, now)
+	if flow, forward, ok := e.meshACLFindFlowLocked(parent, meta); ok {
+		allowed := e.allowExistingMeshACLFlowLocked(parent, flow, forward, meta, now)
+		e.meshACLMu.Unlock()
+		return allowed
+	}
+	e.meshACLMu.Unlock()
+
+	if !rules.Allowed(meta.src, meta.dst, meta.network) {
+		return false
+	}
+	if !relayCanOpenFlow(meta) {
+		return false
+	}
+
+	e.meshACLMu.Lock()
+	defer e.meshACLMu.Unlock()
+	e.ensureMeshACLFlowsLocked(parent)
+	e.meshACLSweepLocked(parent, now)
+	if flow, forward, ok := e.meshACLFindFlowLocked(parent, meta); ok {
+		return e.allowExistingMeshACLFlowLocked(parent, flow, forward, meta, now)
+	}
+	e.meshACLFlows[parent][relayForwardKey(meta)] = newRelayFlow(meta, now)
+	return true
+}
+
+func (e *Engine) trackMeshACLOutbound(parent string, rules acl.List, meta relayPacketMeta, now time.Time) {
+	if meta.icmpErr {
+		return
+	}
+	if !relayTrackable(meta) {
+		return
+	}
+	e.meshACLMu.Lock()
+	defer e.meshACLMu.Unlock()
+	e.ensureMeshACLFlowsLocked(parent)
+	e.meshACLSweepLocked(parent, now)
+	if flow, forward, ok := e.meshACLFindFlowLocked(parent, meta); ok {
+		_ = e.allowExistingMeshACLFlowLocked(parent, flow, forward, meta, now)
+		return
+	}
+	if !rules.Allowed(meta.src, meta.dst, meta.network) || !relayCanOpenFlow(meta) {
+		return
+	}
+	e.meshACLFlows[parent][relayForwardKey(meta)] = newRelayFlow(meta, now)
+}
+
+func (e *Engine) ensureMeshACLFlowsLocked(parent string) {
+	if _, ok := e.meshACLFlows[parent]; !ok {
+		e.meshACLFlows[parent] = make(map[relayFlowKey]*relayFlow)
+	}
+}
+
+func (e *Engine) meshACLSweepLocked(parent string, now time.Time) {
+	flows := e.meshACLFlows[parent]
+	if len(flows) == 0 {
+		return
+	}
+	last := e.meshACLLastSweep[parent]
+	if !last.IsZero() && now.Sub(last) < time.Second {
+		return
+	}
+	e.meshACLLastSweep[parent] = now
+	for key, flow := range flows {
+		if relayFlowExpired(flow, now, e.tcpIdleTimeout(), e.udpIdleTimeout()) {
+			delete(flows, key)
+		}
+	}
+}
+
+func (e *Engine) meshACLFindFlowLocked(parent string, meta relayPacketMeta) (*relayFlow, bool, bool) {
+	flows := e.meshACLFlows[parent]
+	if flow, ok := flows[relayForwardKey(meta)]; ok {
+		return flow, true, true
+	}
+	if flow, ok := flows[relayReverseKey(meta)]; ok {
+		return flow, false, true
+	}
+	return nil, false, false
+}
+
+func (e *Engine) allowExistingMeshACLFlowLocked(parent string, flow *relayFlow, forward bool, meta relayPacketMeta, now time.Time) bool {
+	flows := e.meshACLFlows[parent]
+	switch flow.state {
+	case relayFlowUDP:
+		flow.last = now
+		return true
+	case relayFlowICMP:
+		if forward && relayICMPEchoRequest(meta) || !forward && relayICMPEchoReply(meta) {
+			flow.last = now
+			return true
+		}
+		return false
+	case relayTCPSynSent:
+		if forward && meta.tcpFlags&tcpFlagSYN != 0 && meta.tcpFlags&tcpFlagACK == 0 {
+			flow.last = now
+			return true
+		}
+		if !forward && meta.tcpFlags&tcpFlagSYN != 0 && meta.tcpFlags&tcpFlagACK != 0 {
+			flow.state = relayTCPSynRecv
+			flow.last = now
+			return true
+		}
+		return false
+	case relayTCPSynRecv:
+		if !forward && meta.tcpFlags&tcpFlagSYN != 0 && meta.tcpFlags&tcpFlagACK != 0 {
+			flow.last = now
+			return true
+		}
+		if forward && meta.tcpFlags&tcpFlagACK != 0 && meta.tcpFlags&tcpFlagSYN == 0 {
+			flow.state = relayTCPEstablished
+			flow.last = now
+			e.updateRelayTCPClosingLocked(flow, forward, meta)
+			return true
+		}
+		return false
+	case relayTCPEstablished, relayTCPFinWait, relayTCPTimeWait:
+		flow.last = now
+		if meta.tcpFlags&tcpFlagRST != 0 {
+			delete(flows, flow.key)
+			return true
+		}
+		e.updateRelayTCPClosingLocked(flow, forward, meta)
+		return true
+	default:
+		return false
+	}
+}
+
+func (e *Engine) allowMeshACLICMPErrorLocked(parent string, meta relayPacketMeta, now time.Time) bool {
+	if meta.inner == nil {
+		return false
+	}
+	flow, _, ok := e.meshACLFindFlowLocked(parent, *meta.inner)
+	if !ok {
+		return false
+	}
+	if meta.dst.Addr() != flow.key.InitIP && meta.dst.Addr() != flow.key.RespIP {
+		return false
+	}
+	flow.last = now
+	return true
+}
+
+func (e *Engine) meshPairPSK(a, b string) ([]byte, error) {
+	pa, _, ok := e.meshPeerConfig(a)
+	if !ok {
+		return nil, fmt.Errorf("mesh peer %s not found", a)
+	}
+	pb, _, ok := e.meshPeerConfig(b)
+	if !ok {
+		return nil, fmt.Errorf("mesh peer %s not found", b)
+	}
+	pairs := []struct {
+		pub string
+		psk []byte
+	}{
+		{pub: pa.PublicKey, psk: meshPeerPSKBytes(pa)},
+		{pub: pb.PublicKey, psk: meshPeerPSKBytes(pb)},
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].pub < pairs[j].pub })
+	mac := hmac.New(sha256.New, e.meshMasterKey[:])
+	_, _ = mac.Write(pairs[0].psk)
+	_, _ = mac.Write(pairs[1].psk)
+	_, _ = mac.Write(mustParseWGKeyBytes(pairs[0].pub))
+	_, _ = mac.Write(mustParseWGKeyBytes(pairs[1].pub))
+	return mac.Sum(nil), nil
+}
+
+func meshPeerPSKBytes(peer config.Peer) []byte {
+	if peer.PresharedKey == "" {
+		return make([]byte, 32)
+	}
+	key, err := wgtypes.ParseKey(peer.PresharedKey)
+	if err != nil {
+		return make([]byte, 32)
+	}
+	out := make([]byte, 32)
+	copy(out, key[:])
+	return out
+}
+
+func meshQuickCheck(serverPub, challengePub, addrBinding []byte) []byte {
+	mac := hmac.New(sha256.New, serverPub)
+	_, _ = mac.Write(challengePub)
+	_, _ = mac.Write(addrBinding)
+	return mac.Sum(nil)
+}
+
+func meshSharedSecret(k1, k2, psk, addrBinding []byte) []byte {
+	inner := hmac.New(sha256.New, k1)
+	_, _ = inner.Write(psk)
+	mac := hmac.New(sha256.New, inner.Sum(nil))
+	_, _ = mac.Write(k2)
+	_, _ = mac.Write(addrBinding)
+	return mac.Sum(nil)
+}
+
+func meshSealDeterministic(plain, secret []byte, label string) ([]byte, error) {
+	key, nonce := meshKeyNonce(secret, label)
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		return nil, err
+	}
+	out := append([]byte(nil), nonce...)
+	out = aead.Seal(out, nonce, plain, nil)
+	return out, nil
+}
+
+func meshSealRandom(plain, secret []byte, label string) ([]byte, error) {
+	key, _ := meshKeyNonce(secret, label)
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, chacha20poly1305.NonceSizeX)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	out := append([]byte(nil), nonce...)
+	out = aead.Seal(out, nonce, plain, nil)
+	return out, nil
+}
+
+func meshOpen(sealed, secret []byte, label string) ([]byte, error) {
+	key, _ := meshKeyNonce(secret, label)
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(sealed) < chacha20poly1305.NonceSizeX {
+		return nil, errors.New("short sealed mesh payload")
+	}
+	nonce := sealed[:chacha20poly1305.NonceSizeX]
+	return aead.Open(nil, nonce, sealed[chacha20poly1305.NonceSizeX:], nil)
+}
+
+func meshKeyNonce(secret []byte, label string) ([]byte, []byte) {
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte(label))
+	sum := mac.Sum(nil)
+	key := append([]byte(nil), sum...)
+	mac = hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte("nonce:" + label))
+	nonce := mac.Sum(nil)[:chacha20poly1305.NonceSizeX]
+	return key, append([]byte(nil), nonce...)
+}
+
+func meshAddrBindingFromRemote(remote string) ([]byte, error) {
+	ip, err := netip.ParseAddr(remote)
+	if err != nil {
+		ap, apErr := netip.ParseAddrPort(remote)
+		if apErr == nil {
+			ip = ap.Addr()
+		} else {
+			host, _, splitErr := net.SplitHostPort(remote)
+			if splitErr != nil {
+				return nil, fmt.Errorf("mesh remote addr: %w", err)
+			}
+			ip, err = netip.ParseAddr(host)
+			if err != nil {
+				return nil, fmt.Errorf("mesh remote addr: %w", err)
+			}
+		}
+	}
+	ip = ip.Unmap()
+	if !ip.IsValid() {
+		return nil, errors.New("invalid mesh remote address")
+	}
+	var ip16 [16]byte
+	if ip.Is4() {
+		ip16[10], ip16[11] = 0xff, 0xff
+		copy(ip16[12:], ip.AsSlice())
+	} else {
+		ip16 = ip.As16()
+	}
+	out := make([]byte, 16)
+	copy(out, ip16[:])
+	return out, nil
+}
+
+func mustResolveTCPAddr(remote string) net.Addr {
+	ap, err := netip.ParseAddrPort(remote)
+	if err == nil {
+		return net.TCPAddrFromAddrPort(ap)
+	}
+	return dummyAddr(remote)
+}
+
+type dummyAddr string
+
+func (d dummyAddr) Network() string { return "tcp" }
+func (d dummyAddr) String() string  { return string(d) }
+
+func mustParseWGKeyBytes(key string) []byte {
+	parsed, err := wgtypes.ParseKey(key)
+	if err != nil {
+		return make([]byte, 32)
+	}
+	out := make([]byte, 32)
+	copy(out, parsed[:])
+	return out
+}
+
+type meshControlClient struct {
+	controlURL *url.URL
+	httpClient *http.Client
+	peer       config.Peer
+	privateKey wgtypes.Key
+}
+
+func (e *Engine) newMeshControlClient(ctx context.Context, peer config.Peer) (*meshControlClient, error) {
+	if peer.ControlURL == "" {
+		return nil, errors.New("mesh control_url is required")
+	}
+	u, err := url.Parse(peer.ControlURL)
+	if err != nil {
+		return nil, err
+	}
+	key, err := wgtypes.ParseKey(e.cfg.WireGuard.PrivateKey)
+	if err != nil {
+		return nil, err
+	}
+	return &meshControlClient{
+		controlURL: u,
+		peer:       peer,
+		privateKey: key,
+		httpClient: &http.Client{
+			Timeout: 15 * time.Second,
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return e.DialTunnelContext(ctx, network, addr)
+				},
+			},
+		},
+	}, nil
+}
+
+func (c *meshControlClient) fetchChallenge(ctx context.Context) (meshChallengeResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.controlURL.ResolveReference(&url.URL{Path: "/v1/challenge"}).String(), nil)
+	if err != nil {
+		return meshChallengeResponse{}, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return meshChallengeResponse{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return meshChallengeResponse{}, fmt.Errorf("mesh challenge status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out meshChallengeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return meshChallengeResponse{}, err
+	}
+	return out, nil
+}
+
+func (c *meshControlClient) bearerToken(remote netip.AddrPort, challenge meshChallengeResponse) (string, []byte, error) {
+	curve := ecdh.X25519()
+	challengePubBytes, err := base64.StdEncoding.DecodeString(challenge.ChallengePublicKey)
+	if err != nil {
+		return "", nil, err
+	}
+	challengePub, err := curve.NewPublicKey(challengePubBytes)
+	if err != nil {
+		return "", nil, err
+	}
+	ephPriv, err := curve.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", nil, err
+	}
+	k1, err := ephPriv.ECDH(challengePub)
+	if err != nil {
+		return "", nil, err
+	}
+	wgPriv, err := curve.NewPrivateKey(c.privateKey[:])
+	if err != nil {
+		return "", nil, err
+	}
+	k2, err := wgPriv.ECDH(challengePub)
+	if err != nil {
+		return "", nil, err
+	}
+	addrBinding, err := meshAddrBindingFromRemote(remote.String())
+	if err != nil {
+		return "", nil, err
+	}
+	peerPub := c.privateKey.PublicKey()
+	sealed, err := meshSealDeterministic(peerPub[:], k1, meshAuthContextLabel)
+	if err != nil {
+		return "", nil, err
+	}
+	serverPub, err := wgtypes.ParseKey(challenge.ServerPublicKey)
+	if err != nil {
+		return "", nil, err
+	}
+	secret := meshSharedSecret(k1, k2, meshPeerPSKBytes(c.peer), addrBinding)
+	x := meshQuickCheck(serverPub[:], challengePubBytes, addrBinding)
+	hash := sha256.Sum256(secret)
+	token := make([]byte, 0, 1+32+32+len(sealed)+32)
+	token = append(token, meshTokenVersion)
+	token = append(token, ephPriv.PublicKey().Bytes()...)
+	token = append(token, x...)
+	token = append(token, sealed...)
+	token = append(token, hash[:]...)
+	return base64.RawURLEncoding.EncodeToString(token), secret, nil
+}
+
+func (c *meshControlClient) fetchPeers(ctx context.Context, remote netip.AddrPort) ([]meshDiscoveredPeer, error) {
+	challenge, err := c.fetchChallenge(ctx)
+	if err != nil {
+		return nil, err
+	}
+	token, secret, err := c.bearerToken(remote, challenge)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.controlURL.ResolveReference(&url.URL{Path: "/v1/peers"}).String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("mesh peers status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	sealed, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	plain, err := meshOpen(sealed, secret, meshBodyContextLabel)
+	if err != nil {
+		return nil, err
+	}
+	var out []meshDiscoveredPeer
+	if err := json.Unmarshal(plain, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *meshControlClient) fetchACLs(ctx context.Context, remote netip.AddrPort) (meshACLResponse, error) {
+	challenge, err := c.fetchChallenge(ctx)
+	if err != nil {
+		return meshACLResponse{}, err
+	}
+	token, secret, err := c.bearerToken(remote, challenge)
+	if err != nil {
+		return meshACLResponse{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.controlURL.ResolveReference(&url.URL{Path: "/v1/acls"}).String(), nil)
+	if err != nil {
+		return meshACLResponse{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return meshACLResponse{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return meshACLResponse{}, fmt.Errorf("mesh acls status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	sealed, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return meshACLResponse{}, err
+	}
+	plain, err := meshOpen(sealed, secret, meshBodyContextLabel)
+	if err != nil {
+		return meshACLResponse{}, err
+	}
+	var out meshACLResponse
+	if err := json.Unmarshal(plain, &out); err != nil {
+		return meshACLResponse{}, err
+	}
+	list := acl.List{Default: out.Default, Rules: out.Relay}
+	if err := list.Normalize(); err != nil {
+		return meshACLResponse{}, err
+	}
+	out.Default = list.Default
+	out.Relay = list.Rules
+	return out, nil
+}

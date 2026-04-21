@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"net/netip"
 	"time"
+
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 )
 
 const (
@@ -80,29 +82,67 @@ func (e *Engine) allowRelayTracked(meta relayPacketMeta, now time.Time) bool {
 	if flow, forward, ok := e.relayFindFlowLocked(meta); ok {
 		allowed := e.allowExistingRelayFlowLocked(flow, forward, meta, now)
 		e.relayMu.Unlock()
-		return allowed
+		if allowed {
+			return true
+		}
+		return e.allowRelayStatelessFallback(meta)
 	}
 	e.relayMu.Unlock()
 
-	if !e.relayAllowed(meta.src, meta.dst, meta.network) {
-		return false
+	if e.relayAllowed(meta.src, meta.dst, meta.network) && relayCanOpenFlow(meta) {
+		e.relayMu.Lock()
+		defer e.relayMu.Unlock()
+		e.ensureRelayFlowsLocked()
+		e.relaySweepLocked(now)
+		if flow, forward, ok := e.relayFindFlowLocked(meta); ok {
+			if e.allowExistingRelayFlowLocked(flow, forward, meta, now) {
+				return true
+			}
+			return e.allowRelayStatelessFallback(meta)
+		}
+		if !e.relayCanAddFlowLocked(meta) {
+			return e.allowRelayStatelessFallback(meta)
+		}
+		e.relayFlows[relayForwardKey(meta)] = newRelayFlow(meta, now)
+		return true
 	}
-	if !relayCanOpenFlow(meta) {
-		return false
-	}
+	return e.allowRelayStatelessFallback(meta)
+}
 
-	e.relayMu.Lock()
-	defer e.relayMu.Unlock()
-	e.ensureRelayFlowsLocked()
-	e.relaySweepLocked(now)
-	if flow, forward, ok := e.relayFindFlowLocked(meta); ok {
-		return e.allowExistingRelayFlowLocked(flow, forward, meta, now)
-	}
-	if !e.relayCanAddFlowLocked(meta) {
+func (e *Engine) allowRelayStatelessFallback(meta relayPacketMeta) bool {
+	if !e.meshRelayACLFallbackAllowed(meta.src.Addr(), meta.dst.Addr()) {
 		return false
 	}
-	e.relayFlows[relayForwardKey(meta)] = newRelayFlow(meta, now)
-	return true
+	if e.relayAllowed(meta.src, meta.dst, meta.network) {
+		return true
+	}
+	return e.relayAllowed(meta.dst, meta.src, meta.network)
+}
+
+func (e *Engine) meshRelayACLFallbackAllowed(srcIP, dstIP netip.Addr) bool {
+	srcKey, srcPeer, ok := e.meshRelayACLPeerForIP(srcIP)
+	if !ok || !srcPeer.MeshAcceptACLs {
+		return false
+	}
+	dstKey, dstPeer, ok := e.meshRelayACLPeerForIP(dstIP)
+	if !ok || !dstPeer.MeshAcceptACLs {
+		return false
+	}
+	return srcKey != "" && dstKey != "" && srcKey != dstKey
+}
+
+func (e *Engine) meshRelayACLPeerForIP(ip netip.Addr) (string, config.Peer, bool) {
+	key := e.peerKeyForIP(ip)
+	if key == "" {
+		return "", config.Peer{}, false
+	}
+	if dp := e.dynamicPeer(key); dp != nil {
+		if parent, _, ok := e.meshPeerConfig(dp.ParentPublicKey); ok {
+			return dp.ParentPublicKey, parent, true
+		}
+	}
+	peer, _, ok := e.meshPeerConfig(key)
+	return key, peer, ok
 }
 
 func (e *Engine) ensureRelayFlowsLocked() {

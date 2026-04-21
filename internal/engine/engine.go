@@ -9,6 +9,7 @@ package engine
 import (
 	"bufio"
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -74,6 +75,11 @@ type Engine struct {
 	relayFlows     map[relayFlowKey]*relayFlow
 	relayLastSweep time.Time
 
+	meshACLMu        sync.Mutex
+	meshACLs         map[string]acl.List
+	meshACLFlows     map[string]map[relayFlowKey]*relayFlow
+	meshACLLastSweep map[string]time.Time
+
 	listenersMu sync.Mutex
 	listeners   []net.Listener
 	pconns      []net.PacketConn
@@ -84,6 +90,9 @@ type Engine struct {
 	forwardMu    sync.Mutex
 	forwardNext  int
 	forwardNames map[string]forwardRuntime
+
+	dynamicMu    sync.RWMutex
+	dynamicPeers map[string]*dynamicPeer
 
 	socksUDPMu         sync.Mutex
 	socksUDPRelayPorts map[string]map[int]struct{}
@@ -104,6 +113,8 @@ type Engine struct {
 	dnsSem             chan struct{}
 	transportBind      *transport.MultiTransportBind
 	icmpForwardLimiter *rate.Limiter
+	meshAuth           meshAuthenticator
+	meshMasterKey      [32]byte
 }
 
 type trackedConn struct {
@@ -156,16 +167,23 @@ func New(cfg config.Config, logger *log.Logger) (*Engine, error) {
 		outACL:             acl.List{Default: cfg.ACL.OutboundDefault, Rules: cfg.ACL.Outbound},
 		relACL:             acl.List{Default: cfg.ACL.RelayDefault, Rules: cfg.ACL.Relay},
 		relayFlows:         make(map[relayFlowKey]*relayFlow),
+		meshACLs:           make(map[string]acl.List),
+		meshACLFlows:       make(map[string]map[relayFlowKey]*relayFlow),
+		meshACLLastSweep:   make(map[string]time.Time),
 		addrs:              make(map[string]string),
 		listenerMap:        make(map[string]net.Listener),
 		pconnMap:           make(map[string]net.PacketConn),
 		forwardNames:       make(map[string]forwardRuntime),
+		dynamicPeers:       make(map[string]*dynamicPeer),
 		socksUDPRelayPorts: make(map[string]map[int]struct{}),
 		connTable:          make(map[int64]*trackedConn),
 		closed:             make(chan struct{}),
 		fallbackDialer:     fallback,
 		localPrefixes:      localPrefixes,
 		icmpForwardLimiter: rate.NewLimiter(255, 255),
+	}
+	if _, err := cryptorand.Read(e.meshMasterKey[:]); err != nil {
+		return nil, err
 	}
 	if cfg.DNSServer.MaxInflight > 0 {
 		e.dnsSem = make(chan struct{}, cfg.DNSServer.MaxInflight)
@@ -338,9 +356,13 @@ func (e *Engine) Start() error {
 	if err := e.startDNSServer(); err != nil {
 		return err
 	}
+	if err := e.startMeshControlServer(); err != nil {
+		return err
+	}
 	if err := e.startAPIServer(); err != nil {
 		return err
 	}
+	e.startMeshPolling()
 	if e.cfg.Scripts.Allow {
 		for _, cmd := range e.cfg.WireGuard.PostUp {
 			if err := runShell(cmd); err != nil {
@@ -2153,6 +2175,9 @@ func (e *Engine) allowEgressPacket(packet []byte) bool {
 	if !e.allowTunnelPacket(packet) {
 		return false
 	}
+	if meta, ok := parseRelayPacket(packet); ok {
+		e.meshTrackLocalACL(meta)
+	}
 	if *e.cfg.Relay.Enabled {
 		meta, ok := parseRelayPacket(packet)
 		if ok && e.isRelayTransitPacket(meta) {
@@ -2170,7 +2195,15 @@ func (e *Engine) allowTunnelPacket(packet []byte) bool {
 	if src.Addr() == dst.Addr() {
 		return false
 	}
-	return !e.tunnelAddrBlocked(src.Addr()) && !e.tunnelAddrBlocked(dst.Addr())
+	if e.tunnelAddrBlocked(src.Addr()) || e.tunnelAddrBlocked(dst.Addr()) {
+		return false
+	}
+	if e.localAddrContains(dst.Addr()) {
+		if meta, ok := parseRelayPacket(packet); ok && !e.meshInboundACLAllowed(meta) {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *Engine) tunnelAddrBlocked(ip netip.Addr) bool {
