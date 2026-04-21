@@ -66,7 +66,7 @@ A single `#!TCP=required` comment in your wg-quick config is enough to switch a 
 | | `uwgsocks` | Kernel WireGuard | Tailscale / Headscale | proxychains |
 |---|---|---|---|---|
 | Root required | No | Yes | No | No |
-| Works in containers | Yes | Requires CAP_NET_ADMIN | Requires CAP_NET_ADMIN | Yes |
+| Works in containers | Yes | Requires CAP_NET_ADMIN | Yes | Yes |
 | **Host a server rootlessly** | **Yes** | No | No | — |
 | Runs on macOS / Windows / Android as server | Yes | No | No | — |
 | Survives DPI / port blocks | Yes | No | No | No |
