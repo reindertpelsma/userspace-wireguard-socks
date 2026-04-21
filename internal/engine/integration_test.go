@@ -1698,12 +1698,13 @@ func TestMeshControlServerBindsInsideTunnel(t *testing.T) {
 	var challenge struct {
 		ServerPublicKey    string `json:"server_public_key"`
 		ChallengePublicKey string `json:"challenge_public_key"`
+		TokenVersion       uint8  `json:"token_version"`
 		ExpiresUnix        int64  `json:"expires_unix"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&challenge); err != nil {
 		t.Fatal(err)
 	}
-	if challenge.ServerPublicKey != serverKey.PublicKey().String() || challenge.ChallengePublicKey == "" || challenge.ExpiresUnix <= 0 {
+	if challenge.ServerPublicKey != serverKey.PublicKey().String() || challenge.ChallengePublicKey == "" || challenge.TokenVersion != 2 || challenge.ExpiresUnix <= 0 {
 		t.Fatalf("unexpected mesh challenge: %+v", challenge)
 	}
 }

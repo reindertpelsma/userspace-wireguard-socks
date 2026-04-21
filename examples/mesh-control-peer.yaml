@@ -1,0 +1,33 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+# Client / spoke that keeps a stable parent peer, but also polls the parent's
+# tunnel-only mesh control server for discovered child peers and distributed
+# ACL state.
+
+wireguard:
+  private_key: CLIENT_PRIVATE_KEY_BASE64
+  addresses:
+    - 100.64.80.2/32
+  peers:
+    - public_key: HUB_PUBLIC_KEY_BASE64
+      preshared_key: CLIENT_A_PSK_BASE64
+      endpoint: edge.example.com:51820
+      allowed_ips:
+        - 100.64.80.1/32
+        - 100.64.80.3/32
+      persistent_keepalive: 25
+      control_url: http://100.64.80.1:8787
+      mesh_enabled: true
+      # Omit this unless you explicitly want to opt out of distributed ACLs.
+      mesh_disable_acls: false
+
+proxy:
+  socks5: 127.0.0.1:1080
+  http: 127.0.0.1:8080
+
+acl:
+  outbound_default: allow
+
+api:
+  listen: unix://uwgsocks.sock

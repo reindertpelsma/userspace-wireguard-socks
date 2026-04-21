@@ -10,6 +10,7 @@ Start here:
 
 - [Build and Quick Start](build-and-quickstart.md)
 - [Host TUN](host-tun.md)
+- [Mesh Control and Peer Sync](mesh-control.md)
 - [Wrapper and fdproxy](wrapper-and-fdproxy.md)
 - [Configuration and Routing](configuration-and-routing.md)
 - [API, Library, and Testing](api-library-and-testing.md)
@@ -17,6 +18,7 @@ Start here:
 For the canonical references, also keep these nearby:
 
 - [Configuration reference](../configuration.md)
+- [Complete config map](../config-reference.md)
 - [Proxy routing reference](../proxy-routing.md)
 - [Raw socket API](../socket-protocol.md)
 - [Testing plan](../testing.md)

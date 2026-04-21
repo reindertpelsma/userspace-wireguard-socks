@@ -33,7 +33,8 @@ import (
 )
 
 const (
-	meshTokenVersion     = 1
+	meshTokenVersionV1   = 1
+	meshTokenVersionV2   = 2
 	meshAuthContextLabel = "uwgsocks-mesh-auth"
 	meshBodyContextLabel = "uwgsocks-mesh-body"
 )
@@ -41,6 +42,7 @@ const (
 type meshChallengeResponse struct {
 	ServerPublicKey    string `json:"server_public_key"`
 	ChallengePublicKey string `json:"challenge_public_key"`
+	TokenVersion       uint8  `json:"token_version,omitempty"`
 	ExpiresUnix        int64  `json:"expires_unix"`
 }
 
@@ -84,9 +86,10 @@ type meshChallengeState struct {
 }
 
 type meshControlAuthenticator struct {
-	e      *Engine
-	curve  ecdh.Curve
-	pubKey wgtypes.Key
+	e       *Engine
+	curve   ecdh.Curve
+	pubKey  wgtypes.Key
+	privKey *ecdh.PrivateKey
 
 	mu      sync.Mutex
 	current meshChallengeState
@@ -98,10 +101,19 @@ func newMeshControlAuthenticator(e *Engine) (*meshControlAuthenticator, error) {
 	if err != nil {
 		return nil, err
 	}
+	parsedPriv, err := wgtypes.ParseKey(e.cfg.WireGuard.PrivateKey)
+	if err != nil {
+		return nil, err
+	}
+	priv, err := ecdh.X25519().NewPrivateKey(parsedPriv[:])
+	if err != nil {
+		return nil, err
+	}
 	return &meshControlAuthenticator{
-		e:      e,
-		curve:  ecdh.X25519(),
-		pubKey: wgtypes.Key(pub),
+		e:       e,
+		curve:   ecdh.X25519(),
+		pubKey:  wgtypes.Key(pub),
+		privKey: priv,
 	}, nil
 }
 
@@ -113,6 +125,7 @@ func (a *meshControlAuthenticator) Challenge(now time.Time) (meshChallengeRespon
 	return meshChallengeResponse{
 		ServerPublicKey:    a.pubKey.String(),
 		ChallengePublicKey: base64.StdEncoding.EncodeToString(state.pub),
+		TokenVersion:       meshTokenVersionV2,
 		ExpiresUnix:        state.expires.Unix(),
 	}, nil
 }
@@ -129,7 +142,8 @@ func (a *meshControlAuthenticator) Verify(r *http.Request) (meshAuthResult, erro
 	if len(token) < 1+32+32+24+16+32 {
 		return meshAuthResult{}, errors.New("invalid bearer token length")
 	}
-	if token[0] != meshTokenVersion {
+	tokenVersion := token[0]
+	if tokenVersion != meshTokenVersionV1 && tokenVersion != meshTokenVersionV2 {
 		return meshAuthResult{}, errors.New("unsupported bearer token version")
 	}
 	ephPub := token[1:33]
@@ -150,7 +164,7 @@ func (a *meshControlAuthenticator) Verify(r *http.Request) (meshAuthResult, erro
 		if subtle.ConstantTimeCompare(meshQuickCheck(serverPubBytes, state.pub, addrBinding), quick) != 1 {
 			continue
 		}
-		res, err := a.verifyWithState(state, ephPub, body, wantHash, addrBinding, r.RemoteAddr)
+		res, err := a.verifyWithState(tokenVersion, state, ephPub, body, wantHash, addrBinding, r.RemoteAddr)
 		if err == nil {
 			return res, nil
 		}
@@ -158,7 +172,7 @@ func (a *meshControlAuthenticator) Verify(r *http.Request) (meshAuthResult, erro
 	return meshAuthResult{}, errors.New("invalid bearer token")
 }
 
-func (a *meshControlAuthenticator) verifyWithState(state meshChallengeState, ephPub, body, wantHash, addrBinding []byte, remote string) (meshAuthResult, error) {
+func (a *meshControlAuthenticator) verifyWithState(tokenVersion byte, state meshChallengeState, ephPub, body, wantHash, addrBinding []byte, remote string) (meshAuthResult, error) {
 	eph, err := a.curve.NewPublicKey(append([]byte(nil), ephPub...))
 	if err != nil {
 		return meshAuthResult{}, err
@@ -167,7 +181,15 @@ func (a *meshControlAuthenticator) verifyWithState(state meshChallengeState, eph
 	if err != nil {
 		return meshAuthResult{}, err
 	}
-	plain, err := meshOpen(body, k1, meshAuthContextLabel)
+	authKey := k1
+	if tokenVersion >= meshTokenVersionV2 {
+		staticShared, err := a.privKey.ECDH(eph)
+		if err != nil {
+			return meshAuthResult{}, err
+		}
+		authKey = meshAuthKey(k1, staticShared)
+	}
+	plain, err := meshOpen(body, authKey, meshAuthContextLabel)
 	if err != nil {
 		return meshAuthResult{}, err
 	}
@@ -191,7 +213,7 @@ func (a *meshControlAuthenticator) verifyWithState(state meshChallengeState, eph
 	if err != nil {
 		return meshAuthResult{}, err
 	}
-	secret := meshSharedSecret(k1, k2, meshPeerPSKBytes(peer), addrBinding)
+	secret := meshSharedSecret(authKey, k2, meshPeerPSKBytes(peer), addrBinding)
 	gotHash := sha256.Sum256(secret)
 	if subtle.ConstantTimeCompare(gotHash[:], wantHash) != 1 {
 		return meshAuthResult{}, errors.New("mesh shared secret mismatch")
@@ -1341,6 +1363,13 @@ func meshQuickCheck(serverPub, challengePub, addrBinding []byte) []byte {
 	return mac.Sum(nil)
 }
 
+func meshAuthKey(ephemeralShared, staticShared []byte) []byte {
+	mac := hmac.New(sha256.New, ephemeralShared)
+	_, _ = mac.Write([]byte("server-static"))
+	_, _ = mac.Write(staticShared)
+	return mac.Sum(nil)
+}
+
 func meshSharedSecret(k1, k2, psk, addrBinding []byte) []byte {
 	inner := hmac.New(sha256.New, k1)
 	_, _ = inner.Write(psk)
@@ -1529,6 +1558,7 @@ func (c *meshControlClient) bearerToken(remote netip.AddrPort, challenge meshCha
 	if err != nil {
 		return "", nil, err
 	}
+	authKey := k1
 	wgPriv, err := curve.NewPrivateKey(c.privateKey[:])
 	if err != nil {
 		return "", nil, err
@@ -1542,19 +1572,34 @@ func (c *meshControlClient) bearerToken(remote netip.AddrPort, challenge meshCha
 		return "", nil, err
 	}
 	peerPub := c.privateKey.PublicKey()
-	sealed, err := meshSealDeterministic(peerPub[:], k1, meshAuthContextLabel)
-	if err != nil {
-		return "", nil, err
-	}
 	serverPub, err := wgtypes.ParseKey(challenge.ServerPublicKey)
 	if err != nil {
 		return "", nil, err
 	}
-	secret := meshSharedSecret(k1, k2, meshPeerPSKBytes(c.peer), addrBinding)
+	if challenge.TokenVersion >= meshTokenVersionV2 {
+		serverStaticPub, err := curve.NewPublicKey(serverPub[:])
+		if err != nil {
+			return "", nil, err
+		}
+		staticShared, err := ephPriv.ECDH(serverStaticPub)
+		if err != nil {
+			return "", nil, err
+		}
+		authKey = meshAuthKey(k1, staticShared)
+	}
+	sealed, err := meshSealDeterministic(peerPub[:], authKey, meshAuthContextLabel)
+	if err != nil {
+		return "", nil, err
+	}
+	secret := meshSharedSecret(authKey, k2, meshPeerPSKBytes(c.peer), addrBinding)
 	x := meshQuickCheck(serverPub[:], challengePubBytes, addrBinding)
 	hash := sha256.Sum256(secret)
 	token := make([]byte, 0, 1+32+32+len(sealed)+32)
-	token = append(token, meshTokenVersion)
+	tokenVersion := byte(meshTokenVersionV1)
+	if challenge.TokenVersion >= meshTokenVersionV2 {
+		tokenVersion = meshTokenVersionV2
+	}
+	token = append(token, tokenVersion)
 	token = append(token, ephPriv.PublicKey().Bytes()...)
 	token = append(token, x...)
 	token = append(token, sealed...)

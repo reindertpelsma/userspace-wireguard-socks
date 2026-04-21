@@ -1,0 +1,41 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+# Relay-focused server: traffic between peers is forwarded only when the relay
+# ACL permits it. Replies then follow the relay conntrack table.
+
+wireguard:
+  private_key: SERVER_PRIVATE_KEY_BASE64
+  listen_port: 51820
+  addresses:
+    - 100.64.82.1/32
+  peers:
+    - public_key: APP_A_PUBLIC_KEY_BASE64
+      allowed_ips:
+        - 100.64.82.2/32
+        - 10.10.10.0/24
+    - public_key: APP_B_PUBLIC_KEY_BASE64
+      allowed_ips:
+        - 100.64.82.3/32
+        - 10.20.20.0/24
+
+relay:
+  enabled: true
+  conntrack: true
+
+acl:
+  relay_default: deny
+  relay:
+    - action: allow
+      source: 10.10.10.0/24
+      destination: 10.20.20.0/24
+      protocol: tcp
+      destination_port: 443
+    - action: allow
+      source: 10.10.10.0/24
+      destination: 10.20.20.53/32
+      protocol: udp
+      destination_port: 53
+
+api:
+  listen: unix://uwgsocks.sock

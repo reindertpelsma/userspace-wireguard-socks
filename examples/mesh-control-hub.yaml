@@ -1,0 +1,49 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+# Hub / relay server with mesh control enabled. Child uwgsocks peers can fetch
+# currently active peers and, when the outer transport is UDP-capable, attempt
+# direct WireGuard child sessions.
+
+wireguard:
+  private_key: SERVER_PRIVATE_KEY_BASE64
+  listen_port: 51820
+  addresses:
+    - 100.64.80.1/32
+  peers:
+    - public_key: CLIENT_A_PUBLIC_KEY_BASE64
+      preshared_key: CLIENT_A_PSK_BASE64
+      allowed_ips:
+        - 100.64.80.2/32
+      mesh_enabled: true
+      mesh_accept_acls: true
+    - public_key: CLIENT_B_PUBLIC_KEY_BASE64
+      preshared_key: CLIENT_B_PSK_BASE64
+      allowed_ips:
+        - 100.64.80.3/32
+      mesh_enabled: true
+      mesh_accept_acls: true
+      mesh_trust: trusted_if_dynamic_acls
+
+mesh_control:
+  listen: 100.64.80.1:8787
+  active_peer_window_seconds: 120
+
+relay:
+  enabled: true
+  conntrack: true
+
+acl:
+  relay_default: deny
+  relay:
+    - action: allow
+      source: 100.64.80.2/32
+      destination: 100.64.80.3/32
+      protocol: tcp
+      destination_port: 443
+
+dns_server:
+  listen: 100.64.80.1:53
+
+api:
+  listen: unix://uwgsocks.sock

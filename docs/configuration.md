@@ -3,11 +3,13 @@
 
 # Configuration Reference
 
-`uwgsocks` merges configuration from YAML, wg-quick config, and CLI flags. YAML is the base, `wireguard.config_file` and `wireguard.config` are merged into the WireGuard section, then CLI flags append or override values.
+`uwgsocks` merges configuration from YAML, wg-quick config, and CLI flags. YAML
+is the base, `wireguard.config_file` and `wireguard.config` are merged into the
+WireGuard section, then CLI flags append or override values.
 
-The YAML blocks below are intended to be exhaustive for the current config
-schema. When a field is omitted at runtime, `Normalize()` applies the defaults
-described in the surrounding text.
+This document explains the behavior behind the main config blocks. For the
+single searchable YAML map that includes every field in one place, also keep
+[Complete configuration reference](config-reference.md) open.
 
 ## WireGuard
 
@@ -640,6 +642,17 @@ proxy:
   lowbind: false
 ```
 
+`dns_server.listen` hosts a small DNS server **inside the WireGuard tunnel**.
+Peers can point their tunnel-side DNS setting at this address to resolve
+internet and internal names through the server. It is not a host `:53` bind
+and it does not expose your machine's resolver directly on the LAN.
+
+The runtime `api.listen` endpoint is the management and integration surface for
+control planes such as `uwgsocks-ui`. It exposes live status, peer and ACL
+updates, forward management, and the low-level socket protocol. Use a Unix
+socket where possible; use an HTTP listener plus `api.token` when another
+process must reach it over TCP.
+
 CLI:
 
 ```bash
@@ -669,25 +682,32 @@ port when supplied, and peer set, while rejecting `Address`, `DNS`, and `MTU`
 changes that require rebuilding the userspace netstack.
 
 `/v1/socket` is the HTTP-upgraded raw socket protocol documented in
-[`docs/socket-protocol.md`](socket-protocol.md). Connected TCP/UDP sockets do
-not need `socket_api.bind`; connected ICMP ping sockets are also supported and
-are checked against outbound ACL rules with protocol `icmp`. Connected
-TCP/UDP sockets follow the same `AllowedIPs`, outbound-proxy, and
-`fallback_direct` routing order as SOCKS5/HTTP. Connected ICMP ping sockets use
-the same ACL and `AllowedIPs` checks, then fall back to a host unprivileged
-ping socket only when the kernel supports it. Raw socket API IPv6 connect
-attempts are rejected immediately when the runtime itself has no tunnel IPv6,
-so Happy Eyeballs can try IPv4. TCP listener sockets require `socket_api.bind:
-true` or `proxy.bind: true`. UDP listener-style sockets are allowed even when
-`bind` is false, but
-they are established-only unless `socket_api.udp_inbound: true`: replies are
-delivered only from remote IP:port pairs the client has contacted recently.
-Binding to addresses outside this peer's assigned WireGuard IPs requires
+[`docs/socket-protocol.md`](socket-protocol.md). It is the lowest-level local
+integration surface in `uwgsocks`: a program can create TCP, UDP, ICMP ping,
+and listener-style sockets directly on top of the userspace TCP/IP stack
+instead of going through SOCKS5 or HTTP proxying. `uwgwrapper` and other local
+integrations use this path when they need "real" sockets rather than proxy
+semantics.
+
+Connected TCP/UDP sockets do not need `socket_api.bind`. Connected ICMP ping
+sockets are also supported and are checked against outbound ACL rules with
+protocol `icmp`. Connected TCP/UDP sockets follow the same `AllowedIPs`,
+outbound-proxy, and `fallback_direct` routing order as SOCKS5/HTTP. Connected
+ICMP ping sockets use the same ACL and `AllowedIPs` checks, then fall back to a
+host unprivileged ping socket only when the kernel supports it. Raw socket API
+IPv6 connect attempts are rejected immediately when the runtime itself has no
+tunnel IPv6 so Happy Eyeballs can fall back to IPv4.
+
+TCP listener sockets require `socket_api.bind: true` or `proxy.bind: true`.
+UDP listener-style sockets are allowed even when `bind` is false, but they are
+established-only unless `socket_api.udp_inbound: true`: replies are delivered
+only from remote IP:port pairs the client has contacted recently. Binding to
+addresses outside this peer's assigned WireGuard IPs requires
 `socket_api.transparent_bind: true`. Binding below port 1024 additionally
-requires `proxy.lowbind: true`. UDP listener-style sockets can be
-converted to connected UDP sockets, reconnected to another peer, or disconnected
-again by sending a `connect` frame with `listener_connection_id` set to the
-existing UDP socket ID.
+requires `proxy.lowbind: true`. UDP listener-style sockets can be converted to
+connected UDP sockets, reconnected to another peer, or disconnected again by
+sending a `connect` frame with `listener_connection_id` set to the existing UDP
+socket ID.
 
 `proxy.http_listeners` adds extra HTTP proxy listeners in addition to
 `proxy.http`. This lets the same HTTP proxy, including `/uwg/socket`, be

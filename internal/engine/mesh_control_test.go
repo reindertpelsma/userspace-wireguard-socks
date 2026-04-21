@@ -6,6 +6,9 @@ package engine
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"io"
 	"log"
 	"net"
@@ -136,6 +139,66 @@ func TestMeshAdvertisedEndpointByTransport(t *testing.T) {
 	}
 	if got := meshAdvertisedEndpoint(config.Peer{Transport: "web"}, st, transports, ""); got != "" {
 		t.Fatalf("https endpoint=%q want empty", got)
+	}
+}
+
+func TestMeshBearerTokenBindsServerStaticKey(t *testing.T) {
+	serverKey := mustMeshKey(t)
+	clientKey := mustMeshKey(t)
+	curve := ecdh.X25519()
+	challengePriv, err := curve.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &meshControlClient{
+		peer:       config.Peer{},
+		privateKey: clientKey,
+	}
+	challenge := meshChallengeResponse{
+		ServerPublicKey:    serverKey.PublicKey().String(),
+		ChallengePublicKey: base64.StdEncoding.EncodeToString(challengePriv.PublicKey().Bytes()),
+		TokenVersion:       meshTokenVersionV2,
+		ExpiresUnix:        time.Now().Add(time.Minute).Unix(),
+	}
+	token, _, err := client.bearerToken(netip.MustParseAddrPort("100.64.99.2:0"), challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw[0] != meshTokenVersionV2 {
+		t.Fatalf("token version=%d want %d", raw[0], meshTokenVersionV2)
+	}
+	ephPub, err := curve.NewPublicKey(raw[1:33])
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := raw[65 : len(raw)-32]
+
+	rogueShared, err := challengePriv.ECDH(ephPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := meshOpen(body, rogueShared, meshAuthContextLabel); err == nil {
+		t.Fatal("mesh auth body decrypted without server static key")
+	}
+
+	serverPriv, err := curve.NewPrivateKey(serverKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	staticShared, err := serverPriv.ECDH(ephPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := meshOpen(body, meshAuthKey(rogueShared, staticShared), meshAuthContextLabel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := wgtypes.Key(plain).String(); got != clientKey.PublicKey().String() {
+		t.Fatalf("decrypted peer=%q want %q", got, clientKey.PublicKey().String())
 	}
 }
 

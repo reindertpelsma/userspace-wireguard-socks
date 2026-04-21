@@ -1,0 +1,54 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+# One listener set that can expose WireGuard over several outer transports:
+# direct UDP, HTTPS/WebSocket, QUIC/WebTransport, and TURN-over-HTTPS.
+
+wireguard:
+  private_key: SERVER_PRIVATE_KEY_BASE64
+  listen_port: 51820
+  addresses:
+    - 100.64.81.1/32
+
+transports:
+  - name: udp
+    base: udp
+    listen: true
+    listen_port: 51820
+
+  - name: web
+    base: https
+    listen: true
+    listen_port: 443
+    websocket:
+      path: /wg
+      advertise_http3: true
+    tls:
+      cert_file: /etc/ssl/certs/fullchain.pem
+      key_file: /etc/ssl/private/privkey.pem
+
+  - name: quic
+    base: quic
+    listen: true
+    listen_port: 443
+    websocket:
+      path: /wg
+    tls:
+      cert_file: /etc/ssl/certs/fullchain.pem
+      key_file: /etc/ssl/private/privkey.pem
+
+  - name: turn-web
+    base: turn
+    turn:
+      server: turn.example.com:443
+      username: wireguard
+      password: replace-me
+      protocol: https
+      tls:
+        server_sni: turn.example.com
+
+proxy:
+  socks5: 127.0.0.1:1080
+
+api:
+  listen: unix://uwgsocks.sock

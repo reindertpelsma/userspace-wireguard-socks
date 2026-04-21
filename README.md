@@ -88,7 +88,9 @@ only host-TUN mode does.
 ## Documentation
 
 - [Configuration reference](docs/configuration.md)
+- [Complete config map](docs/config-reference.md)
 - [Host TUN how-to](docs/howto/host-tun.md)
+- [Mesh control / peer sync how-to](docs/howto/mesh-control.md)
 - [Transport modes](docs/transport-modes.md)
 - [Proxy routing order](docs/proxy-routing.md)
 - [Testing and security model](docs/testing.md)
