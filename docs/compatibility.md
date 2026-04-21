@@ -49,6 +49,21 @@ platforms (no `LD_PRELOAD` / ptrace support outside Linux).
 | Windows arm64 | Manually tested (arm64 VM on Raspberry Pi) |
 | Linux arm64 Termux (Android) | Manually tested |
 
+### Standalone TURN server artifacts
+
+The standalone `turn/` server is also published as a release artifact.
+
+| Platform | Status |
+|---|---|
+| Linux amd64 | CI-tested in `turn/`; release binary shipped |
+| Linux arm64 | CI-tested in `turn/`; release binary shipped |
+| Linux riscv64 | Cross-compiled release binary shipped |
+| Linux mips64 | Cross-compiled release binary shipped |
+| macOS amd64 | Cross-compiled release binary shipped |
+| macOS arm64 | CI-tested in `turn/`; release binary shipped |
+| Windows amd64 | CI-tested in `turn/`; release binary shipped |
+| Windows arm64 | Cross-compiled release binary shipped |
+
 ### Exotic architecture builds
 
 `uwgsocks` cross-compiles cleanly (`CGO_ENABLED=0`) and binaries are shipped

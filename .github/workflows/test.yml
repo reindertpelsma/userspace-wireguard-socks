@@ -42,6 +42,13 @@ jobs:
         shell: bash
         run: go test ./...
 
+      - name: Run standalone TURN tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd turn
+          go test ./...
+
       - name: Real Linux host-TUN smoke test
         if: runner.os == 'Linux'
         shell: bash

@@ -73,6 +73,67 @@ jobs:
           path: dist/${{ matrix.artifact_name }}
           if-no-files-found: error
 
+  build-turn:
+    name: turn ${{ matrix.goos }} ${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            artifact_name: turn-linux-amd64
+          - goos: linux
+            goarch: arm64
+            artifact_name: turn-linux-arm64
+          - goos: linux
+            goarch: riscv64
+            artifact_name: turn-linux-riscv64
+          - goos: linux
+            goarch: mips64
+            artifact_name: turn-linux-mips64
+          - goos: darwin
+            goarch: amd64
+            artifact_name: turn-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            artifact_name: turn-darwin-arm64
+          - goos: windows
+            goarch: amd64
+            artifact_name: turn-windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            artifact_name: turn-windows-arm64.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: turn/go.mod
+
+      - name: Build turn
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cd turn
+          go build -trimpath -ldflags='-s -w' -o "../dist/${{ matrix.artifact_name }}" .
+
+      - name: Show artifact details
+        run: |
+          ls -lh dist
+          file "dist/${{ matrix.artifact_name }}" || true
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}
+          if-no-files-found: error
+
   build-uwgwrapper:
     name: uwgwrapper linux ${{ matrix.goarch }} ${{ matrix.libc }}
     runs-on: ${{ matrix.runner }}
@@ -174,6 +235,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - build-uwgsocks
+      - build-turn
       - build-uwgwrapper
     steps:
       - name: Download build artifacts

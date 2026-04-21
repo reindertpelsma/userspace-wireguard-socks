@@ -22,6 +22,18 @@ go build -o turn .
 ./turn -config turn-open-relay.example.yaml
 ```
 
+Convenience build scripts are also included:
+
+```bash
+bash compile.sh
+```
+
+On Windows:
+
+```powershell
+compile.bat
+```
+
 Docker:
 
 ```bash
@@ -251,3 +263,7 @@ The repository also contains a heavier WireGuard integration test behind the `in
 ```bash
 go test -tags=integration ./...
 ```
+
+GitHub Actions runs `go test ./...` in `turn/` on every push. Tagged releases
+also publish standalone TURN binaries for Linux (`amd64`, `arm64`, `riscv64`,
+`mips64`), macOS (`amd64`, `arm64`), and Windows (`amd64`, `arm64`).
