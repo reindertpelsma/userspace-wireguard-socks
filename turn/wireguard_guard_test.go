@@ -226,3 +226,86 @@ func TestWireguardGuard_SessionOverflow(t *testing.T) {
 		t.Error("New verified session should have replaced an unverified one")
 	}
 }
+
+func TestWireguardGuard_RoamBurstEscalatesDoS(t *testing.T) {
+	var pubKey [32]byte
+	rand.Read(pubKey[:])
+	guard := NewWireguardGuard(pubKey)
+	relayPort := 3478
+
+	sess := &WireguardSession{
+		RelayPort:     relayPort,
+		RemoteAddr:    (&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111}).String(),
+		ClientPeerID:  123,
+		ServerPeerID:  456,
+		Verified:      true,
+		LastServerPkt: time.Now(),
+	}
+	guard.mu.Lock()
+	guard.Sessions = append(guard.Sessions, sess)
+	guard.mu.Unlock()
+
+	packet := make([]byte, MinDataPacketSize)
+	packet[0] = PacketData
+	binary.LittleEndian.PutUint32(packet[4:8], 456)
+	binary.LittleEndian.PutUint64(packet[8:16], 1)
+
+	if allowed, _ := guard.ProcessInbound(packet, &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 2222}, relayPort); !allowed {
+		t.Fatal("first roam packet should still be allowed before escalation")
+	}
+	if allowed, _ := guard.ProcessInbound(packet, &net.UDPAddr{IP: net.ParseIP("3.3.3.3"), Port: 3333}, relayPort); !allowed {
+		t.Fatal("second burst roam packet should still be allowed before escalation")
+	}
+	guard.mu.Lock()
+	guard.LastStatsReset = time.Now().Add(-11 * time.Second)
+	guard.mu.Unlock()
+	guard.ProcessInbound(packet, &net.UDPAddr{IP: net.ParseIP("4.4.4.4"), Port: 4444}, relayPort)
+	if guard.DoSLevel == DoSLevelNone {
+		t.Fatal("burst roam activity did not raise DoS level")
+	}
+}
+
+func TestWireguardGuard_RoamSustainedEscalatesDoS(t *testing.T) {
+	var pubKey [32]byte
+	rand.Read(pubKey[:])
+	guard := NewWireguardGuard(pubKey)
+	relayPort := 3478
+
+	sess := &WireguardSession{
+		RelayPort:     relayPort,
+		RemoteAddr:    (&net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111}).String(),
+		ClientPeerID:  123,
+		ServerPeerID:  456,
+		Verified:      true,
+		LastServerPkt: time.Now(),
+	}
+	guard.mu.Lock()
+	guard.Sessions = append(guard.Sessions, sess)
+	guard.mu.Unlock()
+
+	packet := make([]byte, MinDataPacketSize)
+	packet[0] = PacketData
+	binary.LittleEndian.PutUint32(packet[4:8], 456)
+	binary.LittleEndian.PutUint64(packet[8:16], 1)
+
+	remotes := []*net.UDPAddr{
+		{IP: net.ParseIP("2.2.2.2"), Port: 2222},
+		{IP: net.ParseIP("3.3.3.3"), Port: 3333},
+		{IP: net.ParseIP("4.4.4.4"), Port: 4444},
+	}
+	for i, remote := range remotes {
+		if allowed, _ := guard.ProcessInbound(packet, remote, relayPort); !allowed {
+			t.Fatalf("roam packet %d should still be allowed before escalation", i)
+		}
+		guard.mu.Lock()
+		sess.LastRoam = time.Now().Add(-time.Second)
+		guard.mu.Unlock()
+	}
+	guard.mu.Lock()
+	guard.LastStatsReset = time.Now().Add(-11 * time.Second)
+	guard.mu.Unlock()
+	guard.ProcessInbound(packet, &net.UDPAddr{IP: net.ParseIP("5.5.5.5"), Port: 5555}, relayPort)
+	if guard.DoSLevel == DoSLevelNone {
+		t.Fatal("sustained roam activity did not raise DoS level")
+	}
+}

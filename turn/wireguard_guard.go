@@ -31,6 +31,8 @@ const (
 	SessionTimeout         = 30 * time.Second
 	UnverifiedDataLimit    = 256 * 1024 // 256KB
 	SpecialPacketRateLimit = 4          // per second
+	roamBurstWindow        = 50 * time.Millisecond
+	roamSustainedWindow    = 30 * time.Second
 )
 
 var (
@@ -47,18 +49,22 @@ const (
 )
 
 type WireguardSession struct {
-	RelayPort      int
-	RemoteAddr     string
-	ClientPeerID   uint32 // sender index from client
-	ServerPeerID   uint32 // sender index from server
-	Verified       bool
-	LastServerPkt  time.Time
-	DoSDataCount   int64
-	RateLimitTime  time.Time
-	RateLimitCount int
-	MaxCounter     uint64
-	ForwardCookie  [16]byte
-	LastMac1       [16]byte
+	RelayPort       int
+	RemoteAddr      string
+	ClientPeerID    uint32 // sender index from client
+	ServerPeerID    uint32 // sender index from server
+	Verified        bool
+	LastServerPkt   time.Time
+	DoSDataCount    int64
+	RateLimitTime   time.Time
+	RateLimitCount  int
+	MaxCounter      uint64
+	ForwardCookie   [16]byte
+	LastMac1        [16]byte
+	LastRoam        time.Time
+	RoamBurstCount  int
+	RoamWindowFrom  time.Time
+	RoamWindowCount int
 }
 
 type WireguardGuard struct {
@@ -349,7 +355,7 @@ func (g *WireguardGuard) handleInboundOther(packet []byte, remoteAddr net.Addr, 
 
 	// Roaming check
 	if sess.RemoteAddr != clientAddrStr {
-		g.RoamCount++
+		g.noteRoam(sess, time.Now())
 		// User said: "if the client's IP+PORT changed, then do NOT update the session,
 		// since we haven't verified it. Server will send to new endpoint which will update the session entry."
 	}
@@ -567,6 +573,32 @@ func (g *WireguardGuard) createCookieReply(initiationPacket []byte, remoteAddr n
 	return reply
 }
 
+func (g *WireguardGuard) noteRoam(sess *WireguardSession, now time.Time) {
+	score := 1
+	if !sess.LastRoam.IsZero() && now.Sub(sess.LastRoam) <= roamBurstWindow {
+		sess.RoamBurstCount++
+	} else {
+		sess.RoamBurstCount = 1
+	}
+	if sess.RoamWindowFrom.IsZero() || now.Sub(sess.RoamWindowFrom) > roamSustainedWindow {
+		sess.RoamWindowFrom = now
+		sess.RoamWindowCount = 1
+	} else {
+		sess.RoamWindowCount++
+	}
+	sess.LastRoam = now
+
+	switch {
+	case sess.RoamBurstCount >= 2:
+		score += 12
+	case sess.RoamWindowCount >= 3:
+		score += 12
+	case sess.RoamWindowCount >= 2:
+		score += 4
+	}
+	g.RoamCount += score
+}
+
 func (g *WireguardGuard) maintenance() {
 	now := time.Now()
 
@@ -584,12 +616,33 @@ func (g *WireguardGuard) maintenance() {
 			maxSess = DefaultMaxSessions
 		}
 
-		if g.RoamCount > 10 || g.HandshakeCount > 50 || unverifiedCount > int(float64(maxSess)*0.8) || g.RejectionCount > 100 {
+		burstRoamers := 0
+		sustainedRoamers := 0
+		for _, s := range g.Sessions {
+			if s == nil {
+				continue
+			}
+			if !s.LastRoam.IsZero() && now.Sub(s.LastRoam) <= time.Second && s.RoamBurstCount >= 2 {
+				burstRoamers++
+			}
+			if !s.RoamWindowFrom.IsZero() && now.Sub(s.RoamWindowFrom) <= roamSustainedWindow && s.RoamWindowCount >= 3 {
+				sustainedRoamers++
+			}
+			if !s.LastRoam.IsZero() && now.Sub(s.LastRoam) > roamBurstWindow {
+				s.RoamBurstCount = 0
+			}
+			if !s.RoamWindowFrom.IsZero() && now.Sub(s.RoamWindowFrom) > roamSustainedWindow {
+				s.RoamWindowFrom = time.Time{}
+				s.RoamWindowCount = 0
+			}
+		}
+
+		if g.RoamCount > 10 || burstRoamers > 0 || sustainedRoamers > 0 || g.HandshakeCount > 50 || unverifiedCount > int(float64(maxSess)*0.8) || g.RejectionCount > 100 {
 			if g.DoSLevel < DoSLevelFull {
 				g.DoSLevel++
 			}
 			g.DOSLowerTrigger = 0
-		} else if g.RoamCount == 0 && g.HandshakeCount < 5 && unverifiedCount < int(float64(maxSess)*0.1) && g.RejectionCount < 10 {
+		} else if g.RoamCount == 0 && burstRoamers == 0 && sustainedRoamers == 0 && g.HandshakeCount < 5 && unverifiedCount < int(float64(maxSess)*0.1) && g.RejectionCount < 10 {
 			if g.DoSLevel > DoSLevelNone {
 				// Only decrease after some time of silence
 				if g.DOSLowerTrigger > 10 {
