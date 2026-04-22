@@ -63,7 +63,7 @@ A single `#!TCP=required` comment in your wg-quick config is enough to switch a 
 
 ## Binaries
 
-- **`uwgsocks`** — WireGuard engine, SOCKS5/HTTP proxy, port forwards, ACL engine, DNS, relay, and runtime API. Runs on Linux, macOS, and Windows.
+- **`uwgsocks`** — WireGuard engine, SOCKS5/HTTP proxy, port forwards, ACL engine, DNS, relay, and runtime API. Runs on Linux, macOS, Windows, FreeBSD, and OpenBSD.
 - **`uwgwrapper`** — Linux-only launcher that transparently routes any application through `uwgsocks`. Uses LD_PRELOAD for the fast path and ptrace/seccomp for static binaries.
 - **`turn/`** — standalone TURN relay for relay-friendly UDP paths, CGNAT traversal, and reverse-proxy-friendly HTTP/HTTPS/QUIC carriers.
 
@@ -132,8 +132,9 @@ For Windows host-TUN mode, ship the official signed `wintun.dll` next to
 `uwgsocks.exe` in the release zip, or install it into `C:\\Windows\\System32`.
 
 Tagged releases also publish the standalone `turn` server for Linux, macOS,
-and Windows. Linux release assets include `amd64`, `arm64`, `riscv64`, and
-`mips64`; macOS and Windows include `amd64` and `arm64`.
+Windows, FreeBSD, and OpenBSD. Main `uwgsocks` Linux release assets include
+`amd64`, `arm64`, `riscv64`, `mips`, and `mipsle`; macOS and Windows include
+`amd64` and `arm64`; BSD releases include `amd64` and `arm64`.
 SOCKS5/HTTP, forwards, relay, and the raw socket API do not need `wintun.dll`;
 only host-TUN mode does.
 
