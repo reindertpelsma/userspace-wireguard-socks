@@ -37,7 +37,7 @@ func TestLDPreloadManagedTCPUDPConnect(t *testing.T) {
 	tmp := t.TempDir()
 	preloadSO := filepath.Join(tmp, "uwgpreload.so")
 	stubBin := filepath.Join(tmp, "stub_client")
-	run(t, repo, "gcc", "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-o", preloadSO, "preload/uwgpreload.c", "-ldl")
+	run(t, repo, "gcc", "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-o", preloadSO, "preload/uwgpreload.c", "-ldl", "-pthread", "-lpthread")
 	run(t, repo, "gcc", "-O2", "-Wall", "-Wextra", "-o", stubBin, "tests/preload/testdata/stub_client.c")
 
 	serverKey, clientKey := mustKey(t), mustKey(t)

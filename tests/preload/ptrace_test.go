@@ -607,8 +607,8 @@ func buildWrapperArtifacts(t *testing.T) wrapperArtifacts {
 	if err := os.MkdirAll(embeddedPreloadDir, 0o755); err != nil {
 		t.Fatalf("mkdir embedded preload dir: %v", err)
 	}
-	run(t, repo, "gcc", "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-o", embeddedPreload, "preload/uwgpreload.c", "-ldl", "-pthread")
-	run(t, repo, "gcc", "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-o", art.preload, "preload/uwgpreload.c", "-ldl", "-pthread")
+	run(t, repo, "gcc", "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-o", embeddedPreload, "preload/uwgpreload.c", "-ldl", "-pthread", "-lpthread")
+	run(t, repo, "gcc", "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-o", art.preload, "preload/uwgpreload.c", "-ldl", "-pthread", "-lpthread")
 	run(t, repo, "gcc", "-O2", "-Wall", "-Wextra", "-o", art.stub, "tests/preload/testdata/stub_client.c")
 	run(t, repo, "gcc", "-O2", "-Wall", "-Wextra", "-o", art.mixed, "tests/preload/testdata/mixed_client.c")
 	run(t, repo, "gcc", "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-o", art.rawmixLib, "tests/preload/testdata/rawmix_helpers.c")

@@ -284,14 +284,15 @@ jobs:
             -w /workspace \
             --cap-add SYS_PTRACE \
             --security-opt seccomp=unconfined \
-            golang:1.25-bullseye \
-            bash -lc "apt-get update >/dev/null && \
+            golang:1.24-bullseye \
+            bash -lc 'export PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto && \
+                     apt-get update >/dev/null && \
                      apt-get install -y gcc libc6-dev >/dev/null && \
                      mkdir -p cmd/uwgwrapper/assets && \
                      gcc -shared -fPIC -O2 -Wall -Wextra \
-                       -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c -ldl -pthread && \
+                       -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c -ldl -pthread -lpthread && \
                      go test ./internal/uwgtrace/... ./internal/fdproxy/... && \
-                     (go test ./tests/preload/... || go test ./tests/preload/...)"
+                     (go test ./tests/preload/... || go test ./tests/preload/...)'
           sudo chown -R "$(id -u):$(id -g)" cmd/uwgwrapper/assets
 
       - name: Test preload and wrapper (musl)
@@ -308,7 +309,7 @@ jobs:
             sh -c "apk add --no-cache gcc musl-dev linux-headers && \
                    mkdir -p cmd/uwgwrapper/assets && \
                    gcc -shared -fPIC -O2 -Wall -Wextra \
-                     -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c -ldl -pthread && \
+                     -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c -ldl -pthread -lpthread && \
                    go test ./internal/uwgtrace/... ./internal/fdproxy/... && \
                    (go test ./tests/preload/... || go test ./tests/preload/...)"
           sudo chown -R "$(id -u):$(id -g)" cmd/uwgwrapper/assets
@@ -321,11 +322,12 @@ jobs:
           docker run --rm \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            golang:1.25-bullseye \
-            bash -lc "apt-get update >/dev/null && \
+            golang:1.24-bullseye \
+            bash -lc 'export PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto && \
+                     apt-get update >/dev/null && \
                      apt-get install -y gcc libc6-dev >/dev/null && \
                      gcc -shared -fPIC -O2 -Wall -Wextra \
-                       -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c -ldl -pthread"
+                       -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c -ldl -pthread -lpthread'
           sudo chown -R "$(id -u):$(id -g)" cmd/uwgwrapper/assets
 
       - name: Build uwgwrapper preload asset (musl)
@@ -334,7 +336,7 @@ jobs:
           set -euo pipefail
           mkdir -p cmd/uwgwrapper/assets dist
           zig cc -target ${{ matrix.zig_target }} -shared -fPIC -O2 -Wall -Wextra \
-            -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c -ldl -pthread
+            -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c -ldl -pthread -lpthread
 
       - name: Build uwgwrapper
         env:

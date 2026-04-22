@@ -37,11 +37,12 @@ jobs:
           docker run --rm \
             -v "$PWD:/workspace" \
             -w /workspace \
-            golang:1.25-bullseye \
-            bash -lc 'apt-get update >/dev/null && apt-get install -y gcc libc6-dev >/dev/null && \
+            golang:1.24-bullseye \
+            bash -lc 'export PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto && \
+              apt-get update >/dev/null && apt-get install -y gcc libc6-dev >/dev/null && \
               mkdir -p cmd/uwgwrapper/assets && \
               gcc -shared -fPIC -O2 -Wall -Wextra \
-                -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c -ldl -pthread'
+                -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c -ldl -pthread -lpthread'
           sudo chown -R "$(id -u):$(id -g)" cmd/uwgwrapper/assets
 
       - name: Run tests
@@ -133,11 +134,12 @@ jobs:
           docker run --rm \
             -v "$PWD:/workspace" \
             -w /workspace \
-            golang:1.25-bullseye \
-            bash -lc 'apt-get update >/dev/null && apt-get install -y gcc libc6-dev >/dev/null && \
+            golang:1.24-bullseye \
+            bash -lc 'export PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto && \
+              apt-get update >/dev/null && apt-get install -y gcc libc6-dev >/dev/null && \
               mkdir -p cmd/uwgwrapper/assets && \
               gcc -shared -fPIC -O2 -Wall -Wextra \
-                -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c -ldl -pthread'
+                -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c -ldl -pthread -lpthread'
           sudo chown -R "$(id -u):$(id -g)" cmd/uwgwrapper/assets
 
       - name: Run lite tests

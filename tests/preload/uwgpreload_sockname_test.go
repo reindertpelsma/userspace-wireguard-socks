@@ -13,7 +13,7 @@ func TestCompatCProgram(t *testing.T) {
         t.Skip("linux-only preload test")
     }
     bin := filepath.Join(t.TempDir(), "uwgpreload_sockname_test")
-    cmd := exec.Command("cc", "-Wall", "-Wextra", "-O2", "-o", bin, "uwgpreload_sockname_test.c", "-ldl")
+	cmd := exec.Command("cc", "-Wall", "-Wextra", "-O2", "-o", bin, "uwgpreload_sockname_test.c", "-ldl", "-pthread", "-lpthread")
     out, err := cmd.CombinedOutput()
     if err != nil {
         t.Fatalf("compile failed: %v\n%s", err, out)
