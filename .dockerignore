@@ -1,0 +1,13 @@
+.git
+.github
+dist
+bin
+tmp
+*.db
+*.db-*
+*.log
+*.sock
+uwgsocks
+uwgwrapper
+turn/turn
+cmd/uwgwrapper/assets/uwgpreload.so

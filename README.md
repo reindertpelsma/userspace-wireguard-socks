@@ -74,6 +74,36 @@ bash compile.sh   # builds uwgsocks everywhere; builds uwgwrapper on Linux amd64
 go test ./...
 ```
 
+## Containers
+
+Release tags also publish Linux container images to GHCR:
+
+- `ghcr.io/reindertpelsma/uwgsocks:<tag>`
+- `ghcr.io/reindertpelsma/uwgsocks-turn:<tag>`
+
+Mount a config file:
+
+```bash
+docker run --rm \
+  -p 51820:51820/udp \
+  -p 1080:1080 \
+  -p 8118:8118 \
+  -v "$PWD/uwgsocks.yaml:/config/uwgsocks.yaml:ro" \
+  ghcr.io/reindertpelsma/uwgsocks:v0.1.0-beta.1
+```
+
+Or inject config through `UWG_CONFIG_INLINE` / `UWG_CONFIG_B64`.
+
+TURN example:
+
+```bash
+docker run --rm \
+  -p 3478:3478/tcp \
+  -p 3478:3478/udp \
+  -v "$PWD/turn.yaml:/config/turn.yaml:ro" \
+  ghcr.io/reindertpelsma/uwgsocks-turn:v0.1.0-beta.1
+```
+
 Requires Go. Building `uwgwrapper` additionally requires gcc on Linux. See [docs/compatibility.md](docs/compatibility.md) for supported platforms.
 
 For Windows host-TUN mode, ship the official signed `wintun.dll` next to

@@ -40,6 +40,21 @@ Docker:
 docker compose up --build
 ```
 
+Release tags also publish a Linux container image:
+
+- `ghcr.io/reindertpelsma/uwgsocks-turn:<tag>`
+
+```bash
+docker run --rm \
+  -p 3478:3478/tcp \
+  -p 3478:3478/udp \
+  -v "$PWD/turn-open-relay.example.yaml:/config/turn.yaml:ro" \
+  ghcr.io/reindertpelsma/uwgsocks-turn:v0.1.0-beta.1
+```
+
+The image accepts either a mounted config file or inline/base64 config through
+`TURN_CONFIG_INLINE` / `TURN_CONFIG_B64`.
+
 ## Relay Model
 
 The server supports three allocation styles:
