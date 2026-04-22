@@ -5,7 +5,7 @@
 # direct UDP, HTTPS/WebSocket, QUIC/WebTransport, and TURN-over-HTTPS.
 
 wireguard:
-  private_key: SERVER_PRIVATE_KEY_BASE64
+  private_key: mIGJUVTuC1A/mcfmRyqQf0HU2TWhMJ48GOd9/OBErFQ=
   listen_port: 51820
   addresses:
     - 100.64.81.1/32
@@ -42,7 +42,7 @@ transports:
     turn:
       server: turn.example.com:443
       username: wireguard
-      password: replace-me
+      password: demo-turn-password-change-me
       protocol: https
       tls:
         server_sni: turn.example.com

@@ -209,6 +209,11 @@ func (t *QUICWebSocketTransport) Listen(_ context.Context, port int) (Listener, 
 		conns = append(conns, pc)
 		servers = append(servers, h3)
 		go func(s *http3.Server, c net.PacketConn) {
+			defer func() {
+				if recover() != nil {
+					_ = c.Close()
+				}
+			}()
 			_ = s.Serve(c)
 		}(h3, pc)
 	}

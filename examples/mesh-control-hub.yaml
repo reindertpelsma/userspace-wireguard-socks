@@ -6,19 +6,19 @@
 # direct WireGuard child sessions.
 
 wireguard:
-  private_key: SERVER_PRIVATE_KEY_BASE64
+  private_key: mIGJUVTuC1A/mcfmRyqQf0HU2TWhMJ48GOd9/OBErFQ=
   listen_port: 51820
   addresses:
     - 100.64.80.1/32
   peers:
-    - public_key: CLIENT_A_PUBLIC_KEY_BASE64
-      preshared_key: CLIENT_A_PSK_BASE64
+    - public_key: QW//VpYXzIv1BICJnx9uhSRWpZu907yw/mJqTwfXZ3Q=
+      preshared_key: Qrs3RDGqMFVjWVu1CXX4C3gs8tGvIva3/LlljSBjNSc=
       allowed_ips:
         - 100.64.80.2/32
       mesh_enabled: true
       mesh_accept_acls: true
-    - public_key: CLIENT_B_PUBLIC_KEY_BASE64
-      preshared_key: CLIENT_B_PSK_BASE64
+    - public_key: 2xFvHNBakpLrpqUYYQ0mrhEUq1re0csy4e7dY5Lg2C0=
+      preshared_key: GmKU1AsoGV+0Q7AyeDpljGM8wuoHgobGQQlit8pC554=
       allowed_ips:
         - 100.64.80.3/32
       mesh_enabled: true

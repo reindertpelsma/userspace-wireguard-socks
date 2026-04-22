@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -658,7 +659,14 @@ func ListenTURNQUICServer(listenAddrs []string, port int, certMgr *CertManager, 
 		conns = append(conns, pc)
 		servers = append(servers, server)
 		go func(s *webtransport.Server, c net.PacketConn) {
-			_ = s.Serve(c)
+			defer func() {
+				if recover() != nil {
+					_ = packetConn.Close()
+				}
+			}()
+			if err := s.Serve(c); err != nil && !errors.Is(err, net.ErrClosed) {
+				_ = packetConn.Close()
+			}
 		}(server, pc)
 	}
 	return &TURNQUICServer{

@@ -1,17 +1,15 @@
 # Userspace WireGuard Gateway
 
-WireGuard without root, without kernel modules, and without changing the host routing table.
+WireGuard for applications and servers without root, kernel modules, or host
+routing changes.
 
-`uwgsocks` is a rootless userspace WireGuard runtime. It can run as a client,
-server, relay, or peer-sync hub, and applications can use it through SOCKS5,
-HTTP, forwards, a raw socket API, Linux wrapper interception, or host TUN.
+`uwgsocks` is a userspace WireGuard runtime for the common pain points:
+containers, CI jobs, locked-down hosts, laptops, and appliances where a system
+VPN is awkward but applications or services still need WireGuard networking.
 
-If you are comparing it with tools like `wireproxy`, Tailscale, or a standard
-WireGuard server wrapper, the overlap is real:
-- like `wireproxy`, it can be a rootless userspace WireGuard client
-- like a control-plane stack, it can also run as a server or relay
-- unlike a kernel-only setup, it can expose multiple userspace entry paths and
-  carry WireGuard over TCP/TLS/HTTP(S)/QUIC/DTLS/TURN when plain UDP is awkward
+It can run as a client, server, relay, or peer-sync hub, and traffic can enter
+through SOCKS5, HTTP, forwards, a raw socket API, Linux wrapper interception,
+or host TUN.
 
 ## Quick Start
 
@@ -64,15 +62,13 @@ Release tags also publish container images:
 - Supported and repeatedly tested:
   - `uwgsocks`: Linux, macOS, Windows, FreeBSD
   - `uwgwrapper`: Linux amd64/arm64 on glibc and musl
-- Working but still conservative to advertise:
-  - `uwgsocks` on OpenBSD
 - Experimental targets:
   - `uwgsocks` on `linux/riscv64`, `linux/mips`, `linux/mipsle`
 - Not yet claimed as supported:
   - `linux/386`, `windows/386`
 
-For Windows host-TUN mode, ship the official signed `wintun.dll` beside
-`uwgsocks.exe` or install it into `C:\Windows\System32`.
+See the compatibility and host-TUN docs for OpenBSD notes, Windows `wintun.dll`
+requirements, and experimental architectures.
 
 ## Documentation
 

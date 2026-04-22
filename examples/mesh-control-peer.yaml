@@ -6,12 +6,12 @@
 # ACL state.
 
 wireguard:
-  private_key: CLIENT_PRIVATE_KEY_BASE64
+  private_key: KCy8PWd3zfbTvjC7ApYKKCltgHxZd9wBmLtkGQV+JXM=
   addresses:
     - 100.64.80.2/32
   peers:
-    - public_key: HUB_PUBLIC_KEY_BASE64
-      preshared_key: CLIENT_A_PSK_BASE64
+    - public_key: c3vrZMkOC89b9UdW3kajFr1y/tzsKDLn9udcchDBER0=
+      preshared_key: Qrs3RDGqMFVjWVu1CXX4C3gs8tGvIva3/LlljSBjNSc=
       endpoint: edge.example.com:51820
       allowed_ips:
         - 100.64.80.1/32

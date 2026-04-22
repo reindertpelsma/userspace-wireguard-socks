@@ -2,6 +2,8 @@ module turn
 
 go 1.24
 
+replace github.com/wlynxg/anet => ../third_party/anet
+
 require (
 	github.com/pion/turn/v4 v4.1.3
 	gopkg.in/yaml.v3 v3.0.1

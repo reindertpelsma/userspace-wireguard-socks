@@ -3,7 +3,13 @@ set -eu
 
 API_BASE="${API_BASE:-https://api.github.com}"
 VERSION="${VERSION:-latest}"
-PREFIX="${PREFIX:-/usr/local/bin}"
+if [ -z "${PREFIX:-}" ]; then
+  if command -v id >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
+    PREFIX=/usr/local/bin
+  else
+    PREFIX="${HOME}/.local/bin"
+  fi
+fi
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -16,6 +22,15 @@ need uname
 need curl
 need mktemp
 need python3
+
+warn_path() {
+  case ":${PATH:-}:" in
+    *:"$PREFIX":*) ;;
+    *)
+      printf 'installed binaries in %s; add that directory to PATH if needed\n' "$PREFIX" >&2
+      ;;
+  esac
+}
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"
@@ -150,8 +165,9 @@ PY
   mkdir -p "$PREFIX"
   dst="$PREFIX/$(binary_name "$product")"
   curl -fsSL "$download_url" -o "$tmp_bin"
-  chmod +x "$tmp_bin"
-  mv "$tmp_bin" "$dst"
+  cp "$tmp_bin" "$dst"
+  chmod +x "$dst"
+  rm -f "$tmp_bin"
   printf 'installed %s to %s\n' "$asset" "$dst"
   rm -f "$meta"
   trap - EXIT INT TERM
@@ -164,3 +180,5 @@ fi
 for product in "$@"; do
   download_asset "$product"
 done
+
+warn_path

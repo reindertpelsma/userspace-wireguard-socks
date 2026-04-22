@@ -7,6 +7,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -269,7 +270,23 @@ func (t *URLTransport) listenCombinedQUIC(_ context.Context, port int) (Listener
 		conns = append(conns, pc)
 		servers = append(servers, server)
 		go func(s *webtransport.Server, c net.PacketConn) {
-			_ = s.Serve(c)
+			defer func() {
+				if r := recover(); r != nil {
+					err := fmt.Errorf("url transport %s: webtransport server panic: %v", t.name, r)
+					select {
+					case acceptCh <- urlCombinedQUICAcceptResult{err: err}:
+					case <-closeCh:
+					default:
+					}
+				}
+			}()
+			if err := s.Serve(c); err != nil && !errors.Is(err, net.ErrClosed) {
+				select {
+				case acceptCh <- urlCombinedQUICAcceptResult{err: err}:
+				case <-closeCh:
+				default:
+				}
+			}
 		}(server, pc)
 	}
 

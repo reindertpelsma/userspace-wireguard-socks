@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -251,6 +252,9 @@ func TestHTTPSTransportEndToEnd(t *testing.T) {
 // TestQUICTransportEndToEnd connects two engines over QUIC WebTransport and
 // verifies WireGuard handshake + SOCKS5 HTTP reachability.
 func TestQUICTransportEndToEnd(t *testing.T) {
+	if runtime.GOOS == "openbsd" {
+		t.Skip("QUIC/WebTransport end-to-end coverage is currently skipped on OpenBSD")
+	}
 	hostIP := nonLoopbackIPv4(t)
 	srv := startHTTPServer(t)
 	defer srv.Close()

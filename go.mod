@@ -5,6 +5,8 @@ module github.com/reindertpelsma/userspace-wireguard-socks
 
 go 1.25.0
 
+replace github.com/wlynxg/anet => ./third_party/anet
+
 require (
 	github.com/miekg/dns v1.1.72
 	github.com/pion/dtls/v3 v3.0.7

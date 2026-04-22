@@ -121,6 +121,7 @@ func (e *Engine) startHostTUN(localAddrs []netip.Addr) error {
 }
 
 func (e *Engine) pumpTUNPackets(name string, src, dst tun.Device, mtu int) {
+	const tunPacketOffset = 4
 	batch := src.BatchSize()
 	if batch <= 0 {
 		batch = 1
@@ -132,10 +133,10 @@ func (e *Engine) pumpTUNPackets(name string, src, dst tun.Device, mtu int) {
 	bufs := make([][]byte, batch)
 	sizes := make([]int, batch)
 	for i := range bufs {
-		bufs[i] = make([]byte, size)
+		bufs[i] = make([]byte, size+tunPacketOffset)
 	}
 	for {
-		n, err := src.Read(bufs, sizes, 0)
+		n, err := src.Read(bufs, sizes, tunPacketOffset)
 		if err != nil {
 			select {
 			case <-e.closed:
@@ -147,11 +148,12 @@ func (e *Engine) pumpTUNPackets(name string, src, dst tun.Device, mtu int) {
 			return
 		}
 		for i := 0; i < n; i++ {
-			if sizes[i] <= 0 || sizes[i] > len(bufs[i]) {
+			if sizes[i] <= 0 || sizes[i] > len(bufs[i])-tunPacketOffset {
 				continue
 			}
-			packet := append([]byte(nil), bufs[i][:sizes[i]]...)
-			if _, err := dst.Write([][]byte{packet}, 0); err != nil {
+			packet := make([]byte, tunPacketOffset+sizes[i])
+			copy(packet[tunPacketOffset:], bufs[i][tunPacketOffset:tunPacketOffset+sizes[i]])
+			if _, err := dst.Write([][]byte{packet}, tunPacketOffset); err != nil {
 				select {
 				case <-e.closed:
 				default:

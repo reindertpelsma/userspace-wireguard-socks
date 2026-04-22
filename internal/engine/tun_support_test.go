@@ -230,17 +230,18 @@ func listenTCP4ForTUNTest(t *testing.T) net.Listener {
 
 func bridgeAppNetstackToFakeTUN(t *testing.T, appDev tun.Device, fake *fakeTUNDevice, mtu int) func() {
 	t.Helper()
+	const tunPacketOffset = 4
 	done := make(chan struct{})
 	go func() {
-		buf := [][]byte{make([]byte, mtu+128)}
+		buf := [][]byte{make([]byte, mtu+128+tunPacketOffset)}
 		sizes := make([]int, 1)
 		for {
-			n, err := appDev.Read(buf, sizes, 0)
+			n, err := appDev.Read(buf, sizes, tunPacketOffset)
 			if err != nil {
 				return
 			}
 			for i := 0; i < n; i++ {
-				packet := append([]byte(nil), buf[i][:sizes[i]]...)
+				packet := append([]byte(nil), buf[i][tunPacketOffset:tunPacketOffset+sizes[i]]...)
 				select {
 				case fake.incoming <- packet:
 				case <-done:
@@ -253,7 +254,9 @@ func bridgeAppNetstackToFakeTUN(t *testing.T, appDev tun.Device, fake *fakeTUNDe
 		for {
 			select {
 			case packet := <-fake.outgoing:
-				_, _ = appDev.Write([][]byte{packet}, 0)
+				buf := make([]byte, tunPacketOffset+len(packet))
+				copy(buf[tunPacketOffset:], packet)
+				_, _ = appDev.Write([][]byte{buf}, tunPacketOffset)
 			case <-done:
 				return
 			}

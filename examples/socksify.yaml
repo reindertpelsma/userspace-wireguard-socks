@@ -3,7 +3,7 @@
 
 # Local proxy endpoints for socksify-like experiments.
 wireguard:
-  config_file: ./client.conf
+  config_file: ./examples/client.conf
 
 api:
   listen: unix:/run/uwgsocks/api.sock

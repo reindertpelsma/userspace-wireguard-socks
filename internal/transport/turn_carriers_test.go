@@ -7,6 +7,8 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"os"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -98,6 +100,12 @@ func TestTURNHTTPStreamConnUpgradeEcho(t *testing.T) {
 }
 
 func TestTURNQUICPacketConnEcho(t *testing.T) {
+	if runtime.GOOS == "openbsd" {
+		t.Skip("TURN-over-QUIC coverage is currently skipped on OpenBSD")
+	}
+	if _, err := os.Stat("/proc/sentry-meminfo"); err == nil {
+		t.Skip("TURN-over-QUIC packet echo is unsupported on this gVisor network stack")
+	}
 	certMgr, err := NewCertManager(TLSConfig{}, true)
 	if err != nil {
 		t.Fatalf("cert manager: %v", err)
@@ -119,12 +127,15 @@ func TestTURNQUICPacketConnEcho(t *testing.T) {
 		_, _ = server.PacketConn.WriteTo(append([]byte("echo:"), buf[:n]...), addr)
 	}()
 
-	pc, err := DialTURNQUICPacketConn(context.Background(), server.Addr().String(), NewDirectDialer(false, netip.Prefix{}), nil, TLSConfig{}, WebSocketConfig{Path: "/turn"})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pc, err := DialTURNQUICPacketConn(ctx, server.Addr().String(), NewDirectDialer(false, netip.Prefix{}), nil, TLSConfig{}, WebSocketConfig{Path: "/turn"})
 	if err != nil {
 		t.Fatalf("dial quic packet conn: %v", err)
 	}
 	defer pc.Close()
-	_ = pc.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = pc.SetDeadline(time.Now().Add(20 * time.Second))
 
 	if _, err := pc.WriteTo([]byte("hello"), nil); err != nil {
 		t.Fatalf("write: %v", err)

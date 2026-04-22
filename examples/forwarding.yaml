@@ -5,7 +5,7 @@
 # Replace the WireGuard keys and target addresses before using it for anything
 # outside a local lab.
 wireguard:
-  config_file: ./client.conf
+  config_file: ./examples/client.conf
 
 proxy:
   socks5: 127.0.0.1:1080

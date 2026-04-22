@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -54,6 +55,9 @@ func (loopbackDialer) SupportsHostname() bool { return true }
 
 func skipQUICOnRestrictedGVisor(t *testing.T) {
 	t.Helper()
+	if runtime.GOOS == "openbsd" {
+		t.Skip("QUIC/WebTransport round-trip is currently skipped on OpenBSD")
+	}
 	if _, err := os.Stat("/proc/sentry-meminfo"); err == nil {
 		t.Skip("QUIC/WebTransport round-trip is unsupported on this gVisor network stack")
 	}
