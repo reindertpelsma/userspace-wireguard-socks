@@ -1,13 +1,12 @@
 // Copyright (c) 2026 Reindert Pelsma
 // SPDX-License-Identifier: ISC
 
-//go:build !linux && !darwin && !windows
+//go:build !linux && !darwin && !windows && !freebsd
 
 package tun
 
 import (
 	"errors"
-	"net/netip"
 )
 
 func Create(opts Options) (Manager, error) {

@@ -45,6 +45,7 @@ platforms (no `LD_PRELOAD` / ptrace support outside Linux).
 | Platform | Notes |
 |---|---|
 | macOS arm64 | CI on every push (GitHub Actions `macos-latest`); soak and race-detector tests run on Mac Mini M1 |
+| FreeBSD amd64 | Manually tested on FreeBSD 15.0 droplet; core `go test ./...` and real host-TUN smoke test pass |
 | Windows amd64 | CI on every push (GitHub Actions `windows-latest`) |
 | Windows arm64 | Manually tested (arm64 VM on Raspberry Pi) |
 | Linux arm64 Termux (Android) | Manually tested |
@@ -100,6 +101,12 @@ amd64 and arm64.
 - Host-TUN DNS server changes are not currently automated for `utun`.
 - UDP buffer size warnings from quic-go are cosmetic on macOS; QUIC transport
   functions correctly.
+
+**FreeBSD:**
+- Host TUN support uses the native `tun` interface and can be configured by
+  `uwgsocks` itself using `ifconfig` and `route`.
+- Host-TUN DNS server changes are not currently automated; use
+  `tun.dns_resolv_conf` when you want `uwgsocks` to manage a resolver file.
 
 **gVisor:**
 - ptrace-based `uwgwrapper` modes are restricted by the sandbox. Preload-only
