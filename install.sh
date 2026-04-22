@@ -1,7 +1,6 @@
 #!/usr/bin/env sh
 set -eu
 
-API_BASE="${API_BASE:-https://api.github.com}"
 VERSION="${VERSION:-latest}"
 if [ -z "${PREFIX:-}" ]; then
   if command -v id >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
@@ -21,8 +20,6 @@ need() {
 need uname
 need curl
 need mktemp
-need python3
-
 warn_path() {
   case ":${PATH:-}:" in
     *:"$PREFIX":*) ;;
@@ -126,12 +123,13 @@ asset_name() {
   esac
 }
 
-release_url() {
+download_url() {
   repo="$1"
+  asset="$2"
   if [ "$VERSION" = "latest" ]; then
-    printf '%s/repos/%s/releases/latest\n' "$API_BASE" "$repo"
+    printf 'https://github.com/%s/releases/latest/download/%s\n' "$repo" "$asset"
   else
-    printf '%s/repos/%s/releases/tags/%s\n' "$API_BASE" "$repo" "$VERSION"
+    printf 'https://github.com/%s/releases/download/%s/%s\n' "$repo" "$VERSION" "$asset"
   fi
 }
 
@@ -139,37 +137,16 @@ download_asset() {
   product="$1"
   repo="$(repo_for_product "$product")"
   asset="$(asset_name "$product")"
-  meta="$(mktemp)"
   tmp_bin="$(mktemp)"
-  trap 'rm -f "$meta" "$tmp_bin"' EXIT INT TERM
-
-  curl -fsSL -H 'Accept: application/vnd.github+json' "$(release_url "$repo")" >"$meta"
-  download_url="$(python3 - "$meta" "$asset" <<'PY'
-import json, sys
-with open(sys.argv[1], 'r', encoding='utf-8') as fh:
-    data = json.load(fh)
-want = sys.argv[2]
-for asset in data.get("assets", []):
-    if asset.get("name") == want:
-        print(asset.get("browser_download_url", ""))
-        break
-else:
-    raise SystemExit(1)
-PY
-)"
-  [ -n "$download_url" ] || {
-    echo "release asset not found: $asset" >&2
-    exit 1
-  }
+  trap 'rm -f "$tmp_bin"' EXIT INT TERM
 
   mkdir -p "$PREFIX"
   dst="$PREFIX/$(binary_name "$product")"
-  curl -fsSL "$download_url" -o "$tmp_bin"
+  curl -fsSL -A 'uwgsocks-installer' "$(download_url "$repo" "$asset")" -o "$tmp_bin"
   cp "$tmp_bin" "$dst"
   chmod +x "$dst"
   rm -f "$tmp_bin"
   printf 'installed %s to %s\n' "$asset" "$dst"
-  rm -f "$meta"
   trap - EXIT INT TERM
 }
 
