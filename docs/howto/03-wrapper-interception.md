@@ -52,7 +52,7 @@ Use:
 ## Which One Should You Prefer?
 
 - Use native SOCKS5 or HTTP if the app already supports it.
-- Use `uwgwrapper` when the app is hard-coded, legacy, or static.
+- Use `uwgwrapper` when the app cannot speak SOCKS5 or HTTP directly, whether it is hard-coded, static, or just not proxy-aware.
 
 The wrapper is a compatibility layer, not a sandbox. It forces network syscalls
 through `uwgsocks`; it does not change the process' Unix privileges.

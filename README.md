@@ -17,7 +17,7 @@ From the end-user perspective, this is what it buys you:
 - route only the apps you choose without taking over the host default route
 - turn a laptop or dev box into a rootless secure egress gateway
 - expose local services through the mesh without opening host ports
-- route legacy binaries through WireGuard with `uwgwrapper`
+- route Linux applications through WireGuard when they cannot use SOCKS5 or HTTP directly
 - hide WireGuard inside HTTP, HTTPS, QUIC, or TURN carriers on hostile networks
 - coordinate direct peer paths with mesh control and relay fallback
 
@@ -73,7 +73,7 @@ host route changes.
 | Binary | Purpose |
 | --- | --- |
 | `uwgsocks` | Main userspace WireGuard runtime, router, relay, proxy, API, and mesh engine |
-| `uwgwrapper` | Linux-only process interception path for apps that cannot use SOCKS5 or HTTP |
+| `uwgwrapper` | Linux-only process interception path for any app that cannot use SOCKS5 or HTTP directly |
 | `turn` | Standalone TURN relay with UDP, TCP, TLS, DTLS, HTTP, HTTPS, and QUIC carriers |
 | `uwgsocks-lite` | Reduced feature build for minimal or lower-attack-surface deployments |
 
