@@ -41,3 +41,19 @@ func TestNewTURNTransportIncludesWireGuardPublicKeyWhenConfigured(t *testing.T) 
 		t.Fatalf("TURN transport public key mismatch")
 	}
 }
+
+func TestNewTURNTransportPropagatesNoCreatePermission(t *testing.T) {
+	cfg := config.Default()
+	cfg.TURN.Server = "127.0.0.1:3478"
+	cfg.TURN.Username = "user"
+	cfg.TURN.Password = "pass"
+	cfg.TURN.NoCreatePermission = true
+
+	turnTransport, err := newTURNTransport(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !turnTransport.NoCreatePermissionForTest() {
+		t.Fatal("expected no_create_permission to propagate to TURN transport")
+	}
+}

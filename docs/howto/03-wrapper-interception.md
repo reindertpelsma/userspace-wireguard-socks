@@ -39,19 +39,17 @@ That uses the Unix HTTP listener and upgrades to `/uwg/socket`.
 
 ## HTTP URL Instead Of Unix Socket
 
-If `uwgsocks` exposes an HTTP proxy listener instead:
+If `uwgsocks` exposes an HTTP API listener instead:
 
 ```bash
-./uwgsocks --config ./examples/client.yaml
-./uwgwrapper --api http://127.0.0.1:8082 -- curl https://ifconfig.me
+./uwgsocks --config ./examples/server.yaml
+./uwgwrapper --api http://127.0.0.1:9090 --token demo-api-token-change-me -- curl https://ifconfig.me
 ```
 
 Use:
 
 - `unix:/path.sock` when the daemon is local and you want filesystem-scoped access
-- `http://127.0.0.1:8082` when you want the wrapper to talk to an HTTP proxy listener
-
-The Unix-socket path was the most reliable option in local validation.
+- `http://127.0.0.1:9090` when you want the wrapper to upgrade through the authenticated API listener
 
 ## Which One Should You Prefer?
 

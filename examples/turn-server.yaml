@@ -14,6 +14,8 @@ turn:
   realm: local-turn.example
   username: wireguard
   password: super-secret-turn-password
+  permissions:
+    - 127.0.0.1
 
   #Set to true to embed the wireguard public key in the TURN username as encrypted, only works if the TURN server understands this
   #This allows the TURN server to filter inbound UDP packets using the server's public key

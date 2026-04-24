@@ -442,6 +442,11 @@ func (t *TURNTransport) WGPublicKeyForTest() [32]byte {
 	return t.wgPubKey
 }
 
+// NoCreatePermissionForTest exposes the TURN permission mode for package-external tests.
+func (t *TURNTransport) NoCreatePermissionForTest() bool {
+	return t.cfg.NoCreatePermission
+}
+
 func (t *TURNTransport) TransportInfo() TransportInfo {
 	t.mu.Lock()
 	defer t.mu.Unlock()

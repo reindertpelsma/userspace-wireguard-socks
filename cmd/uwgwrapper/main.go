@@ -110,20 +110,7 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 	var fdproxyCmd *exec.Cmd
 	if spawnFDProxy {
 		_ = os.Remove(listenPath)
-		fdproxyCmd = exec.Command(os.Args[0],
-			"--mode=fdproxy",
-			"--listen", listenPath,
-			"--api", api,
-			"--socket-path", socketPath,
-			"--allow-bind", boolString(allowBind),
-			"--allow-lowbind", boolString(allowLowBind),
-		)
-		if debug {
-			fdproxyCmd.Args = append(fdproxyCmd.Args, "-v")
-		}
-		if apiToken != "" {
-			fdproxyCmd.Args = append(fdproxyCmd.Args, "--token", apiToken)
-		}
+		fdproxyCmd = exec.Command(os.Args[0], fdproxySpawnArgs(listenPath, api, socketPath, allowBind, allowLowBind, apiToken, debug)...)
 		fdproxyCmd.Stdout = os.Stderr
 		fdproxyCmd.Stderr = os.Stderr
 		fdproxyCmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
@@ -279,6 +266,24 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 	default:
 		log.Fatalf("unsupported transport %q, supported auto, preload, preload-and-ptrace, ptrace-seccomp, ptrace-only, ptrace, preload-with-optional-ptrace", transport)
 	}
+}
+
+func fdproxySpawnArgs(listenPath, api, socketPath string, allowBind, allowLowBind bool, apiToken string, debug bool) []string {
+	args := []string{
+		"--mode=fdproxy",
+		"--listen", listenPath,
+		"--api", api,
+		"--socket-path", socketPath,
+		fmt.Sprintf("--allow-bind=%t", allowBind),
+		fmt.Sprintf("--allow-lowbind=%t", allowLowBind),
+	}
+	if debug {
+		args = append(args, "-v")
+	}
+	if apiToken != "" {
+		args = append(args, "--token", apiToken)
+	}
+	return args
 }
 
 func runExecHelper(args []string) error {

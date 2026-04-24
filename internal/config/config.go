@@ -108,6 +108,8 @@ type TURN struct {
 	// through the TURN relay.
 	// It can be a list of specific CIDRs.
 	Permissions []string `yaml:"permissions"`
+	// NoCreatePermission skips TURN CreatePermission and relies on relay policy.
+	NoCreatePermission bool `yaml:"no_create_permission"`
 	// IncludeWGPublicKey appends an encrypted copy of this instance's
 	// WireGuard public key to the TURN username. The companion open TURN relay
 	// can use that metadata to bind allocations to a WireGuard identity.

@@ -38,10 +38,16 @@ turn:
   realm: local-turn.example
   username: wireguard
   password: super-secret-turn-password
+  permissions:
+    - 127.0.0.1
 ```
 
 That means the WireGuard server itself does not need a public UDP socket. It
 binds through the TURN allocation.
+
+For this localhost demo, the explicit permission is intentional: TURN
+allocations only accept peer traffic they are permitted to talk to. On one box,
+the peer source IP is `127.0.0.1`, so the demo pins that permission directly.
 
 ## Start A Client
 
@@ -65,13 +71,13 @@ In a real deployment:
 - keep the private WireGuard server behind NAT
 - publish one mapped relay port per server identity
 - optionally enable TURN-side WireGuard filtering
+- when the relay policy is intentionally open, use `no_create_permission: true`
+  on TURN transports instead of prelisting every peer source IP
 
 This is the cleanest way to expose a server that cannot port-forward its own
 UDP listener.
 
 ## Validation Note
 
-The local relay config and the TURN-backed `uwgsocks` server both validated in
-this sandbox. The full loopback client data path was not a trustworthy success
-signal here, so verify the end-to-end relay flow on a real host if TURN ingress
-is the feature you are betting on.
+The local loopback TURN demo now passes end-to-end in this sandbox after adding
+the explicit localhost TURN permission.

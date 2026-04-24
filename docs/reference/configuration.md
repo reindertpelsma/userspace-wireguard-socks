@@ -102,6 +102,10 @@ transport choice, use `transports:` instead.
 automatically adds configured peer endpoints as permissions so static
 WireGuard peers can receive traffic through the relay.
 
+`no_create_permission` skips TURN `CREATE_PERMISSION` and relies on the relay's
+own policy. Use this only with relays that are intentionally open or already
+perform equivalent filtering.
+
 `include_wg_public_key` controls the `wgbind.TURNBind.IncludeWGPublicKey`
 behavior. When true, `uwgsocks` encrypts this instance's WireGuard public key
 with the TURN password and appends it to the TURN username as

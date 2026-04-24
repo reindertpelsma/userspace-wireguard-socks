@@ -194,6 +194,7 @@ turn:                          # Legacy shorthand for one TURN-backed transport.
   password: ""                 # TURN password/secret.
   realm: ""                    # TURN realm for long-term credentials.
   permissions: []              # Optional fixed TURN peer permissions.
+  no_create_permission: false  # Skip CREATE_PERMISSION and rely on relay policy.
   include_wg_public_key: false # Mix the WireGuard public key into TURN auth when enabled.
   tls:                         # TLS settings for tls/https/quic TURN modes.
     cert_file: ""              # Client certificate for mutual TLS, or server cert in server mode.
