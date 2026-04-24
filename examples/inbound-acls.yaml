@@ -1,0 +1,43 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+# Server with strict inbound policy and optional relay policy. The first peer
+# may reach one HTTPS service on the server itself; everything else is denied.
+wireguard:
+  private_key: mIGJUVTuC1A/mcfmRyqQf0HU2TWhMJ48GOd9/OBErFQ=
+  listen_port: 51820
+  addresses:
+    - 100.64.82.1/32
+  peers:
+    - public_key: oDbi1DmWsFJvn1OSpWkZKjHxDMTzwyp5+n9Tzy1iOEc=
+      allowed_ips:
+        - 100.64.82.2/32
+    - public_key: 3uUiJtxnxYEleL4rr7+oMWftWPXOkwX2eqcmUQ2hqgw=
+      allowed_ips:
+        - 100.64.82.3/32
+
+inbound:
+  transparent: true
+
+relay:
+  enabled: true
+  conntrack: true
+
+acl:
+  inbound_default: deny
+  inbound:
+    - action: allow
+      source: 100.64.82.2/32
+      destination: 100.64.82.1/32
+      protocol: tcp
+      destination_port: 443
+  relay_default: deny
+  relay:
+    - action: allow
+      source: 100.64.82.2/32
+      destination: 100.64.82.3/32
+      protocol: tcp
+      destination_port: 443
+
+api:
+  listen: unix://uwgsocks.sock

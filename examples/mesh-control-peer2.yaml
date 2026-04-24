@@ -1,0 +1,35 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+# Second child peer for the mesh how-to so the controller can advertise a real
+# peer-to-peer network instead of only a parent-child pair.
+wireguard:
+  private_key: cIYDYnnDMGVmIggrKW+mkAJDpB8YEmdC3gBaFELCtUI=
+  addresses:
+    - 100.64.80.3/32
+  peers:
+    - public_key: r4fi5ZkPzyk1kNywYwd8F1oEsdyo1JE1Sogzcgxuhwg=
+      preshared_key: 8PxUasdty53JC9r/oCE6xWDKmOP6zbaTrFXiVQpvem8=
+      endpoint: 127.0.0.1:51820
+      allowed_ips:
+        - 100.64.80.1/32
+        - 100.64.80.2/32
+      persistent_keepalive: 25
+      control_url: http://100.64.80.1:8787
+      mesh_enabled: true
+      mesh_disable_acls: false
+
+proxy:
+  socks5: 127.0.0.1:1081
+  http: 127.0.0.1:8081
+
+reverse_forwards:
+  - proto: tcp
+    listen: 100.64.80.3:8088
+    target: 127.0.0.1:8088
+
+acl:
+  outbound_default: allow
+
+api:
+  listen: unix://uwgsocks.sock

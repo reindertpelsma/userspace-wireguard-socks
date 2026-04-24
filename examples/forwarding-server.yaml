@@ -1,0 +1,52 @@
+# Copyright (c) 2026 Reindert Pelsma
+# SPDX-License-Identifier: ISC
+
+# Server-side companion config for examples/forwarding.yaml. This enables
+# inbound host forwarding so tunnel traffic to the server's own WireGuard
+# address can be handed to a local host service for the forward demo.
+wireguard:
+  config_file: ./examples/server.conf
+  roam_fallback_seconds: 120
+
+inbound:
+  transparent: true
+  consistent_port: loose
+  disable_low_ports: true
+  host_dial_bind_address: ""
+  max_connections: 4096
+  connection_table_grace_seconds: 30
+  tcp_receive_window_bytes: 1048576
+  tcp_max_buffered_bytes: 268435456
+  tcp_idle_timeout_seconds: 900
+  udp_idle_timeout_seconds: 30
+
+host_forward:
+  proxy:
+    enabled: true
+    redirect_ip: 127.0.0.1
+  inbound:
+    enabled: true
+    redirect_ip: 127.0.0.1
+
+routing:
+  enforce_address_subnets: true
+
+filtering:
+  drop_ipv6_link_local_multicast: true
+  drop_ipv4_invalid: true
+
+relay:
+  enabled: false
+
+dns_server:
+  listen: 100.64.90.1:53
+  max_inflight: 1024
+
+api:
+  listen: 127.0.0.1:9090
+  token: demo-api-token-change-me
+
+acl:
+  inbound_default: allow
+  outbound_default: allow
+  relay_default: deny

@@ -13,9 +13,12 @@ full behavioral contract.
 
 - [Configuration behavior](../reference/configuration.md)
 - [Full config map](../reference/config-reference.md)
+- [ACL model](../reference/acls.md)
+- [Mesh control](../reference/mesh-control.md)
 - [Proxy routing order](../reference/proxy-routing.md)
 - [Socket protocol](../reference/socket-protocol.md)
 - [Transport modes](../reference/transport-modes.md)
+- [TURN integration and relay modes](../reference/turn.md)
 - [Compatibility matrix](../reference/compatibility.md)
 - [Testing notes](../reference/testing.md)
 - [Standalone TURN daemon](../../turn/README.md)
@@ -24,15 +27,9 @@ full behavioral contract.
 
 - Tuning routing decisions: [Proxy routing order](../reference/proxy-routing.md)
 - Editing YAML safely: [Full config map](../reference/config-reference.md)
+- Understanding policy and mesh-distributed ACLs: [ACL model](../reference/acls.md)
+- Understanding controller auth and peer distribution: [Mesh control](../reference/mesh-control.md)
 - Building custom clients or sidecars: [Socket protocol](../reference/socket-protocol.md)
 - Understanding transport tradeoffs: [Transport modes](../reference/transport-modes.md)
+- Running hidden servers behind a TURN edge: [TURN integration and relay modes](../reference/turn.md)
 - Platform caveats: [Compatibility matrix](../reference/compatibility.md)
-
-## Final Advice
-
-If the goal is “make one app or one service reachable fast,” stay in the how-to
-flow.
-
-If the goal is “change routing policy, mesh behavior, transport negotiation, or
-runtime API semantics,” switch to the reference docs before editing config or
-code.

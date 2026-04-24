@@ -1,132 +1,86 @@
 # Compatibility
 
-## Feature support
+This page answers the practical question: what can I expect to work on each
+platform, and how hard has it actually been exercised?
 
-- Rootless WireGuard client and server mode.
-- IPv4, IPv6, TCP, UDP, DNS, and ping-style ICMP/ICMPv6.
-- HTTP proxy, SOCKS5 CONNECT, SOCKS5 UDP ASSOCIATE, and SOCKS5 BIND.
-- Local forwards and tunnel-side reverse forwards with optional PROXY protocol.
-- Transparent inbound termination from WireGuard peers to host sockets.
-- Peer-to-peer relay forwarding with ACLs and stateful conntrack.
-- Runtime API for status, ping, peer updates, ACL updates, forwards, and
-  WireGuard config replacement.
-- Raw socket API for connected TCP/UDP/ICMP, TCP listeners, UDP listener-style
-  sockets, DNS frames, and local fd bridging.
-- `uwgwrapper` transport modes: preload only, preload + seccomp + ptrace,
-  ptrace + simple seccomp, and ptrace without seccomp. `NO_NEW_PRIVILEGES` is
-  enabled by default for launched processes.
-- Per-peer and global traffic shaping for upload, download, and buffering
-  latency. Runtime peer API updates can change shapers without restarting.
-- Optional TURN bind mode, including `turn.include_wg_public_key` for relays
-  that want the WireGuard public key embedded in the TURN username.
+Status terms used below:
 
-## Platform support
+- `CI`: exercised automatically in GitHub Actions
+- `Manual`: tested on real hosts, but not on every push
+- `Cross-build`: release/build coverage only
+- `No`: not supported
 
-`uwgsocks` is the same binary for glibc and musl libc. `uwgwrapper` ships
-separate binaries per libc because it embeds an `LD_PRELOAD` shared library.
+## Feature Matrix
 
-### Primary platforms
+| Feature | Linux | macOS | Windows | FreeBSD | OpenBSD |
+| --- | --- | --- | --- | --- | --- |
+| Core `uwgsocks` client/server, proxies, forwards, ACLs, relay, mesh | CI | CI | CI | Manual | Manual, treat as experimental |
+| Host TUN mode | CI | CI | CI | Manual | Manual, treat as experimental |
+| Pluggable transports (`udp`, `https`, `quic`, `turn`, `tls`, `http`) | CI | CI | CI | Manual | Manual, treat QUIC as lightly tested |
+| Standalone `turn` daemon | CI | CI | CI | Cross-build | Cross-build |
+| `uwgsocks-lite` | CI | CI | CI | Cross-build | Cross-build |
+| `uwgwrapper` / preload / ptrace interception | CI on glibc and musl | No | No | No | No |
 
-Full test suite passing, including `uwgwrapper` preload and ptrace paths.
+## What Most Users Should Assume
 
-| Platform | Notes |
-|---|---|
-| Linux amd64 glibc | CI on every push (GitHub Actions `ubuntu-latest`) |
-| Linux arm64 glibc | CI on every push (GitHub Actions `ubuntu-24.04-arm`) |
-| Linux amd64 musl | CI on every release (Docker Alpine in GitHub Actions) |
-| Linux arm64 musl | Manually tested on Raspberry Pi 4 running Alpine Linux |
-| Linux amd64 gVisor | Tested; gVisor has minor sandboxing restrictions on ptrace paths |
+- Linux is the reference platform for the full feature set.
+- macOS and Windows are strong for the main `uwgsocks` data plane, proxies,
+  forwards, mesh, transports, and host-TUN mode.
+- FreeBSD and OpenBSD are real targets, not theoretical ports, but they still
+  deserve a more conservative production posture than Linux or macOS.
+- `uwgwrapper` is intentionally Linux-only.
 
-### Secondary platforms
+## Platform Notes
 
-`uwgsocks` passes its full test suite. `uwgwrapper` is not built on these
-platforms (no `LD_PRELOAD` / ptrace support outside Linux).
+### Linux
 
-| Platform | Notes |
-|---|---|
-| macOS arm64 | CI on every push (GitHub Actions `macos-latest`); soak and race-detector tests run on Mac Mini M1 |
-| FreeBSD amd64 | Manually tested on FreeBSD 15.0 droplet; core `go test ./...` and real host-TUN smoke test pass |
-| OpenBSD amd64 | Manually tested on OpenBSD 7.8 droplet; core `go test ./...` and real host-TUN smoke test pass; treat as experimental for now |
-| Windows amd64 | CI on every push (GitHub Actions `windows-latest`) |
-| Windows arm64 | Manually tested (arm64 VM on Raspberry Pi) |
-| Linux arm64 Termux (Android) | Manually tested |
+- Best-tested platform for `uwgsocks`.
+- Best-tested platform for `uwgwrapper`.
+- Release builds ship glibc and musl wrapper variants for `amd64` and `arm64`.
+- Host-TUN, mesh, ACLs, reverse forwards, and transport modes are all part of
+  the normal exercised surface.
 
-### Standalone TURN server artifacts
+### macOS
 
-The standalone `turn/` server is also published as a release artifact.
-
-| Platform | Status |
-|---|---|
-| Linux amd64 | CI-tested in `turn/`; release binary shipped |
-| Linux arm64 | CI-tested in `turn/`; release binary shipped |
-| Linux riscv64 | Cross-compiled release binary shipped |
-| Linux mips64 | Cross-compiled release binary shipped |
-| FreeBSD amd64 | Cross-compiled release binary shipped |
-| FreeBSD arm64 | Cross-compiled release binary shipped |
-| macOS amd64 | Cross-compiled release binary shipped |
-| macOS arm64 | CI-tested in `turn/`; release binary shipped |
-| OpenBSD amd64 | Cross-compiled release binary shipped |
-| OpenBSD arm64 | Cross-compiled release binary shipped |
-| Windows amd64 | CI-tested in `turn/`; release binary shipped |
-| Windows arm64 | Cross-compiled release binary shipped |
-
-### Exotic architecture builds
-
-`uwgsocks` cross-compiles cleanly (`CGO_ENABLED=0`) and binaries are shipped
-in releases. Runtime test coverage is limited to QEMU emulation.
-
-| Platform | Status |
-|---|---|
-| Linux riscv64 | QEMU-tested: all core tests pass; one IPv6 ICMP test skipped due to QEMU network limitation |
-| Linux mips (big-endian) | Build-only; no container images available for QEMU runtime testing |
-| Linux mipsle (little-endian) | Build-only; targeted at EdgeRouter X and similar devices |
-| Linux 386 | Lite build cross-compiles cleanly; runtime support not yet validated on a trustworthy real 32-bit host |
-| Windows 386 | Lite build cross-compiles cleanly; runtime support not yet validated on a real 32-bit host |
-
-`uwgwrapper` is not built for exotic architectures. The `LD_PRELOAD` shim and
-ptrace/seccomp filter tables are architecture-specific and only maintained for
-amd64 and arm64.
-
-### Wrapper support status
-
-`uwgwrapper` should be treated as Linux-only supported functionality, not as an
-experimental sidecar. It has repeated preload, ptrace, and fdproxy coverage in
-the automated suite on supported Linux targets. What remains platform-limited
-is not maturity on Linux, but portability outside Linux.
-
-## Known limitations by platform
-
-**All non-Linux platforms:**
-- No `uwgwrapper`. Applications without proxy support must use a system-level
-  VPN or configure SOCKS5/HTTP proxy manually.
-- No `uwgtrace`, `uwgfdproxy`, or ptrace-based interception.
-
-**Windows:**
-- Host TUN support requires [wintun](https://www.wintun.net/). SOCKS5/HTTP
-  proxy and socket API modes work without it.
-- Releases that want host-TUN support should ship the official signed
-  `wintun.dll` beside `uwgsocks.exe`. Installing the same DLL in
-  `C:\Windows\System32` also works.
-- Host-TUN DNS configuration is best-effort through `netsh`.
-
-**macOS:**
-- Host TUN support uses the native `utun` interface and can be configured by
-  `uwgsocks` itself or by external tooling.
-- Host-TUN DNS server changes are not currently automated for `utun`.
-- UDP buffer size warnings from quic-go are cosmetic on macOS; QUIC transport
-  functions correctly.
-
-**FreeBSD / OpenBSD:**
-- Host TUN support uses the native `tun` interface and can be configured by
-  `uwgsocks` itself using `ifconfig` and `route`.
-- Host-TUN DNS server changes are not currently automated; use
-  `tun.dns_resolv_conf` when you want `uwgsocks` to manage a resolver file.
-
-**gVisor:**
-- ptrace-based `uwgwrapper` modes are restricted by the sandbox. Preload-only
-  mode works if the gVisor policy permits `dlopen`.
-
-**riscv64 / mips / mipsle:**
+- Core `uwgsocks` functionality is exercised in CI.
+- Host-TUN uses the native `utun` interface.
+- QUIC works, but Linux is still the safer baseline if QUIC is central to your
+  deployment.
 - No `uwgwrapper`.
-- IPv6 ICMP (ping6 through the tunnel) is unverified on real hardware; all
-  other tested paths pass.
+
+### Windows
+
+- Core `uwgsocks` functionality is exercised in CI.
+- Host-TUN requires `wintun.dll`.
+- SOCKS5, HTTP proxy, forwards, reverse forwards, mesh, and runtime API work
+  without host-TUN.
+- No `uwgwrapper`.
+
+### FreeBSD
+
+- Core `uwgsocks` functionality is manually validated on real hosts.
+- Host-TUN uses the native `tun` interface.
+- Treat it as supported, but still with less repeated coverage than Linux.
+- No `uwgwrapper`.
+
+### OpenBSD
+
+- Core functionality has been exercised manually, but the project should still
+  be treated as experimental here.
+- Host-TUN support exists.
+- No `uwgwrapper`.
+
+## Additional Build Targets
+
+Release artifacts also cover extra targets where runtime confidence is lower
+than the primary platforms:
+
+| Target | Current confidence |
+| --- | --- |
+| Linux `riscv64` | Cross-build and limited emulated validation |
+| Linux `mips` / `mipsle` | Cross-build only |
+| Windows `arm64` | Release artifact shipped; lighter runtime coverage than `amd64` |
+
+If you need one sentence: use Linux for the full surface, use macOS and Windows
+confidently for the main data plane, and treat BSD and exotic targets as
+deliberate but less battle-tested deployments.

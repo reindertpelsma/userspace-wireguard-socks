@@ -24,3 +24,5 @@ users:
     source_networks:
       - "127.0.0.0/8"
     mapped_address: "127.0.0.1:40000"
+    wireguard_mode: "server-only"
+    wireguard_public_key: "QyKFXQYSiIBEP//EMBNonpi2PwHtp2c4dPwRWZt5RFI="

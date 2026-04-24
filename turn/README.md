@@ -25,6 +25,7 @@ It is built on Pion TURN and adds:
 - `internal_only` users that may only talk to other TURN allocations on the same server
 - optional WireGuard-aware filtering on each relay port, including server-public-key checks for hidden WireGuard backends
 - relay-side filtering that drops obvious garbage before it reaches the private WireGuard node
+- handshake abuse controls so a public relay can absorb floods instead of blindly feeding them to the hidden WireGuard server
 - optional local management API for status, user updates, and username-as-port range updates
 
 ## Quick Start
@@ -178,7 +179,7 @@ Key fields:
 - `port`: fixed relay port
 - `mapped_address`: public relay address returned to clients
 - `source_networks`: client IP allowlist
-- `permission_behavior`: parsed and stored for policy compatibility
+- `permission_behavior`: relay policy mode for how peer traffic is handled
 
 ### Per-User Dynamic Port Range
 
@@ -283,6 +284,13 @@ WireGuard server:
 
 In practice, that gives you a small public ingress box that is better behaved
 than a generic open TURN relay when the real service behind it is WireGuard.
+
+The practical outcome is what matters:
+
+- the relay can act like a public firewall in front of the hidden server
+- unrelated Internet noise gets filtered at the edge
+- abusive handshake bursts are dampened before they become the private
+  backend's problem
 
 ## Mapped Addresses
 

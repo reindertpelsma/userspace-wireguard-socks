@@ -10,44 +10,67 @@ Next: [04 Firewall And ACLs](04-firewall-and-acls.md)
 programs that do not speak SOCKS5 or HTTP and even statically linked binaries
 that bypass libc fast paths.
 
-It does that with:
-
-- `LD_PRELOAD` for the cheap path
-- `seccomp-bpf` to cut ptrace overhead
-- `ptrace` fallback for static Go/Rust binaries and direct syscalls
-
 ## Start The Wrapper-Friendly Daemon
 
 ```bash
 ./uwgsocks --config ./examples/socksify.yaml
 ```
 
-That example exposes:
+The example is [`examples/socksify.yaml`](../../examples/socksify.yaml):
 
-- API socket: `unix:/tmp/uwgsocks-api.sock`
-- HTTP upgrade socket: `unix:/tmp/uwgsocks-http.sock`
+```yaml
+wireguard:
+  config_file: ./examples/client.conf
 
-## Wrap An Unmodified App
+api:
+  listen: unix:/tmp/uwgsocks-api.sock
+  allow_unauthenticated_unix: true
+
+proxy:
+  http_listeners:
+    - unix:/tmp/uwgsocks-http.sock
+
+socket_api:
+  bind: true
+  transparent_bind: false
+  udp_inbound: false
+```
+
+That gives you two local control points:
+
+- a management API socket at `unix:/tmp/uwgsocks-api.sock`
+- an HTTP upgrade listener at `unix:/tmp/uwgsocks-http.sock`
+
+`uwgwrapper` uses the HTTP upgrade listener, not a separate daemon protocol.
+That listener can live on a Unix socket file or on a loopback HTTP address.
+
+## Wrap An Unmodified Linux App
 
 ```bash
 ./uwgwrapper --api unix:/tmp/uwgsocks-http.sock -- curl https://ifconfig.me
 ```
 
-That uses the Unix HTTP listener and upgrades to `/uwg/socket`.
+That is the common case: same host, Unix socket transport, and no extra TCP
+listener.
 
-## HTTP URL Instead Of Unix Socket
+## Unix Socket Or HTTP URL
 
-If `uwgsocks` exposes an HTTP API listener instead:
+Use a Unix socket when the daemon is local and you want filesystem-scoped
+access:
+
+```bash
+./uwgwrapper --api unix:/tmp/uwgsocks-http.sock -- curl https://ifconfig.me
+```
+
+Use an HTTP URL when the wrapper needs to reach the daemon over loopback or a
+supervised local TCP listener:
 
 ```bash
 ./uwgsocks --config ./examples/server.yaml
 ./uwgwrapper --api http://127.0.0.1:9090 --token demo-api-token-change-me -- curl https://ifconfig.me
 ```
 
-Use:
-
-- `unix:/path.sock` when the daemon is local and you want filesystem-scoped access
-- `http://127.0.0.1:9090` when you want the wrapper to upgrade through the authenticated API listener
+Both routes end up at the same `/uwg/socket` raw socket API.
 
 ## SSH ProxyCommand / stdin Mode
 
@@ -73,7 +96,7 @@ This path does not consume another WireGuard peer. It is just one more tunnel
 TCP stream created through `/uwg/socket`, so multiple commands can be stacked
 or run in parallel without editing the peer list.
 
-## Which One Should You Prefer?
+## Which Path Should You Prefer?
 
 - Use native SOCKS5 or HTTP if the app already supports it.
 - Use `--stdio-connect` when the caller already speaks stdin/stdout socket semantics, such as SSH `ProxyCommand`.
@@ -82,20 +105,11 @@ or run in parallel without editing the peer list.
 The wrapper is a compatibility layer, not a sandbox. It forces network syscalls
 through `uwgsocks`; it does not change the process' Unix privileges.
 
-## Explicit fdproxy Mode
+## Why It Still Works On Static Go Or Rust Binaries
 
-If you want a persistent sidecar instead of `uwgwrapper -- app`:
+- `LD_PRELOAD` catches the easy libc path.
+- `seccomp-bpf` reduces ptrace overhead on supported Linux systems.
+- `ptrace` remains as the fallback for static binaries and direct syscalls.
 
-```bash
-./uwgwrapper --mode=fdproxy \
-  --listen /tmp/fdproxy.sock \
-  --api unix:/tmp/uwgsocks-http.sock
-```
-
-Then launch apps with:
-
-```bash
-LD_PRELOAD=/tmp/uwgwrapper-$(id -u)/uwgpreload-*.so \
-UWGS_FDPROXY=/tmp/fdproxy.sock \
-curl https://ifconfig.me
-```
+That combination is why `uwgwrapper` is closer to “socksify for any Linux
+binary” than to a normal proxy helper.

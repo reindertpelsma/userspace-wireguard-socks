@@ -2,23 +2,23 @@
 # SPDX-License-Identifier: ISC
 
 # Hub / relay server with mesh control enabled. Child uwgsocks peers can fetch
-# currently active peers and, when the outer transport is UDP-capable, attempt
-# direct WireGuard child sessions.
+# the active peer list, learn projected ACLs, and keep a working relay path
+# while they also try direct WireGuard sessions.
 
 wireguard:
-  private_key: mIGJUVTuC1A/mcfmRyqQf0HU2TWhMJ48GOd9/OBErFQ=
+  private_key: qB9WhJbIT1jyY0Go6d3UAIYK+RlGo+ElwESBC/f9VGU=
   listen_port: 51820
   addresses:
     - 100.64.80.1/32
   peers:
-    - public_key: QW//VpYXzIv1BICJnx9uhSRWpZu907yw/mJqTwfXZ3Q=
-      preshared_key: Qrs3RDGqMFVjWVu1CXX4C3gs8tGvIva3/LlljSBjNSc=
+    - public_key: NU/tZS6y+fCf9kepK4R8z05/BvftWcxkEk7Gl0iRdXU=
+      preshared_key: 8CXDYhra0VTDEZGyhG83uJkcOiD2ZaSLXy9ma3T1glw=
       allowed_ips:
         - 100.64.80.2/32
       mesh_enabled: true
       mesh_accept_acls: true
-    - public_key: 2xFvHNBakpLrpqUYYQ0mrhEUq1re0csy4e7dY5Lg2C0=
-      preshared_key: GmKU1AsoGV+0Q7AyeDpljGM8wuoHgobGQQlit8pC554=
+    - public_key: Ba9+418zSeHDBiVcQheIzN+TL49gblCl/7RGYpSf+Bs=
+      preshared_key: 8PxUasdty53JC9r/oCE6xWDKmOP6zbaTrFXiVQpvem8=
       allowed_ips:
         - 100.64.80.3/32
       mesh_enabled: true
@@ -38,9 +38,19 @@ acl:
   relay:
     - action: allow
       source: 100.64.80.2/32
+      destination: 100.64.80.1/32
+      protocol: tcp
+      destination_port: 8787
+    - action: allow
+      source: 100.64.80.3/32
+      destination: 100.64.80.1/32
+      protocol: tcp
+      destination_port: 8787
+    - action: allow
+      source: 100.64.80.2/32
       destination: 100.64.80.3/32
       protocol: tcp
-      destination_port: 443
+      destination_port: 8088
 
 dns_server:
   listen: 100.64.80.1:53

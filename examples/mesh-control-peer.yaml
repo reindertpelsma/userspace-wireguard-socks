@@ -6,12 +6,12 @@
 # ACL state.
 
 wireguard:
-  private_key: KCy8PWd3zfbTvjC7ApYKKCltgHxZd9wBmLtkGQV+JXM=
+  private_key: UEtDwUyiNWwqG6PT8xyZUHCgobMuroIFdglygl821GM=
   addresses:
     - 100.64.80.2/32
   peers:
-    - public_key: c3vrZMkOC89b9UdW3kajFr1y/tzsKDLn9udcchDBER0=
-      preshared_key: Qrs3RDGqMFVjWVu1CXX4C3gs8tGvIva3/LlljSBjNSc=
+    - public_key: r4fi5ZkPzyk1kNywYwd8F1oEsdyo1JE1Sogzcgxuhwg=
+      preshared_key: 8CXDYhra0VTDEZGyhG83uJkcOiD2ZaSLXy9ma3T1glw=
       endpoint: 127.0.0.1:51820
       allowed_ips:
         - 100.64.80.1/32

@@ -259,8 +259,8 @@ LISTEN udp 0.0.0.0 5353 1 1
 ATTACH <listener-token> <accepted-connection-id>
 ```
 
-The bind IP/port and reuse flags are optional for compatibility with older
-wrappers; omitted bind fields mean no explicit source bind. Successful
+The bind IP/port and reuse flags are optional; omitted bind fields mean no
+explicit source bind. Successful
 connected sockets reply as `OK <bind-ip> <bind-port>`, UDP listeners as
 `OKUDP <bind-ip> <bind-port>`, and TCP listeners as
 `OKLISTEN <listener-token> <bind-ip> <bind-port>`.
@@ -283,8 +283,8 @@ The preload wrapper can:
    `recvfrom(2)`, `poll(2)`, and many other fd-oriented calls operate on a real
    kernel fd
 
-`uwgfdproxy` still accepts the earlier SCM_RIGHTS socketpair bootstrap as a
-compatibility fallback, but the direct manager fd is simpler for fd lifetime:
+`uwgfdproxy` also accepts an SCM_RIGHTS socketpair bootstrap, but the direct
+manager fd is simpler for fd lifetime:
 `dup`, `dup2`, and `dup3` can copy wrapper tracking, forked processes keep the
 actual manager fd, and connected TCP fds keep working across exec because the
 manager fd itself is a normal Unix stream. TCP listener accepts can also recover
@@ -352,8 +352,8 @@ Binding is privileged:
 - `socket_api.transparent_bind: false` rejects bind IPs outside this peer's
   assigned WireGuard addresses.
 - `socket_api.udp_inbound: false` keeps UDP listener mode established-only.
-- `proxy.bind` is also honored by the socket API as a compatibility alias for
-  enabling tunnel-side binds, and `proxy.lowbind: false` blocks binds below
+- `proxy.bind` is also honored by the socket API for enabling tunnel-side
+  binds, and `proxy.lowbind: false` blocks binds below
   port 1024. The fdproxy process can additionally disable tunnel binds and
   low-port binds with its own flags/environment so per-application wrappers can
   be more restrictive than the shared uwgsocks daemon.

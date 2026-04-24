@@ -34,8 +34,8 @@ root [README.md](../../README.md).
 2. [02 Server And Ingress](02-server-and-ingress.md)
 3. [03 Wrapper Interception](03-wrapper-interception.md)
 4. [04 Firewall And ACLs](04-firewall-and-acls.md)
-5. [05 Pluggable Transports](05-pluggable-transports.md)
-6. [06 Mesh Coordination](06-mesh-coordination.md)
+5. [05 Mesh Coordination](05-mesh-coordination.md)
+6. [06 Pluggable Transports](06-pluggable-transports.md)
 7. [07 TURN Relay Ingress](07-turn-relay-ingress.md)
 8. [08 Reference Map](08-reference-map.md)
 9. [09 Unix Socket Forwards](09-unix-socket-forwards.md)
@@ -47,6 +47,8 @@ root [README.md](../../README.md).
 - For production, generate real keys with `uwgsocks genkey` or
   `uwgsocks genpair`.
 - The commands in this guide were written against the files in `examples/`.
+- The important config blocks are inlined in each how-to so you do not have to
+  bounce between markdown and example files to understand the setup.
 - The public-subdomain ingress story is powered by `uwgsocks` plus the
   companion control plane
   [`simple-wireguard-server`](https://github.com/reindertpelsma/simple-wireguard-server).

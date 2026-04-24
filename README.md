@@ -68,6 +68,19 @@ curl --proxy http://127.0.0.1:8082 https://ifconfig.me
 That is a full WireGuard path with userspace proxy ingress, no root, and no
 host route changes.
 
+## How It Fits Together
+
+```mermaid
+flowchart LR
+    App[App / Browser / CLI] --> Entry[SOCKS5 / HTTP / Forward / uwgwrapper]
+    Entry --> Netstack[gVisor userspace TCP/IP stack]
+    Netstack --> Policy[Routing + ACLs + Relay + Reverse Forwards]
+    Policy --> WG[WireGuard in userspace]
+    WG --> Carrier[UDP / HTTPS / QUIC / TURN]
+    Carrier --> Peer[Peer / Relay / Hidden Server]
+    Mesh[mesh_control] --> Policy
+```
+
 ## Main Binaries
 
 | Binary | Purpose |
@@ -96,8 +109,8 @@ Start with the guided flow:
 - [02 Server And Ingress](docs/howto/02-server-and-ingress.md)
 - [03 Wrapper Interception](docs/howto/03-wrapper-interception.md)
 - [04 Firewall And ACLs](docs/howto/04-firewall-and-acls.md)
-- [05 Pluggable Transports](docs/howto/05-pluggable-transports.md)
-- [06 Mesh Coordination](docs/howto/06-mesh-coordination.md)
+- [05 Mesh Coordination](docs/howto/05-mesh-coordination.md)
+- [06 Pluggable Transports](docs/howto/06-pluggable-transports.md)
 - [07 TURN Relay Ingress](docs/howto/07-turn-relay-ingress.md)
 - [08 Reference Map](docs/howto/08-reference-map.md)
 - [09 Unix Socket Forwards](docs/howto/09-unix-socket-forwards.md)
@@ -106,9 +119,12 @@ Deep reference docs:
 
 - [Configuration behavior](docs/reference/configuration.md)
 - [Full config map](docs/reference/config-reference.md)
+- [ACL model](docs/reference/acls.md)
+- [Mesh control](docs/reference/mesh-control.md)
 - [Proxy routing order](docs/reference/proxy-routing.md)
 - [Socket protocol](docs/reference/socket-protocol.md)
 - [Transport modes](docs/reference/transport-modes.md)
+- [TURN integration and relay modes](docs/reference/turn.md)
 - [Compatibility](docs/reference/compatibility.md)
 - [Testing](docs/reference/testing.md)
 - [Standalone TURN daemon](turn/README.md)
