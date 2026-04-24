@@ -363,6 +363,66 @@ func TestParseForwardArgProxyProtocolOption(t *testing.T) {
 	}
 }
 
+func TestParseForwardArgUnixEndpoints(t *testing.T) {
+	f, err := ParseForwardArg("tcp://unix:///tmp/uwg.sock=100.64.71.10:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Listen != "unix:///tmp/uwg.sock" || f.Target != "100.64.71.10:80" || f.FrameBytes != 0 {
+		t.Fatalf("parsed unix stream forward mismatch: %+v", f)
+	}
+	ep, err := ParseForwardEndpoint(f.Proto, f.Listen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ep.Kind != ForwardEndpointUnixStream || ep.Network() != "unix" || ep.Address != "/tmp/uwg.sock" {
+		t.Fatalf("parsed unix stream endpoint mismatch: %+v", ep)
+	}
+
+	f, err = ParseForwardArg("udp://unix:///tmp/dns.sock=100.64.71.10:53,allow_unnamed_dgram=false")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ep, err = ParseForwardEndpoint(f.Proto, f.Listen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ep.Kind != ForwardEndpointUnixDgram || ep.Network() != "unixgram" {
+		t.Fatalf("parsed unix dgram endpoint mismatch: %+v", ep)
+	}
+
+	f = Forward{Proto: "tcp", Listen: "100.64.71.10:80", Target: "unix+seqpacket:///tmp/backend.sock", FrameBytes: 2}
+	if err := ValidateForwardEndpoints(f, true); err != nil {
+		t.Fatalf("ValidateForwardEndpoints(reverse unix seqpacket) err=%v", err)
+	}
+	ep, err = ParseForwardEndpoint(f.Proto, f.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ep.Kind != ForwardEndpointUnixSeqpacket || ep.Network() != "unixpacket" {
+		t.Fatalf("parsed unix seqpacket endpoint mismatch: %+v", ep)
+	}
+}
+
+func TestValidateForwardEndpointsRejectsInvalidUnixCombos(t *testing.T) {
+	cases := []Forward{
+		{Proto: "udp", Listen: "unix+stream:///tmp/udp.sock", Target: "100.64.71.10:53"},
+		{Proto: "tcp", Listen: "127.0.0.1:8080", Target: "unix:///tmp/invalid.sock"},
+		{Proto: "tcp", Listen: "unix:///tmp/in.sock", Target: "100.64.71.10:80", AllowUnnamedDGRAM: true},
+		{Proto: "udp", Listen: "unix+dgram:///tmp/in.sock", Target: "100.64.71.10:53", FrameBytes: 4},
+		{Proto: "tcp", Listen: "127.0.0.1:8080", Target: "100.64.71.10:80", FrameBytes: 4},
+		{Proto: "tcp", Listen: "unix:///tmp/in.sock", Target: "100.64.71.10:80", FrameBytes: 3},
+	}
+	for _, tc := range cases {
+		if err := ValidateForwardEndpoints(tc, false); err == nil {
+			t.Fatalf("ValidateForwardEndpoints(%+v) unexpectedly succeeded", tc)
+		}
+	}
+	if err := ValidateForwardEndpoints(Forward{Proto: "tcp", Listen: "unix:///tmp/in.sock", Target: "100.64.71.10:80"}, true); err == nil {
+		t.Fatal("reverse forward with unix listen unexpectedly succeeded")
+	}
+}
+
 func TestParsePeerArgTrafficShaperOptions(t *testing.T) {
 	p, err := ParsePeerArg("public_key=peer,allowed_ips=100.64.90.1/32,upload_bps=4096,download_bps=8192,latency_ms=25")
 	if err != nil {

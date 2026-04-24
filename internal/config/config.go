@@ -331,6 +331,13 @@ type Forward struct {
 	// dialing over WireGuard; on reverse_forwards a header is emitted to the
 	// host-side target. Valid values are "", "v1", and "v2".
 	ProxyProtocol string `yaml:"proxy_protocol"`
+	// AllowUnnamedDGRAM permits unnamed unixgram senders when Listen uses a
+	// unix+dgram socket for a forward. Unnamed senders cannot receive replies,
+	// so the default is false.
+	AllowUnnamedDGRAM bool `yaml:"allow_unnamed_dgram,omitempty"`
+	// FrameBytes selects the big-endian length prefix used for TCP over
+	// message-oriented Unix sockets. Valid values are 0 (default to 4), 2, and 4.
+	FrameBytes int `yaml:"frame_bytes,omitempty"`
 }
 
 type DNSServer struct {
@@ -963,11 +970,8 @@ func normalizeForwards(name string, forwards []Forward) error {
 		if forwards[i].Proto == "udp" && forwards[i].ProxyProtocol == "v1" {
 			return fmt.Errorf("%s %d: UDP proxy_protocol requires v2", name, i)
 		}
-		if _, _, err := net.SplitHostPort(forwards[i].Listen); err != nil {
-			return fmt.Errorf("%s %d listen %q: %w", name, i, forwards[i].Listen, err)
-		}
-		if _, _, err := net.SplitHostPort(forwards[i].Target); err != nil {
-			return fmt.Errorf("%s %d target %q: %w", name, i, forwards[i].Target, err)
+		if err := ValidateForwardEndpoints(forwards[i], name == "reverse_forward"); err != nil {
+			return fmt.Errorf("%s %d: %w", name, i, err)
 		}
 	}
 	return nil
@@ -1394,6 +1398,18 @@ func ParseForwardArg(s string) (Forward, error) {
 			switch strings.ToLower(strings.TrimSpace(key)) {
 			case "proxy_protocol":
 				f.ProxyProtocol = strings.ToLower(strings.TrimSpace(value))
+			case "allow_unnamed_dgram":
+				b, err := strconv.ParseBool(strings.TrimSpace(value))
+				if err != nil {
+					return f, fmt.Errorf("invalid allow_unnamed_dgram %q", value)
+				}
+				f.AllowUnnamedDGRAM = b
+			case "frame_bytes":
+				n, err := strconv.Atoi(strings.TrimSpace(value))
+				if err != nil {
+					return f, fmt.Errorf("invalid frame_bytes %q", value)
+				}
+				f.FrameBytes = n
 			default:
 				return f, fmt.Errorf("unknown forward option %q", key)
 			}
@@ -1409,11 +1425,8 @@ func ParseForwardArg(s string) (Forward, error) {
 	if f.Proto == "udp" && f.ProxyProtocol == "v1" {
 		return f, fmt.Errorf("UDP forward proxy_protocol requires v2")
 	}
-	if _, _, err := net.SplitHostPort(f.Listen); err != nil {
-		return f, fmt.Errorf("listen address: %w", err)
-	}
-	if _, _, err := net.SplitHostPort(f.Target); err != nil {
-		return f, fmt.Errorf("target address: %w", err)
+	if err := ValidateForwardEndpoints(f, false); err != nil {
+		return f, err
 	}
 	return f, nil
 }

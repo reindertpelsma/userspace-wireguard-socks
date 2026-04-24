@@ -49,9 +49,34 @@ Use:
 - `unix:/path.sock` when the daemon is local and you want filesystem-scoped access
 - `http://127.0.0.1:9090` when you want the wrapper to upgrade through the authenticated API listener
 
+## SSH ProxyCommand / stdin Mode
+
+If you do not need `LD_PRELOAD` at all and only want a clean TCP pipe over the
+tunnel, `uwgwrapper` can bridge stdin/stdout directly to one tunnel TCP
+destination:
+
+```bash
+./uwgwrapper \
+  --api unix:/tmp/uwgsocks-http.sock \
+  --stdio-connect 100.64.90.10:22
+```
+
+That is useful as an SSH `ProxyCommand`:
+
+```sshconfig
+Host mesh-host
+  HostName 100.64.90.10
+  ProxyCommand /usr/local/bin/uwgwrapper --api unix:/tmp/uwgsocks-http.sock --stdio-connect %h:%p
+```
+
+This path does not consume another WireGuard peer. It is just one more tunnel
+TCP stream created through `/uwg/socket`, so multiple commands can be stacked
+or run in parallel without editing the peer list.
+
 ## Which One Should You Prefer?
 
 - Use native SOCKS5 or HTTP if the app already supports it.
+- Use `--stdio-connect` when the caller already speaks stdin/stdout socket semantics, such as SSH `ProxyCommand`.
 - Use `uwgwrapper` when the app cannot speak SOCKS5 or HTTP directly, whether it is hard-coded, static, or just not proxy-aware.
 
 The wrapper is a compatibility layer, not a sandbox. It forces network syscalls

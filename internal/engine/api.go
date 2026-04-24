@@ -53,12 +53,14 @@ type apiACL struct {
 }
 
 type apiForward struct {
-	Name          string `json:"name,omitempty"`
-	Reverse       bool   `json:"reverse,omitempty"`
-	Proto         string `json:"proto,omitempty"`
-	Listen        string `json:"listen"`
-	Target        string `json:"target"`
-	ProxyProtocol string `json:"proxy_protocol,omitempty"`
+	Name              string `json:"name,omitempty"`
+	Reverse           bool   `json:"reverse,omitempty"`
+	Proto             string `json:"proto,omitempty"`
+	Listen            string `json:"listen"`
+	Target            string `json:"target"`
+	ProxyProtocol     string `json:"proxy_protocol,omitempty"`
+	AllowUnnamedDGRAM bool   `json:"allow_unnamed_dgram,omitempty"`
+	FrameBytes        int    `json:"frame_bytes,omitempty"`
 }
 
 func (e *Engine) startAPIServer() error {
@@ -1002,21 +1004,25 @@ func deleteACLRuleByName(c *config.ACL, name string, idx int) bool {
 
 func forwardToAPI(name string, reverse bool, f config.Forward) apiForward {
 	return apiForward{
-		Name:          name,
-		Reverse:       reverse,
-		Proto:         f.Proto,
-		Listen:        f.Listen,
-		Target:        f.Target,
-		ProxyProtocol: f.ProxyProtocol,
+		Name:              name,
+		Reverse:           reverse,
+		Proto:             f.Proto,
+		Listen:            f.Listen,
+		Target:            f.Target,
+		ProxyProtocol:     f.ProxyProtocol,
+		AllowUnnamedDGRAM: f.AllowUnnamedDGRAM,
+		FrameBytes:        f.FrameBytes,
 	}
 }
 
 func forwardFromAPI(f apiForward) config.Forward {
 	return config.Forward{
-		Proto:         f.Proto,
-		Listen:        f.Listen,
-		Target:        f.Target,
-		ProxyProtocol: f.ProxyProtocol,
+		Proto:             f.Proto,
+		Listen:            f.Listen,
+		Target:            f.Target,
+		ProxyProtocol:     f.ProxyProtocol,
+		AllowUnnamedDGRAM: f.AllowUnnamedDGRAM,
+		FrameBytes:        f.FrameBytes,
 	}
 }
 

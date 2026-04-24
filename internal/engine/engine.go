@@ -1661,6 +1661,13 @@ func (e *Engine) startForwardRuntime(name string, reverse bool, f config.Forward
 }
 
 func (e *Engine) startTCPForward(name string, f config.Forward) error {
+	listenEP, err := config.ParseForwardEndpoint(f.Proto, f.Listen)
+	if err != nil {
+		return err
+	}
+	if listenEP.IsUnix() {
+		return e.startTCPUnixForward(name, f, listenEP)
+	}
 	ln, err := net.Listen("tcp", f.Listen)
 	if err != nil {
 		return err
@@ -1675,41 +1682,20 @@ func (e *Engine) startTCPForward(name string, f config.Forward) error {
 				}
 				return
 			}
-			go func() {
-				defer c.Close()
-				aclSrc := addrPortFromNetAddr(c.RemoteAddr())
-				bindSrc := netip.AddrPort{}
-				srcConn := net.Conn(c)
-				if f.ProxyProtocol != "" {
-					_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
-					wrapped, pp, err := parseProxyProtocolConn(c, f.ProxyProtocol)
-					_ = c.SetReadDeadline(time.Time{})
-					if err != nil {
-						e.log.Printf("tcp forward %s PROXY header failed: %v", f.Listen, err)
-						return
-					}
-					srcConn = wrapped
-					if pp.Source.IsValid() {
-						aclSrc = pp.Source
-						bindSrc = pp.Source
-					}
-				}
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				dst, err := e.dialTunnelOnlyWithBind(ctx, "tcp", f.Target, aclSrc, bindSrc)
-				if err != nil {
-					e.log.Printf("tcp forward %s -> %s failed: %v", f.Listen, f.Target, err)
-					return
-				}
-				defer dst.Close()
-				proxyBothIdle(srcConn, dst, e.tcpIdleTimeout())
-			}()
+			go e.runTCPForwardConn(c, f)
 		}
 	}()
 	return nil
 }
 
 func (e *Engine) startUDPForward(name string, f config.Forward) error {
+	listenEP, err := config.ParseForwardEndpoint(f.Proto, f.Listen)
+	if err != nil {
+		return err
+	}
+	if listenEP.IsUnix() {
+		return e.startUDPUnixForward(name, f, listenEP)
+	}
 	pc, err := net.ListenPacket("udp", f.Listen)
 	if err != nil {
 		return err
@@ -1848,8 +1834,21 @@ func (e *Engine) handleTCPReverseForwardConn(tunnel net.Conn, f config.Forward) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	var d net.Dialer
-	host, err := d.DialContext(ctx, "tcp", f.Target)
+	targetEP, err := config.ParseForwardEndpoint(f.Proto, f.Target)
+	if err != nil {
+		e.log.Printf("tcp reverse forward %s target parse failed: %v", f.Listen, err)
+		return
+	}
+	var host net.Conn
+	if targetEP.IsUnix() {
+		host, err = dialUnixEndpoint(targetEP)
+		if err == nil && targetEP.UsesMessages() {
+			host = wrapFramedUnixMessageConn(host, f)
+		}
+	} else {
+		var d net.Dialer
+		host, err = d.DialContext(ctx, "tcp", f.Target)
+	}
 	if err != nil {
 		e.log.Printf("tcp reverse forward %s -> %s failed: %v", f.Listen, f.Target, err)
 		return
@@ -1876,17 +1875,21 @@ func (e *Engine) startUDPReverseForward(name string, f config.Forward) error {
 	if err != nil {
 		return fmt.Errorf("%s listen: %w", name, err)
 	}
+	targetEP, err := config.ParseForwardEndpoint(f.Proto, f.Target)
+	if err != nil {
+		return fmt.Errorf("%s target: %w", name, err)
+	}
 	basePC, err := e.net.ListenUDPAddrPort(listen)
 	if err != nil {
 		return err
 	}
 	pc := e.wrapPeerPacketConn(basePC)
 	e.addPacketConn(name, pc)
-	go e.serveUDPReverseForward(pc, f)
+	go e.serveUDPReverseForward(pc, f, targetEP)
 	return nil
 }
 
-func (e *Engine) serveUDPReverseForward(pc net.PacketConn, f config.Forward) {
+func (e *Engine) serveUDPReverseForward(pc net.PacketConn, f config.Forward, targetEP config.ForwardEndpoint) {
 	type session struct {
 		conn  net.Conn
 		timer *time.Timer
@@ -1926,8 +1929,13 @@ func (e *Engine) serveUDPReverseForward(pc net.PacketConn, f config.Forward) {
 		s := sessions[key]
 		if s == nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			var d net.Dialer
-			c, err := d.DialContext(ctx, "udp", f.Target)
+			var c net.Conn
+			if targetEP.IsUnix() {
+				c, err = dialUnixEndpoint(targetEP)
+			} else {
+				var d net.Dialer
+				c, err = d.DialContext(ctx, "udp", f.Target)
+			}
 			cancel()
 			if err != nil {
 				e.log.Printf("udp reverse forward %s -> %s failed: %v", f.Listen, f.Target, err)

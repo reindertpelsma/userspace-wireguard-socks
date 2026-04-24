@@ -348,6 +348,195 @@ func TestForwardsReverseForwardsAndProxyProtocol(t *testing.T) {
 	}
 }
 
+func TestUnixSocketForwardsAndReverseForwards(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix socket forwarding is not exercised on Windows")
+	}
+
+	serverKey, clientKey := mustKey(t), mustKey(t)
+	serverPort := freeUDPPort(t)
+	reverseIP := netip.MustParseAddr("100.64.52.99")
+	tmp := t.TempDir()
+	forwardSock := filepath.Join(tmp, "forward-http.sock")
+	reverseSock := filepath.Join(tmp, "reverse-http.sock")
+
+	serverCfg := config.Default()
+	serverCfg.WireGuard.PrivateKey = serverKey.String()
+	serverCfg.WireGuard.ListenPort = &serverPort
+	serverCfg.WireGuard.Addresses = []string{"100.64.52.1/32"}
+	serverCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:  clientKey.PublicKey().String(),
+		AllowedIPs: []string{"100.64.52.2/32", netip.PrefixFrom(reverseIP, 32).String()},
+	}}
+	serverCfg.ReverseForwards = []config.Forward{{
+		Proto:  "tcp",
+		Listen: netip.AddrPortFrom(reverseIP, 18080).String(),
+		Target: "unix://" + reverseSock,
+	}}
+	serverEng := mustStart(t, serverCfg)
+	defer serverEng.Close()
+
+	tunnelHTTP, err := serverEng.ListenTCP(netip.MustParseAddrPort("100.64.52.1:19080"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tunnelHTTP.Close()
+	serveHTTPListenerWithBody(t, tunnelHTTP, "hello over unix forward")
+	startUnixHTTPServer(t, reverseSock, "hello over reverse unix")
+
+	clientCfg := config.Default()
+	clientCfg.WireGuard.PrivateKey = clientKey.String()
+	clientCfg.WireGuard.Addresses = []string{"100.64.52.2/32"}
+	clientCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:           serverKey.PublicKey().String(),
+		Endpoint:            fmt.Sprintf("127.0.0.1:%d", serverPort),
+		AllowedIPs:          []string{"100.64.52.1/32", netip.PrefixFrom(reverseIP, 32).String()},
+		PersistentKeepalive: 1,
+	}}
+	clientCfg.Forwards = []config.Forward{{
+		Proto:  "tcp",
+		Listen: "unix://" + forwardSock,
+		Target: "100.64.52.1:19080",
+	}}
+	clientEng := mustStart(t, clientCfg)
+	defer clientEng.Close()
+
+	if body := httpGetViaUnixSocket(t, forwardSock); body != "hello over unix forward" {
+		t.Fatalf("unexpected Unix forward body %q", body)
+	}
+	if body := httpGetOverEngine(t, clientEng, netip.AddrPortFrom(reverseIP, 18080).String()); body != "hello over reverse unix" {
+		t.Fatalf("unexpected reverse Unix body %q", body)
+	}
+}
+
+func TestUnixDatagramForwardsAndReverseForwards(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix datagram forwarding is not exercised on Windows")
+	}
+
+	serverKey, clientKey := mustKey(t), mustKey(t)
+	serverPort := freeUDPPort(t)
+	reverseIP := netip.MustParseAddr("100.64.53.99")
+	tmp := t.TempDir()
+	forwardSock := filepath.Join(tmp, "forward-udp.sock")
+	forwardClientSock := filepath.Join(tmp, "forward-client.sock")
+	reverseSock := filepath.Join(tmp, "reverse-udp.sock")
+
+	serverCfg := config.Default()
+	serverCfg.WireGuard.PrivateKey = serverKey.String()
+	serverCfg.WireGuard.ListenPort = &serverPort
+	serverCfg.WireGuard.Addresses = []string{"100.64.53.1/32"}
+	serverCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:  clientKey.PublicKey().String(),
+		AllowedIPs: []string{"100.64.53.2/32", netip.PrefixFrom(reverseIP, 32).String()},
+	}}
+	serverCfg.ReverseForwards = []config.Forward{{
+		Proto:  "udp",
+		Listen: netip.AddrPortFrom(reverseIP, 18081).String(),
+		Target: "unix+dgram://" + reverseSock,
+	}}
+	serverEng := mustStart(t, serverCfg)
+	defer serverEng.Close()
+
+	tunnelUDP, err := serverEng.ListenUDP(netip.MustParseAddrPort("100.64.53.1:19081"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tunnelUDP.Close()
+	go serveUDPEcho(tunnelUDP)
+	startUnixgramEchoServer(t, reverseSock)
+
+	clientCfg := config.Default()
+	clientCfg.WireGuard.PrivateKey = clientKey.String()
+	clientCfg.WireGuard.Addresses = []string{"100.64.53.2/32"}
+	clientCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:           serverKey.PublicKey().String(),
+		Endpoint:            fmt.Sprintf("127.0.0.1:%d", serverPort),
+		AllowedIPs:          []string{"100.64.53.1/32", netip.PrefixFrom(reverseIP, 32).String()},
+		PersistentKeepalive: 1,
+	}}
+	clientCfg.Forwards = []config.Forward{{
+		Proto:  "udp",
+		Listen: "unix+dgram://" + forwardSock,
+		Target: "100.64.53.1:19081",
+	}}
+	clientEng := mustStart(t, clientCfg)
+	defer clientEng.Close()
+
+	forwardConn := dialNamedUnixgram(t, forwardClientSock, forwardSock)
+	defer forwardConn.Close()
+	udpRoundTrip(t, forwardConn, []byte("forward-unixgram"))
+
+	reverseConn, err := clientEng.DialUDP(netip.AddrPort{}, netip.AddrPortFrom(reverseIP, 18081))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reverseConn.Close()
+	udpRoundTrip(t, reverseConn, []byte("reverse-unixgram"))
+}
+
+func TestUnixSeqpacketTCPForward(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("unixpacket forwarding is exercised on Linux")
+	}
+
+	serverKey, clientKey := mustKey(t), mustKey(t)
+	serverPort := freeUDPPort(t)
+	tmp := t.TempDir()
+	seqpacketSock := filepath.Join(tmp, "forward-seqpacket.sock")
+
+	serverCfg := config.Default()
+	serverCfg.WireGuard.PrivateKey = serverKey.String()
+	serverCfg.WireGuard.ListenPort = &serverPort
+	serverCfg.WireGuard.Addresses = []string{"100.64.54.1/32"}
+	serverCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:  clientKey.PublicKey().String(),
+		AllowedIPs: []string{"100.64.54.2/32"},
+	}}
+	serverEng := mustStart(t, serverCfg)
+	defer serverEng.Close()
+
+	tunnelEcho, err := serverEng.ListenTCP(netip.MustParseAddrPort("100.64.54.1:19090"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tunnelEcho.Close()
+	go serveEchoListener(tunnelEcho)
+
+	clientCfg := config.Default()
+	clientCfg.WireGuard.PrivateKey = clientKey.String()
+	clientCfg.WireGuard.Addresses = []string{"100.64.54.2/32"}
+	clientCfg.WireGuard.Peers = []config.Peer{{
+		PublicKey:           serverKey.PublicKey().String(),
+		Endpoint:            fmt.Sprintf("127.0.0.1:%d", serverPort),
+		AllowedIPs:          []string{"100.64.54.1/32"},
+		PersistentKeepalive: 1,
+	}}
+	clientCfg.Forwards = []config.Forward{{
+		Proto:      "tcp",
+		Listen:     "unix+seqpacket://" + seqpacketSock,
+		Target:     "100.64.54.1:19090",
+		FrameBytes: 2,
+	}}
+	clientEng := mustStart(t, clientCfg)
+	defer clientEng.Close()
+
+	conn, err := net.Dial("unixpacket", seqpacketSock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	want := []byte("seqpacket-forward")
+	if err := writeFramedUnixMessage(conn, 2, want); err != nil {
+		t.Fatal(err)
+	}
+	got := readFramedUnixMessage(t, conn, 2)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("seqpacket echo mismatch: got %q want %q", got, want)
+	}
+}
+
 func TestSOCKSHostnameUsesWireGuardDNS(t *testing.T) {
 	serverKey, clientKey := mustKey(t), mustKey(t)
 	serverPort := freeUDPPort(t)
@@ -2124,6 +2313,31 @@ func startHTTPServer(t *testing.T) *httpTestServer {
 	return &httpTestServer{Server: srv, Port: port}
 }
 
+func serveHTTPListenerWithBody(t *testing.T, ln net.Listener, body string) {
+	t.Helper()
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, body)
+	})}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Logf("HTTP listener stopped: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+	})
+}
+
+func startUnixHTTPServer(t *testing.T, socketPath, body string) {
+	t.Helper()
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	serveHTTPListenerWithBody(t, ln, body)
+}
+
 func (s *httpTestServer) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -2158,6 +2372,16 @@ func startEchoServer(t *testing.T) *echoServer {
 }
 
 func (s *echoServer) Close() { _ = s.ln.Close() }
+
+func startUnixgramEchoServer(t *testing.T, socketPath string) {
+	t.Helper()
+	pc, err := net.ListenPacket("unixgram", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	go serveUDPEcho(pc)
+}
 
 func startProxyProtocolTCPEchoServer(t *testing.T) (net.Listener, <-chan string) {
 	t.Helper()
@@ -2431,6 +2655,57 @@ func httpProxyGetUnix(t *testing.T, proxySocket, target string) string {
 	return string(body)
 }
 
+func httpGetViaUnixSocket(t *testing.T, socketPath string) string {
+	t.Helper()
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", socketPath)
+			},
+		},
+	}
+	return retryHTTPGet(t, client, "http://uwg/")
+}
+
+func httpGetOverEngine(t *testing.T, eng *engine.Engine, target string) string {
+	t.Helper()
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return eng.DialContext(ctx, "tcp", target)
+			},
+		},
+	}
+	return retryHTTPGet(t, client, "http://uwg/")
+}
+
+func retryHTTPGet(t *testing.T, client *http.Client, targetURL string) string {
+	t.Helper()
+	var last error
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(targetURL)
+		if err == nil {
+			defer resp.Body.Close()
+			body, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET %s status %d: %s", targetURL, resp.StatusCode, body)
+			}
+			return string(body)
+		}
+		last = err
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("GET %s: %v", targetURL, last)
+	return ""
+}
+
 func httpProxyConnectGet(t *testing.T, proxyAddr, target string) string {
 	t.Helper()
 	c, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
@@ -2513,6 +2788,16 @@ func retryEngineDial(t *testing.T, eng *engine.Engine, network, target string) n
 	}
 	t.Fatalf("engine dial %s: %v", target, last)
 	return nil
+}
+
+func dialNamedUnixgram(t *testing.T, localPath, remotePath string) net.Conn {
+	t.Helper()
+	_ = os.Remove(localPath)
+	conn, err := net.DialUnix("unixgram", &net.UnixAddr{Name: localPath, Net: "unixgram"}, &net.UnixAddr{Name: remotePath, Net: "unixgram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conn
 }
 
 func addrPortFromNetAddrTest(addr net.Addr) netip.AddrPort {
@@ -2622,6 +2907,48 @@ func udpRoundTrip(t *testing.T, conn net.Conn, msg []byte) []byte {
 		t.Fatalf("UDP echo mismatch: got %q want %q", got, msg)
 	}
 	return got
+}
+
+func writeFramedUnixMessage(conn net.Conn, frameBytes int, payload []byte) error {
+	frame := make([]byte, frameBytes+len(payload))
+	switch frameBytes {
+	case 2:
+		binary.BigEndian.PutUint16(frame[:2], uint16(len(payload)))
+	case 4:
+		binary.BigEndian.PutUint32(frame[:4], uint32(len(payload)))
+	default:
+		return fmt.Errorf("unsupported frame size %d", frameBytes)
+	}
+	copy(frame[frameBytes:], payload)
+	_, err := conn.Write(frame)
+	return err
+}
+
+func readFramedUnixMessage(t *testing.T, conn net.Conn, frameBytes int) []byte {
+	t.Helper()
+	buf := make([]byte, 64*1024)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf = buf[:n]
+	if len(buf) < frameBytes {
+		t.Fatalf("short framed payload %d", len(buf))
+	}
+	var want int
+	switch frameBytes {
+	case 2:
+		want = int(binary.BigEndian.Uint16(buf[:2]))
+	case 4:
+		want = int(binary.BigEndian.Uint32(buf[:4]))
+	default:
+		t.Fatalf("unsupported frame size %d", frameBytes)
+	}
+	payload := buf[frameBytes:]
+	if len(payload) != want {
+		t.Fatalf("frame length mismatch: got %d want %d", len(payload), want)
+	}
+	return append([]byte(nil), payload...)
 }
 
 func echoOverEngine(t *testing.T, eng *engine.Engine, target string, msg []byte) {

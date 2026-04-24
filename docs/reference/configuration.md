@@ -353,22 +353,65 @@ forwards:
     listen: 127.0.0.1:15432
     target: 10.10.0.20:5432
     proxy_protocol: ""
+  - proto: tcp
+    listen: unix:///run/uwgsocks/postgres.sock
+    target: 10.10.0.20:5432
+  - proto: udp
+    listen: unix+dgram:///run/uwgsocks/dns.sock
+    target: 100.64.90.1:53
 
 reverse_forwards:
   - proto: udp
     listen: 100.64.90.99:5353
     target: 127.0.0.1:53
     proxy_protocol: v2
+  - proto: tcp
+    listen: 100.64.90.99:2375
+    target: unix:///var/run/docker.sock
 ```
 
 `forwards` listen on the host and dial over WireGuard. `reverse_forwards` listen inside the userspace tunnel and dial host targets. Reverse-forward listen IPs do not need to be listed in `Address=`; they only need to be routed to this peer by the sending peer.
+
+Forward listeners can also use Unix sockets:
+
+- `unix://path.sock`
+  - default Unix mode
+  - behaves as `stream` for TCP and `dgram` for UDP
+- `unix+stream://path.sock`
+  - TCP stream listener
+- `unix+dgram://path.sock`
+  - message-oriented datagram listener
+- `unix+seqpacket://path.sock`
+  - message-oriented sequenced-packet listener
+
+Normal `forwards` can listen on Unix sockets and still dial tunnel `host:port`
+destinations. `reverse_forwards` keep their tunnel-side listen address as
+`host:port`, but their `target` may be a Unix socket. That makes it possible to
+publish a private host-only service like `/var/run/docker.sock` or a local
+HTTP server bound to a Unix socket through the WireGuard mesh without exposing
+it on loopback.
+
+UDP supports Unix `dgram` and `seqpacket` sockets. Each Unix sender becomes one
+userspace UDP flow with the normal UDP idle timeout. For `unix+dgram`, replies
+go back to the sender's Unix address, so unnamed senders are dropped by default
+unless `allow_unnamed_dgram: true` is set on that forward listener.
+
+TCP supports Unix `stream`, `dgram`, and `seqpacket`. When TCP is mapped onto a
+message-oriented Unix socket (`dgram` or `seqpacket`), each message carries a
+big-endian length prefix so the byte stream survives intact. Use
+`frame_bytes: 2` or `frame_bytes: 4` to pick the prefix width; the default is
+4 bytes.
 
 CLI:
 
 ```bash
 --forward 'tcp://127.0.0.1:15432=10.10.0.20:5432'
 --forward 'udp://127.0.0.1:15353=100.64.90.1:53,proxy_protocol=v2'
+--forward 'tcp://unix:///run/uwgsocks/postgres.sock=10.10.0.20:5432'
+--forward 'udp://unix+dgram:///run/uwgsocks/dns.sock=100.64.90.1:53'
+--forward 'tcp://unix+seqpacket:///run/uwgsocks/ssh.sock=100.64.90.10:22,frame_bytes=2'
 --reverse-forward 'tcp://100.64.90.99:8443=127.0.0.1:443,proxy_protocol=v1'
+--reverse-forward 'tcp://100.64.90.99:2375=unix:///var/run/docker.sock'
 ```
 
 ## Transparent Inbound

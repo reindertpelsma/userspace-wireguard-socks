@@ -82,6 +82,7 @@ host route changes.
 - Rootless client proxy: send browser, CLI, or SDK traffic through SOCKS5 or HTTP.
 - Rootless server or exit node: terminate inbound WireGuard traffic into normal host sockets.
 - Reverse ingress edge: map tunnel-side listeners back to local services.
+- Unix-socket service bridge: bind forwards on `unix://` sockets or expose local Unix socket services across WireGuard.
 - Process-level tunnel enforcement: force unmodified apps through the mesh with `uwgwrapper`.
 - Transport-obfuscated edge: wrap WireGuard in HTTP, QUIC, or TURN when plain UDP is blocked.
 - Relay and SD-WAN hub: combine relay ACLs, mesh peer sync, and direct-path discovery.

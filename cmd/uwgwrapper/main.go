@@ -7,6 +7,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
@@ -14,16 +15,20 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/fdproxy"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/socketproto"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/uwgshared"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/uwgtrace"
 )
@@ -45,9 +50,10 @@ func main() {
 	var noNewPrivileges bool
 	var allowBind bool
 	var allowLowBind bool
+	var stdioConnect string
 	var verbose bool
 
-	flag.StringVar(&mode, "mode", getenv("UWGS_WRAPPER_MODE", "launch"), "mode: launch or fdproxy")
+	flag.StringVar(&mode, "mode", getenv("UWGS_WRAPPER_MODE", "launch"), "mode: launch, fdproxy, or stdio")
 	flag.StringVar(&api, "api", getenv("UWGS_API", "http://127.0.0.1:9090"), "uwgsocks API endpoint")
 	flag.StringVar(&apiToken, "token", os.Getenv("UWGS_API_TOKEN"), "uwgsocks API bearer token")
 	flag.StringVar(&socketPath, "socket-path", getenv("UWGS_SOCKET_PATH", "/uwg/socket"), "upstream socket upgrade path")
@@ -60,14 +66,29 @@ func main() {
 	flag.BoolVar(&noNewPrivileges, "no-new-privileges", getenv("UWGS_WRAPPER_NO_NEW_PRIVILEGES", "1") != "0", "set PR_SET_NO_NEW_PRIVS before launching the wrapped program (default true)")
 	flag.BoolVar(&allowBind, "allow-bind", getenv("UWGS_FDPROXY_ALLOW_BIND", "1") != "0", "allow fdproxy-managed tunnel bind/listen requests")
 	flag.BoolVar(&allowLowBind, "allow-lowbind", getenv("UWGS_FDPROXY_ALLOW_LOWBIND", "0") != "0", "allow fdproxy-managed ports below 1024")
+	flag.StringVar(&stdioConnect, "stdio-connect", getenv("UWGS_STDIO_CONNECT", ""), "connect a tunnel TCP target and bridge stdin/stdout; useful as SSH ProxyCommand")
 	flag.BoolVar(&verbose, "v", false, "enable wrapper diagnostics")
 	flag.Parse()
 
 	switch mode {
 	case "launch":
+		if stdioConnect != "" {
+			if err := runStdioConnect(api, apiToken, socketPath, stdioConnect, os.Stdin, os.Stdout); err != nil {
+				log.Fatal(err)
+			}
+			return
+		}
 		runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, transport, forceLoopbackDNS, spawnFDProxy, noNewPrivileges, allowBind, allowLowBind, verbose)
 	case "fdproxy":
 		runFDProxy(api, apiToken, socketPath, listenPath, allowBind, allowLowBind, verbose || os.Getenv("UWGS_WRAPPER_DEBUG") != "")
+	case "stdio":
+		target, err := stdioConnectTarget(stdioConnect, flag.Args())
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := runStdioConnect(api, apiToken, socketPath, target, os.Stdin, os.Stdout); err != nil {
+			log.Fatal(err)
+		}
 	case "exec-helper":
 		if err := runExecHelper(flag.Args()); err != nil {
 			log.Fatal(err)
@@ -77,7 +98,7 @@ func main() {
 			log.Fatal(err)
 		}
 	default:
-		log.Fatalf("unsupported mode %q, expected launch, fdproxy, exec-helper, or tracee-helper", mode)
+		log.Fatalf("unsupported mode %q, expected launch, fdproxy, stdio, exec-helper, or tracee-helper", mode)
 	}
 }
 
@@ -322,6 +343,150 @@ func runFDProxy(api, apiToken, socketPath, listenPath string, allowBind, allowLo
 	defer server.Close()
 	if err := server.Serve(); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func stdioConnectTarget(flagValue string, args []string) (string, error) {
+	if flagValue != "" {
+		if len(args) != 0 {
+			return "", fmt.Errorf("stdio mode accepts either --stdio-connect or one positional target, not both")
+		}
+		return flagValue, nil
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("stdio mode requires a single target like 100.64.0.2:22")
+	}
+	return args[0], nil
+}
+
+func parseStdioConnectTarget(raw string) (netip.AddrPort, error) {
+	ap, err := netip.ParseAddrPort(strings.TrimSpace(raw))
+	if err != nil {
+		return netip.AddrPort{}, fmt.Errorf("parse stdio target %q: %w", raw, err)
+	}
+	if !ap.IsValid() {
+		return netip.AddrPort{}, fmt.Errorf("invalid stdio target %q", raw)
+	}
+	return ap, nil
+}
+
+func runStdioConnect(api, apiToken, socketPath, target string, stdin io.Reader, stdout io.Writer) error {
+	dest, err := parseStdioConnectTarget(target)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	up, err := socketproto.DialHTTP(ctx, api, apiToken, socketPath)
+	if err != nil {
+		return err
+	}
+	defer up.Close()
+
+	payload, err := socketproto.EncodeConnect(socketproto.Connect{
+		IPVersion: socketproto.AddrVersion(dest.Addr()),
+		Protocol:  socketproto.ProtoTCP,
+		DestIP:    dest.Addr(),
+		DestPort:  dest.Port(),
+	})
+	if err != nil {
+		return err
+	}
+	id := socketproto.ClientIDBase + 1
+	if err := socketproto.WriteFrame(up, socketproto.Frame{ID: id, Action: socketproto.ActionConnect, Payload: payload}); err != nil {
+		return err
+	}
+	frame, err := socketproto.ReadFrame(up, socketproto.DefaultMaxPayload)
+	if err != nil {
+		return err
+	}
+	if frame.ID != id {
+		return fmt.Errorf("unexpected socket response id %d", frame.ID)
+	}
+	switch frame.Action {
+	case socketproto.ActionAccept:
+		if _, err := socketproto.DecodeAccept(frame.Payload); err != nil {
+			return err
+		}
+	case socketproto.ActionClose:
+		if len(frame.Payload) != 0 {
+			return fmt.Errorf("connect rejected: %s", string(frame.Payload))
+		}
+		return errors.New("connect rejected")
+	default:
+		return fmt.Errorf("unexpected socket response action %d", frame.Action)
+	}
+	return proxyStdioSocket(up, id, stdin, stdout)
+}
+
+func proxyStdioSocket(up net.Conn, id uint64, stdin io.Reader, stdout io.Writer) error {
+	var writeMu sync.Mutex
+	writeFrame := func(frame socketproto.Frame) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return socketproto.WriteFrame(up, frame)
+	}
+
+	sendErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 64*1024)
+		for {
+			n, err := stdin.Read(buf)
+			if n > 0 {
+				payload := append([]byte(nil), buf[:n]...)
+				if werr := writeFrame(socketproto.Frame{ID: id, Action: socketproto.ActionData, Payload: payload}); werr != nil {
+					sendErr <- werr
+					return
+				}
+			}
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, io.EOF) {
+				sendErr <- nil
+				return
+			}
+			sendErr <- err
+			return
+		}
+	}()
+
+	for {
+		frame, err := socketproto.ReadFrame(up, socketproto.DefaultMaxPayload)
+		if err != nil {
+			var sendErrValue error
+			select {
+			case sendErrValue = <-sendErr:
+			default:
+			}
+			if sendErrValue != nil {
+				return sendErrValue
+			}
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return err
+		}
+		if frame.ID != id {
+			continue
+		}
+		switch frame.Action {
+		case socketproto.ActionData:
+			if _, err := stdout.Write(frame.Payload); err != nil {
+				return err
+			}
+		case socketproto.ActionClose:
+			select {
+			case send := <-sendErr:
+				if send != nil {
+					return send
+				}
+			default:
+			}
+			return nil
+		default:
+			return fmt.Errorf("unexpected socket action %d", frame.Action)
+		}
 	}
 }
 
