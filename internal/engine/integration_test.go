@@ -137,7 +137,7 @@ func TestTwoInstancesSOCKSHTTP(t *testing.T) {
 	}}
 	clientCfg.Proxy.SOCKS5 = "127.0.0.1:0"
 	clientCfg.Proxy.HTTP = "127.0.0.1:0"
-	httpUnix := filepath.Join(t.TempDir(), "http.sock")
+	httpUnix := unixSocketPath(t, "http.sock")
 	clientCfg.Proxy.HTTPListeners = []string{"unix:" + httpUnix}
 	clientCfg.Forwards = []config.Forward{{Proto: "tcp", Listen: "127.0.0.1:0", Target: net.JoinHostPort(hostIP.String(), server.Port)}}
 	clientEng := mustStart(t, clientCfg)
@@ -356,9 +356,8 @@ func TestUnixSocketForwardsAndReverseForwards(t *testing.T) {
 	serverKey, clientKey := mustKey(t), mustKey(t)
 	serverPort := freeUDPPort(t)
 	reverseIP := netip.MustParseAddr("100.64.52.99")
-	tmp := t.TempDir()
-	forwardSock := filepath.Join(tmp, "forward-http.sock")
-	reverseSock := filepath.Join(tmp, "reverse-http.sock")
+	forwardSock := unixSocketPath(t, "forward-http.sock")
+	reverseSock := unixSocketPath(t, "reverse-http.sock")
 
 	serverCfg := config.Default()
 	serverCfg.WireGuard.PrivateKey = serverKey.String()
@@ -417,10 +416,9 @@ func TestUnixDatagramForwardsAndReverseForwards(t *testing.T) {
 	serverKey, clientKey := mustKey(t), mustKey(t)
 	serverPort := freeUDPPort(t)
 	reverseIP := netip.MustParseAddr("100.64.53.99")
-	tmp := t.TempDir()
-	forwardSock := filepath.Join(tmp, "forward-udp.sock")
-	forwardClientSock := filepath.Join(tmp, "forward-client.sock")
-	reverseSock := filepath.Join(tmp, "reverse-udp.sock")
+	forwardSock := unixSocketPath(t, "forward-udp.sock")
+	forwardClientSock := unixSocketPath(t, "forward-client.sock")
+	reverseSock := unixSocketPath(t, "reverse-udp.sock")
 
 	serverCfg := config.Default()
 	serverCfg.WireGuard.PrivateKey = serverKey.String()
@@ -482,8 +480,7 @@ func TestUnixSeqpacketTCPForward(t *testing.T) {
 
 	serverKey, clientKey := mustKey(t), mustKey(t)
 	serverPort := freeUDPPort(t)
-	tmp := t.TempDir()
-	seqpacketSock := filepath.Join(tmp, "forward-seqpacket.sock")
+	seqpacketSock := unixSocketPath(t, "forward-seqpacket.sock")
 
 	serverCfg := config.Default()
 	serverCfg.WireGuard.PrivateKey = serverKey.String()
@@ -550,9 +547,8 @@ func TestUnixMessageSocketTCPForwardsAndReverseForwards(t *testing.T) {
 			serverKey, clientKey := mustKey(t), mustKey(t)
 			serverPort := freeUDPPort(t)
 			reverseIP := netip.MustParseAddr("100.64.55.99")
-			tmp := t.TempDir()
-			forwardPath := filepath.Join(tmp, tc.name+"-forward.sock")
-			reversePath := filepath.Join(tmp, tc.name+"-reverse.sock")
+			forwardPath := unixSocketPath(t, tc.name+"-forward.sock")
+			reversePath := unixSocketPath(t, tc.name+"-reverse.sock")
 			forwardEndpoint := tc.scheme + forwardPath
 			reverseEndpoint := tc.scheme + reversePath
 
@@ -639,9 +635,8 @@ func TestUnixSeqpacketUDPForwardsAndReverseForwards(t *testing.T) {
 	serverKey, clientKey := mustKey(t), mustKey(t)
 	serverPort := freeUDPPort(t)
 	reverseIP := netip.MustParseAddr("100.64.56.99")
-	tmp := t.TempDir()
-	forwardPath := filepath.Join(tmp, "forward-seqpacket.sock")
-	reversePath := filepath.Join(tmp, "reverse-seqpacket.sock")
+	forwardPath := unixSocketPath(t, "forward-seqpacket.sock")
+	reversePath := unixSocketPath(t, "reverse-seqpacket.sock")
 	forwardEndpoint := endpoint + forwardPath
 	reverseEndpoint := endpoint + reversePath
 
@@ -718,9 +713,8 @@ func TestUnixStreamUDPForwardsAndReverseForwards(t *testing.T) {
 	serverKey, clientKey := mustKey(t), mustKey(t)
 	serverPort := freeUDPPort(t)
 	reverseIP := netip.MustParseAddr("100.64.57.99")
-	tmp := t.TempDir()
-	forwardPath := filepath.Join(tmp, "forward-stream.sock")
-	reversePath := filepath.Join(tmp, "reverse-stream.sock")
+	forwardPath := unixSocketPath(t, "forward-stream.sock")
+	reversePath := unixSocketPath(t, "reverse-stream.sock")
 	forwardEndpoint := "unix+stream://" + forwardPath
 	reverseEndpoint := "unix+stream://" + reversePath
 
@@ -1889,11 +1883,7 @@ AllowedIPs = 100.64.45.9/32
 
 func TestAPIUnixSocketCanOptOutOfToken(t *testing.T) {
 	key := mustKey(t)
-	socketPath := t.TempDir() + "/uwg-api.sock"
-	if runtime.GOOS == "darwin" {
-		socketPath = filepath.Join(os.TempDir(), fmt.Sprintf("uwg-api-%d-%d.sock", os.Getpid(), mrand.Int()))
-		t.Cleanup(func() { _ = os.Remove(socketPath) })
-	}
+	socketPath := unixSocketPath(t, "uwg-api.sock")
 	cfg := config.Default()
 	cfg.WireGuard.PrivateKey = key.String()
 	cfg.WireGuard.Addresses = []string{"100.64.45.10/32"}
@@ -2641,6 +2631,14 @@ func startUnixgramEchoServer(t *testing.T, socketPath string) {
 	go serveUDPEcho(pc)
 }
 
+func unixSocketPath(t *testing.T, name string) string {
+	t.Helper()
+	clean := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-").Replace(name)
+	path := filepath.Join(os.TempDir(), fmt.Sprintf("uwg-%d-%d-%s", os.Getpid(), mrand.Int(), clean))
+	t.Cleanup(func() { _ = os.Remove(path) })
+	return path
+}
+
 func requireUnixSocketSupport(t *testing.T, network string) {
 	t.Helper()
 	if ok, reason := unixSocketSupported(network); !ok {
@@ -3184,7 +3182,7 @@ func unixEndpointRoundTrip(t *testing.T, proto string, ep config.ForwardEndpoint
 	case "unixpacket":
 		conn, err = net.Dial("unixpacket", ep.Address)
 	case "unixgram":
-		conn = dialNamedUnixgram(t, filepath.Join(t.TempDir(), "client.sock"), ep.Address)
+		conn = dialNamedUnixgram(t, unixSocketPath(t, "client.sock"), ep.Address)
 	default:
 		t.Fatalf("unsupported unix endpoint network %q", ep.Network())
 	}
