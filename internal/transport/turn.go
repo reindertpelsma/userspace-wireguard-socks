@@ -25,6 +25,14 @@ import (
 	"github.com/pion/turn/v4"
 )
 
+type turnClient interface {
+	Listen() error
+	Allocate() (net.PacketConn, error)
+	CreatePermission(...net.Addr) error
+	SendBindingRequest() (net.Addr, error)
+	Close()
+}
+
 const (
 	// turnKeepaliveInterval is how often a TURN binding request is sent to
 	// keep the NAT mapping alive.
@@ -50,7 +58,7 @@ type TURNTransport struct {
 	certMgr  *CertManager
 
 	mu                 sync.Mutex
-	client             *turn.Client
+	client             turnClient
 	relayConn          net.PacketConn
 	relayAddr          *net.UDPAddr
 	carrierLocalAddr   string
@@ -105,6 +113,7 @@ func (t *TURNTransport) Dial(ctx context.Context, target string) (Session, error
 		return nil, fmt.Errorf("turn transport %s: resolve target %q: %w", t.name, target, err)
 	}
 	return &turnOutboundSession{
+		transport: t,
 		relayConn: t.relayConn,
 		target:    udpAddr,
 	}, nil
@@ -308,15 +317,41 @@ func (t *TURNTransport) refreshPermissionsLocked() {
 		return
 	}
 	for _, ip := range t.permissionListLocked() {
-		if t.grantedPeers[ip] {
+		key, addr := normalizePermissionAddr(parsePermissionAddr(ip))
+		if key == "" || addr == nil {
 			continue
 		}
-		t.grantedPeers[ip] = true
-		addr := parsePermissionAddr(ip)
-		if addr != nil {
-			_ = t.client.CreatePermission(addr)
+		if t.grantedPeers[key] {
+			continue
+		}
+		if err := t.client.CreatePermission(addr); err == nil {
+			t.grantedPeers[key] = true
 		}
 	}
+}
+
+func (t *TURNTransport) ensurePermission(addr *net.UDPAddr) error {
+	key, permAddr := normalizePermissionAddr(addr)
+	if key == "" || permAddr == nil {
+		return nil
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.open || t.client == nil {
+		return net.ErrClosed
+	}
+	if t.grantedPeers == nil {
+		t.grantedPeers = make(map[string]bool)
+	}
+	if t.grantedPeers[key] {
+		return nil
+	}
+	if err := t.client.CreatePermission(permAddr); err != nil {
+		return err
+	}
+	t.grantedPeers[key] = true
+	return nil
 }
 
 func (t *TURNTransport) permissionListLocked() []string {
@@ -492,6 +527,7 @@ func (l *turnListener) Accept(ctx context.Context) (Session, error) {
 		udpAddr = net.UDPAddrFromAddrPort(ap)
 	}
 	return &turnSession{
+		transport: t,
 		pkt:       buf[:n],
 		from:      udpAddr,
 		relayConn: relayConn,
@@ -515,6 +551,7 @@ func (l *turnListener) Close() error {
 // turnSession represents one inbound TURN datagram.  Writes go back to the
 // source address through the relay.
 type turnSession struct {
+	transport *TURNTransport
 	pkt       []byte
 	from      *net.UDPAddr
 	relayConn net.PacketConn
@@ -530,6 +567,11 @@ func (s *turnSession) ReadPacket() ([]byte, error) {
 }
 
 func (s *turnSession) WritePacket(pkt []byte) error {
+	if s.transport != nil {
+		if err := s.transport.ensurePermission(s.from); err != nil {
+			return err
+		}
+	}
 	_, err := s.relayConn.WriteTo(pkt, s.from)
 	return err
 }
@@ -545,6 +587,7 @@ func (s *turnSession) SessionInfo() SessionInfo {
 }
 
 type turnOutboundSession struct {
+	transport *TURNTransport
 	relayConn net.PacketConn
 	target    *net.UDPAddr
 }
@@ -554,6 +597,11 @@ func (s *turnOutboundSession) ReadPacket() ([]byte, error) {
 }
 
 func (s *turnOutboundSession) WritePacket(pkt []byte) error {
+	if s.transport != nil {
+		if err := s.transport.ensurePermission(s.target); err != nil {
+			return err
+		}
+	}
 	_, err := s.relayConn.WriteTo(pkt, s.target)
 	return err
 }
@@ -579,6 +627,21 @@ func parsePermissionAddr(ip string) *net.UDPAddr {
 		return udpAddr
 	}
 	return nil
+}
+
+func normalizePermissionAddr(addr *net.UDPAddr) (string, *net.UDPAddr) {
+	if addr == nil {
+		return "", nil
+	}
+	ip := addr.IP
+	if ip == nil {
+		return "", nil
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		ip = ip4
+	}
+	key := ip.String()
+	return key, &net.UDPAddr{IP: append(net.IP(nil), ip...), Port: 5}
 }
 
 func encryptPubKey(pubKey []byte, password string) (string, error) {

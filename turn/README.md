@@ -312,12 +312,6 @@ Default test suite:
 go test ./...
 ```
 
-The repository also contains a heavier WireGuard integration test behind the `integration` build tag because it depends on a real environment:
-
-```bash
-go test -tags=integration ./...
-```
-
 GitHub Actions runs `go test ./...` in `turn/` on every push. Tagged releases
 also publish standalone TURN binaries for Linux (`amd64`, `arm64`, `riscv64`,
 `mips64`), macOS (`amd64`, `arm64`), and Windows (`amd64`, `arm64`).

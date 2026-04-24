@@ -25,7 +25,8 @@ transports:
       password: secret
       realm: example
       protocol: udp
-      no_create_permission: true
+      permissions:
+        - 198.51.100.10
 ```
 
 Then point the peer at that named transport:
@@ -116,15 +117,20 @@ is: turn it on when the relay is protecting a hidden WireGuard server.
 ## Permissions Versus Relay Policy
 
 For the common “public edge relay in front of one hidden WireGuard server”
-pattern, prefer relay-side policy over fixed TURN permissions.
+pattern, assume the hidden server still needs TURN permissions for the client
+IPs that should be able to reach it.
 
 That usually means:
 
-- `no_create_permission: true` on the `uwgsocks` side
-- a relay policy that decides who may reach the mapped relay port
+- `permissions:` on the `uwgsocks` side for the peers or source ranges that
+  should be able to reach the hidden server
+- relay-side policy and WireGuard guarding on the `turn` side
 
-Static TURN permissions are more useful for mesh or peer-to-peer TURN cases
-than for the “hidden server behind one public relay” pattern.
+For a one-box local demo, that permission is often just `127.0.0.1`.
+
+`no_create_permission: true` is still available for cases where TURN permissions
+are being handled out-of-band, but it is not the current copy-paste path for
+public hidden-server ingress.
 
 ## TURN Over Other Carriers
 

@@ -14,13 +14,11 @@ turn:
   realm: local-turn.example
   username: wireguard
   password: super-secret-turn-password
-  # For WireGuard ingress on the public Internet, let the TURN relay enforce
-  # policy instead of creating per-client permissions.
-  no_create_permission: true
-
-  # Set to true when the TURN relay understands WireGuard-aware usernames and
-  # should filter inbound UDP using the hidden server's public key.
-  include_wg_public_key: false
+  # Local one-box demo: permit the loopback client to reach the hidden server.
+  # For a real deployment, replace this with the client IPs or source ranges
+  # that should be able to reach the mapped relay port.
+  permissions:
+    - 127.0.0.1
 
 inbound:
   transparent: true
