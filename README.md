@@ -1,9 +1,10 @@
 # Userspace WireGuard Socks
 
-Run WireGuard anywhere without root.
+Run WireGuard anywhere without root or system routing changes.
 
 `uwgsocks` is a rootless WireGuard gateway, relay, and application router for
-machines where a kernel VPN is the wrong tool.
+machines where a kernel VPN is the wrong tool or where changing host routes is
+too invasive.
 
 It runs WireGuard in userspace, bridges traffic into a `gVisor` TCP/IP stack,
 and exposes that connectivity through SOCKS5, HTTP, forwards, reverse
@@ -13,6 +14,7 @@ mesh-aware relay logic.
 From the end-user perspective, this is what it buys you:
 
 - run WireGuard inside containers and CI jobs without root
+- route only the apps you choose without taking over the host default route
 - turn a laptop or dev box into a rootless secure egress gateway
 - expose local services through the mesh without opening host ports
 - route legacy binaries through WireGuard with `uwgwrapper`
