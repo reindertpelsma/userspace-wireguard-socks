@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -17,8 +18,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/miekg/dns"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
 )
+
+// base64Std aliases the standard base64 encoder so resolve's Basic-auth header
+// stays readable inline without shadowing the existing url.QueryEscape style.
+var base64Std = base64.StdEncoding
 
 type apiClientOptions struct {
 	endpoint string
@@ -48,6 +54,8 @@ func runAPICommand(args []string) (bool, error) {
 		"forwards":       apiForwardsCommand,
 		"add-forward":    apiAddForwardCommand,
 		"remove-forward": apiRemoveForwardCommand,
+		"resolve":        apiResolveCommand,
+		"dig":            apiResolveCommand,
 	}
 	fn, ok := commands[args[0]]
 	if !ok {
@@ -413,4 +421,110 @@ func apiRemoveForwardCommand(args []string) error {
 	}
 	_, err := opts.request(http.MethodDelete, "/v1/forwards?name="+url.QueryEscape(*name), "", nil)
 	return err
+}
+
+// requestDoH POSTs a binary DNS message to /uwg/resolve. /uwg/resolve is
+// exposed on both the admin API listener (as an alias of /v1/resolve) and the
+// HTTP proxy listener, so this works against either via --api.
+//
+// To stay listener-agnostic the same token is sent two ways:
+//   - Authorization: Bearer <token>          (admin listener)
+//   - Proxy-Authorization: Basic _:<token>   (HTTP proxy listener, with the
+//     empty username path enabled by the optional-proxy-username change)
+//
+// Whichever listener handles the request picks the header it cares about; the
+// other is ignored.
+func (o apiClientOptions) requestDoH(ctx context.Context, query []byte) ([]byte, error) {
+	base := o.endpoint
+	transport := http.DefaultTransport
+	if strings.HasPrefix(base, "unix:") {
+		socket := strings.TrimPrefix(base, "unix:")
+		base = "http://uwg"
+		transport = &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socket)
+		}}
+	} else if !strings.Contains(base, "://") {
+		base = "http://" + base
+	}
+	endpoint := strings.TrimRight(base, "/") + "/uwg/resolve"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(query))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/dns-message")
+	req.Header.Set("Accept", "application/dns-message")
+	if o.token != "" {
+		req.Header.Set("Authorization", "Bearer "+o.token)
+		basic := base64Std.EncodeToString([]byte(":" + o.token))
+		req.Header.Set("Proxy-Authorization", "Basic "+basic)
+	}
+	client := &http.Client{Timeout: 30 * time.Second, Transport: transport}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("DoH request returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "" && !strings.HasPrefix(ct, "application/dns-message") {
+		return nil, fmt.Errorf("DoH response Content-Type = %q, want application/dns-message", ct)
+	}
+	return body, nil
+}
+
+func apiResolveCommand(args []string) error {
+	fs, opts := apiFlagSet("resolve")
+	qtype := fs.String("type", "A", "DNS record type (A, AAAA, CNAME, MX, TXT, NS, PTR, SOA, SRV, ANY)")
+	timeoutS := fs.Int("timeout", 10, "request timeout in seconds")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: uwgsocks resolve [--api URL] [--token TOKEN] [--type TYPE] NAME")
+	}
+	name := dns.Fqdn(fs.Arg(0))
+	rrtype, ok := dns.StringToType[strings.ToUpper(*qtype)]
+	if !ok {
+		return fmt.Errorf("unknown DNS type %q", *qtype)
+	}
+
+	msg := new(dns.Msg)
+	msg.SetQuestion(name, rrtype)
+	msg.RecursionDesired = true
+	wire, err := msg.Pack()
+	if err != nil {
+		return fmt.Errorf("build DNS query: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutS)*time.Second)
+	defer cancel()
+	body, err := opts.requestDoH(ctx, wire)
+	if err != nil {
+		return err
+	}
+	resp := new(dns.Msg)
+	if err := resp.Unpack(body); err != nil {
+		return fmt.Errorf("parse DNS response: %w", err)
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		fmt.Fprintf(os.Stdout, ";; status: %s\n", dns.RcodeToString[resp.Rcode])
+	}
+	for _, q := range resp.Question {
+		fmt.Fprintf(os.Stdout, ";; QUESTION: %s %s %s\n", q.Name, dns.ClassToString[q.Qclass], dns.TypeToString[q.Qtype])
+	}
+	if len(resp.Answer) == 0 {
+		fmt.Fprintln(os.Stdout, ";; ANSWER: (none)")
+		return nil
+	}
+	fmt.Fprintln(os.Stdout, ";; ANSWER:")
+	for _, rr := range resp.Answer {
+		fmt.Fprintln(os.Stdout, rr.String())
+	}
+	return nil
 }
