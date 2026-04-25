@@ -65,15 +65,26 @@ func TestUwgsocksResolveSubcommandWorksOnBothListeners(t *testing.T) {
 				"localhost",
 			)
 			out, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("uwgsocks resolve failed: %v\n%s", err, out)
+			outStr := string(out)
+			// Some CI runners (notably the GitHub Windows image) have no
+			// system DNS resolvers configured, so the daemon's
+			// exchangeSystemDNSPacket returns 502 "no system DNS servers".
+			// That still proves the CLI plumbing works end-to-end (auth
+			// headers accepted, DoH wire format round-tripped, the right
+			// listener handled the request) — the missing piece is upstream
+			// DNS, which is environmental, not a code issue.
+			if err != nil && strings.Contains(outStr, "no system DNS servers") {
+				t.Skipf("no system DNS configured on this runner; CLI plumbing reached the daemon and was rejected upstream:\n%s", outStr)
 			}
-			lower := strings.ToLower(string(out))
+			if err != nil {
+				t.Fatalf("uwgsocks resolve failed: %v\n%s", err, outStr)
+			}
+			lower := strings.ToLower(outStr)
 			if !strings.Contains(lower, "answer") {
-				t.Fatalf("expected ANSWER section in output:\n%s", out)
+				t.Fatalf("expected ANSWER section in output:\n%s", outStr)
 			}
 			if !strings.Contains(lower, "127.0.0.1") && !strings.Contains(lower, "::1") {
-				t.Logf("note: localhost did not resolve to loopback in test env, output:\n%s", out)
+				t.Logf("note: localhost did not resolve to loopback in test env, output:\n%s", outStr)
 			}
 		})
 	}
