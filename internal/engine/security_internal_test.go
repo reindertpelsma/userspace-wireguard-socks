@@ -374,6 +374,36 @@ func TestProxyResolveRequiresAndAcceptsBasicAuth(t *testing.T) {
 	}
 }
 
+func TestProxyCredentialsOptionalUsername(t *testing.T) {
+	cases := []struct {
+		name     string
+		cfgUser  string
+		cfgPass  string
+		gotUser  string
+		gotPass  string
+		expectOK bool
+	}{
+		{name: "no auth configured allows anything", expectOK: true},
+		{name: "no auth configured ignores supplied creds", gotUser: "x", gotPass: "y", expectOK: true},
+
+		{name: "username+password both required (good)", cfgUser: "u", cfgPass: "p", gotUser: "u", gotPass: "p", expectOK: true},
+		{name: "username+password both required (wrong user)", cfgUser: "u", cfgPass: "p", gotUser: "v", gotPass: "p", expectOK: false},
+		{name: "username+password both required (wrong pass)", cfgUser: "u", cfgPass: "p", gotUser: "u", gotPass: "q", expectOK: false},
+
+		{name: "password-only accepts any username", cfgPass: "p", gotUser: "anything", gotPass: "p", expectOK: true},
+		{name: "password-only accepts empty username", cfgPass: "p", gotUser: "", gotPass: "p", expectOK: true},
+		{name: "password-only rejects wrong password", cfgPass: "p", gotUser: "anything", gotPass: "wrong", expectOK: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &Engine{cfg: config.Config{Proxy: config.Proxy{Username: tc.cfgUser, Password: tc.cfgPass}}}
+			if got := e.proxyCredentialsOK(tc.gotUser, tc.gotPass); got != tc.expectOK {
+				t.Fatalf("proxyCredentialsOK(user=%q,pass=%q) = %v, want %v", tc.gotUser, tc.gotPass, got, tc.expectOK)
+			}
+		})
+	}
+}
+
 func TestTunnelDNSTCPClosesIdleClient(t *testing.T) {
 	oldDeadline := tunnelDNSTCPDeadline.Load()
 	tunnelDNSTCPDeadline.Store(int64(40 * time.Millisecond))

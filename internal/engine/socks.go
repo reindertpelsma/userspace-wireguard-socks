@@ -226,12 +226,20 @@ func (e *Engine) proxyAuthRequired() bool {
 	return e.cfg.Proxy.Username != "" || e.cfg.Proxy.Password != ""
 }
 
+// proxyCredentialsOK validates SOCKS5 / HTTP-Basic credentials against the
+// configured proxy.username and proxy.password. proxy.username is optional —
+// when it's empty, the client may present any username (or none) and only the
+// password is checked. This lets newer integrations omit the username entirely
+// while existing configs that set both keep working unchanged.
 func (e *Engine) proxyCredentialsOK(username, password string) bool {
 	if !e.proxyAuthRequired() {
 		return true
 	}
-	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(e.cfg.Proxy.Username)) == 1
 	passOK := subtle.ConstantTimeCompare([]byte(password), []byte(e.cfg.Proxy.Password)) == 1
+	if e.cfg.Proxy.Username == "" {
+		return passOK
+	}
+	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(e.cfg.Proxy.Username)) == 1
 	return userOK && passOK
 }
 
