@@ -375,9 +375,9 @@ func TestProxyResolveRequiresAndAcceptsBasicAuth(t *testing.T) {
 }
 
 func TestTunnelDNSTCPClosesIdleClient(t *testing.T) {
-	oldDeadline := tunnelDNSTCPDeadline
-	tunnelDNSTCPDeadline = 40 * time.Millisecond
-	defer func() { tunnelDNSTCPDeadline = oldDeadline }()
+	oldDeadline := tunnelDNSTCPDeadline.Load()
+	tunnelDNSTCPDeadline.Store(int64(40 * time.Millisecond))
+	defer tunnelDNSTCPDeadline.Store(oldDeadline)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

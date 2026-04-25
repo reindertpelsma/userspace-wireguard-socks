@@ -1188,9 +1188,18 @@ func mergeWGQuick(dst *WireGuard, text string, strict bool) error {
 		switch section {
 		case "interface":
 			if strict {
+				// Strict-mode INI comes from a source we don't fully trust
+				// (the runtime API or a downloaded .conf). The hook keys are
+				// silently *dropped*, not rejected — wg-quick configs in the
+				// wild routinely carry routing-table PostUp/PostDown lines
+				// that are meaningless for this userspace runtime, and we
+				// shouldn't refuse the whole config just because the operator
+				// pasted one in. Execution is still gated by scripts.allow
+				// at the engine layer (engine.go), so dropping at parse time
+				// is sufficient defense-in-depth for the strict path.
 				switch key {
 				case "preup", "postup", "predown", "postdown":
-					return fmt.Errorf("wg config line %d: %s is not allowed in untrusted wg-quick input", lineNo, key)
+					continue
 				}
 			}
 			if err := setInterface(dst, key, value); err != nil {

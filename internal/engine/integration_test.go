@@ -1833,11 +1833,13 @@ func TestAPIServerPeerAndACL(t *testing.T) {
 
 	scriptPath := t.TempDir() + "/should-not-exist"
 	replacementPeer := mustKey(t)
-	// First: a wg-quick body that contains script hooks must be REJECTED at
-	// parse time by the strict runtime-API parser. The previous behavior was
-	// to silently drop them — that's now a 4xx so a hostile or careless
-	// caller cannot stage a hook that some other layer might later run.
-	hostileText := fmt.Sprintf(`[Interface]
+	// A wg-quick body submitted via the runtime API is allowed to contain
+	// script hooks — they are silently dropped by the strict parser instead
+	// of rejecting the entire config (operators routinely paste wg-quick
+	// snippets that include routing-table PostUp/PostDown that are no-ops
+	// here). The engine's separate scripts.allow=false guard ensures the
+	// hooks never *run*, which we re-verify after the API call returns.
+	wgText := fmt.Sprintf(`[Interface]
 PrivateKey = %s
 PreUp = touch %s
 PostUp = touch %s
@@ -1849,25 +1851,12 @@ PublicKey = %s
 AllowedIPs = 100.64.45.9/32
 PersistentKeepalive = 7
 `, serverKey.String(), scriptPath, scriptPath, scriptPath, scriptPath, replacementPeer.PublicKey().String())
-	resp, body = apiRawRequest(t, eng.Addr("api"), "secret", http.MethodPut, "/v1/wireguard/config", "text/plain", []byte(hostileText))
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 rejecting hostile wg-quick (PreUp) via API, got %d: %s", resp.StatusCode, body)
-	}
-	if _, err := os.Stat(scriptPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("runtime WireGuard config API executed scripts; stat err=%v", err)
-	}
-	// Now the safe path: same payload, no script keys. Must still apply.
-	wgText := fmt.Sprintf(`[Interface]
-PrivateKey = %s
-
-[Peer]
-PublicKey = %s
-AllowedIPs = 100.64.45.9/32
-PersistentKeepalive = 7
-`, serverKey.String(), replacementPeer.PublicKey().String())
 	resp, body = apiRawRequest(t, eng.Addr("api"), "secret", http.MethodPut, "/v1/wireguard/config", "text/plain", []byte(wgText))
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("wireguard config replace status %d: %s", resp.StatusCode, body)
+	}
+	if _, err := os.Stat(scriptPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("runtime WireGuard config API executed scripts; stat err=%v", err)
 	}
 	peers := eng.Peers()
 	if len(peers) != 1 || peers[0].PublicKey != replacementPeer.PublicKey().String() || peers[0].PersistentKeepalive != 7 {

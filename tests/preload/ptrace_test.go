@@ -787,10 +787,15 @@ func startWrappedListenerProcess(t *testing.T, art wrapperArtifacts, httpSock, t
 		if err == nil && strings.TrimSpace(ready) == "READY" {
 			return cmd, &stderr, done
 		}
-		lastErr = err
-		lastStderr = stderr.String()
+		// Kill and drain BEFORE reading stderr — os/exec's stderr-copy
+		// goroutine writes into the bytes.Buffer until cmd.Wait() returns
+		// (which is what `<-done` blocks on). Reading stderr.String() while
+		// that goroutine is still active is a textbook data race the -race
+		// detector will flag.
 		killProcessGroup(cmd)
 		<-done
+		lastErr = err
+		lastStderr = stderr.String()
 		if runningRestrictedGVisor() && unsupportedWrappedMode(stderr.Bytes()) {
 			t.Skipf("skipping wrapper mode %q on restricted gVisor kernel: %s", transport, strings.TrimSpace(stderr.String()))
 		}
@@ -799,9 +804,9 @@ func startWrappedListenerProcess(t *testing.T, art wrapperArtifacts, httpSock, t
 			continue
 		}
 		if err != nil {
-			t.Fatalf("listener did not become ready: %v\nstderr=%s", err, stderr.String())
+			t.Fatalf("listener did not become ready: %v\nstderr=%s", err, lastStderr)
 		}
-		t.Fatalf("listener readiness = %q\nstderr=%s", ready, stderr.String())
+		t.Fatalf("listener readiness = %q\nstderr=%s", ready, lastStderr)
 	}
 	t.Fatalf("listener did not become ready after retries: %v\nstderr=%s", lastErr, lastStderr)
 	return nil, nil, nil

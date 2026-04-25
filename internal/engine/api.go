@@ -346,24 +346,17 @@ func apiListenRequiresToken(addr string, allowUnauthenticatedUnix bool) bool {
 	return ip == nil || !ip.IsLoopback()
 }
 
-// apiAlwaysAuthPaths must require an Authorization token even when the API is
-// served on a Unix socket with AllowUnauthenticatedUnix=true. /v1/resolve and
-// /uwg/resolve are gated unconditionally because an unauthenticated local
-// caller can otherwise pump arbitrary DNS queries through the system resolver
-// and read the answers, turning the daemon into a DoH amplifier and a cache-
-// shaping side channel for any sibling process on the host.
-var apiAlwaysAuthPaths = map[string]bool{
-	"/v1/resolve":  true,
-	"/uwg/resolve": true,
-}
-
 func (e *Engine) apiAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := e.cfg.API.Token
 		allowUnix := e.cfg.API.AllowUnauthenticatedUnix
 		isUnix := r.RemoteAddr == "@" || r.RemoteAddr == "" || strings.HasPrefix(r.RemoteAddr, "/")
-		mustAuth := apiAlwaysAuthPaths[r.URL.Path]
-		if isUnix && allowUnix && !mustAuth {
+		// AllowUnauthenticatedUnix is the operator's explicit declaration
+		// that anyone who can connect(2) to this socket is trusted with the
+		// full admin surface (which already includes /v1/socket — the raw
+		// socket API can dial anywhere). We honor that across endpoints
+		// instead of carving out exceptions per path.
+		if isUnix && allowUnix {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -376,9 +369,6 @@ func (e *Engine) apiAuth(next http.Handler) http.Handler {
 				writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 				return
 			}
-		} else if mustAuth {
-			writeAPIError(w, http.StatusUnauthorized, "api.token must be configured to access this endpoint")
-			return
 		}
 		next.ServeHTTP(w, r)
 	})

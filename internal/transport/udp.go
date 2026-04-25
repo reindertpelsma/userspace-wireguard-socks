@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 )
 
 // UDPTransport is a not-connection-oriented transport that sends and receives
@@ -124,9 +125,14 @@ func (s *udpSession) SessionInfo() SessionInfo {
 type udpListener struct {
 	conns []*net.UDPConn
 	name  string
-	// acceptCh funnels inbound packets from all listener goroutines.
+
+	startOnce sync.Once
+	closeOnce sync.Once
+	// acceptCh funnels inbound packets from all listener goroutines. Reads
+	// are gated by closeCh so we never close acceptCh while readLoop might
+	// still be writing to it (closed-channel-send panic).
 	acceptCh chan inboundUDP
-	once     chan struct{} // closed when started
+	closeCh  chan struct{}
 }
 
 type inboundUDP struct {
@@ -136,12 +142,13 @@ type inboundUDP struct {
 }
 
 func (l *udpListener) start() {
-	l.acceptCh = make(chan inboundUDP, 256)
-	l.once = make(chan struct{})
-	close(l.once)
-	for _, uc := range l.conns {
-		go l.readLoop(uc)
-	}
+	l.startOnce.Do(func() {
+		l.acceptCh = make(chan inboundUDP, 256)
+		l.closeCh = make(chan struct{})
+		for _, uc := range l.conns {
+			go l.readLoop(uc)
+		}
+	})
 }
 
 func (l *udpListener) readLoop(uc *net.UDPConn) {
@@ -151,21 +158,25 @@ func (l *udpListener) readLoop(uc *net.UDPConn) {
 		if err != nil {
 			return
 		}
-		l.acceptCh <- inboundUDP{data: buf[:n], from: ap, conn: uc}
+		// Bail if Close() ran between the read returning and now, so we
+		// don't block forever (acceptCh may have no reader) and so we
+		// don't send into a channel that's about to be drained-and-gone.
+		select {
+		case l.acceptCh <- inboundUDP{data: buf[:n], from: ap, conn: uc}:
+		case <-l.closeCh:
+			return
+		}
 	}
 }
 
 func (l *udpListener) Accept(ctx context.Context) (Session, error) {
-	if l.once == nil {
-		l.start()
-	}
+	l.start()
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case pkt, ok := <-l.acceptCh:
-		if !ok {
-			return nil, net.ErrClosed
-		}
+	case <-l.closeCh:
+		return nil, net.ErrClosed
+	case pkt := <-l.acceptCh:
 		return &udpListenerSession{
 			pkt:    pkt.data,
 			from:   pkt.from,
@@ -182,14 +193,17 @@ func (l *udpListener) Addr() net.Addr {
 }
 
 func (l *udpListener) Close() error {
+	l.closeOnce.Do(func() {
+		// Ensure start() ran so closeCh exists, then signal shutdown
+		// before unblocking readLoop's UDP read by closing the sockets.
+		l.start()
+		close(l.closeCh)
+	})
 	var first error
 	for _, uc := range l.conns {
 		if err := uc.Close(); err != nil && first == nil {
 			first = err
 		}
-	}
-	if l.acceptCh != nil {
-		close(l.acceptCh)
 	}
 	return first
 }

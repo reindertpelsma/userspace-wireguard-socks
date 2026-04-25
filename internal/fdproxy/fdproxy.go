@@ -559,9 +559,8 @@ func (s *Server) addTCPListenerMember(local net.Conn, req connectRequest) (*tcpL
 			}
 			existing.addMemberLocked(member)
 			s.tcpMembers[member.token] = member
-			reply := existing.replyBind
 			s.mu.Unlock()
-			return member, reply, nil
+			return member, existing.getReplyBind(), nil
 		}
 	}
 	group := &tcpListenerGroup{
@@ -588,7 +587,7 @@ func (s *Server) addTCPListenerMember(local net.Conn, req connectRequest) (*tcpL
 		group.close()
 		return nil, netip.AddrPort{}, err
 	}
-	return member, group.replyBind, nil
+	return member, group.getReplyBind(), nil
 }
 
 func (g *tcpListenerGroup) start(req connectRequest) error {
@@ -628,7 +627,7 @@ func (g *tcpListenerGroup) start(req connectRequest) error {
 		} else if requestLoopback {
 			displayIP = loopBind.Addr()
 		}
-		g.replyBind = netip.AddrPortFrom(displayIP, port)
+		g.setReplyBind(netip.AddrPortFrom(displayIP, port))
 		go g.serveLoopback()
 	}
 	if g.allowTunnel {
@@ -643,7 +642,7 @@ func (g *tcpListenerGroup) start(req connectRequest) error {
 		} else {
 			g.up = up
 			g.upID = socketproto.ClientIDBase + 1
-			if !g.replyBind.IsValid() {
+			if !g.getReplyBind().IsValid() {
 				replyIP := req.bindIP
 				if !replyIP.IsValid() {
 					replyIP = bind.Addr()
@@ -651,17 +650,17 @@ func (g *tcpListenerGroup) start(req connectRequest) error {
 				if req.bindIP.IsValid() && req.bindIP.IsUnspecified() {
 					replyIP = unspecifiedFor(bind.Addr())
 				}
-				g.replyBind = netip.AddrPortFrom(replyIP, bind.Port())
+				g.setReplyBind(netip.AddrPortFrom(replyIP, bind.Port()))
 			}
 			go g.serveUpstream()
 		}
 	}
-	if !g.replyBind.IsValid() {
+	if !g.getReplyBind().IsValid() {
 		if requestSpecific {
-			g.replyBind = netip.AddrPortFrom(req.bindIP, req.bindPort)
+			g.setReplyBind(netip.AddrPortFrom(req.bindIP, req.bindPort))
 		} else {
 			port, _ = allocateEphemeralPort(req.bindIP)
-			g.replyBind = netip.AddrPortFrom(unspecifiedFor(req.bindIP), port)
+			g.setReplyBind(netip.AddrPortFrom(unspecifiedFor(req.bindIP), port))
 		}
 		g.dummy = true
 	}
@@ -714,6 +713,23 @@ func (g *tcpListenerGroup) addMemberLocked(member *tcpListenerMember) {
 	defer g.mu.Unlock()
 	g.members[member.token] = member
 	g.order = append(g.order, member.token)
+}
+
+// setReplyBind / getReplyBind: replyBind is written by start() (which runs
+// after the group is published to s.tcpGroups for the first member, so a
+// concurrent addTCPListenerMember picking up the same group from the map
+// would race the start() writes with the s.mu-protected reader). Both sides
+// take g.mu so the field has a consistent value across publication.
+func (g *tcpListenerGroup) setReplyBind(ap netip.AddrPort) {
+	g.mu.Lock()
+	g.replyBind = ap
+	g.mu.Unlock()
+}
+
+func (g *tcpListenerGroup) getReplyBind() netip.AddrPort {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.replyBind
 }
 
 func (m *tcpListenerMember) watch() {
@@ -1042,9 +1058,8 @@ func (s *Server) addUDPListenerMember(local net.Conn, req connectRequest) (*udpL
 			}
 			token := s.nextToken("udp-member-")
 			existing.addMemberLocked(token, local)
-			reply := existing.replyBind
 			s.mu.Unlock()
-			return existing, token, reply, nil
+			return existing, token, existing.getReplyBind(), nil
 		}
 	}
 	group := &udpListenerGroup{
@@ -1065,7 +1080,20 @@ func (s *Server) addUDPListenerMember(local net.Conn, req connectRequest) (*udpL
 		group.close()
 		return nil, "", netip.AddrPort{}, err
 	}
-	return group, token, group.replyBind, nil
+	return group, token, group.getReplyBind(), nil
+}
+
+// setReplyBind / getReplyBind: see the tcp variant — same race shape.
+func (g *udpListenerGroup) setReplyBind(ap netip.AddrPort) {
+	g.mu.Lock()
+	g.replyBind = ap
+	g.mu.Unlock()
+}
+
+func (g *udpListenerGroup) getReplyBind() netip.AddrPort {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.replyBind
 }
 
 func (g *udpListenerGroup) addMemberLocked(token string, local net.Conn) {
@@ -1103,7 +1131,7 @@ func (g *udpListenerGroup) start(req connectRequest) error {
 		} else if requestLoopback {
 			displayIP = loopBind.Addr()
 		}
-		g.replyBind = netip.AddrPortFrom(displayIP, port)
+		g.setReplyBind(netip.AddrPortFrom(displayIP, port))
 		go g.serveLoopback()
 	}
 
@@ -1117,20 +1145,20 @@ func (g *udpListenerGroup) start(req connectRequest) error {
 	} else {
 		g.up = up
 		g.upID = socketproto.ClientIDBase + 1
-		if !g.replyBind.IsValid() {
+		if !g.getReplyBind().IsValid() {
 			replyIP := req.bindIP
 			if requestUnspecified {
 				replyIP = unspecifiedFor(bind.Addr())
 			} else if !replyIP.IsValid() {
 				replyIP = bind.Addr()
 			}
-			g.replyBind = netip.AddrPortFrom(replyIP, bind.Port())
+			g.setReplyBind(netip.AddrPortFrom(replyIP, bind.Port()))
 		}
 		go g.serveUpstream()
 	}
-	if !g.replyBind.IsValid() {
+	if !g.getReplyBind().IsValid() {
 		port, _ = allocateEphemeralPort(req.bindIP)
-		g.replyBind = netip.AddrPortFrom(unspecifiedFor(req.bindIP), port)
+		g.setReplyBind(netip.AddrPortFrom(unspecifiedFor(req.bindIP), port))
 	}
 	_ = requestSpecific
 	return nil
@@ -1293,10 +1321,17 @@ func (g *udpListenerGroup) ownerFor(remote netip.AddrPort) string {
 }
 
 func (g *udpListenerGroup) removeMember(token string) {
+	// g.order is owned by g.mu — the previous version read it here while
+	// only holding g.server.mu, racing the writer below (and any writer in
+	// addMemberLocked). Lock order is s.mu → g.mu (matches the rest of the
+	// file) so this nesting cannot deadlock.
 	g.server.mu.Lock()
-	if current := g.server.udpGroups[g.key]; current == g && len(g.order) == 1 && g.order[0] == token {
+	g.mu.Lock()
+	soleMember := len(g.order) == 1 && g.order[0] == token
+	if current := g.server.udpGroups[g.key]; current == g && soleMember {
 		delete(g.server.udpGroups, g.key)
 	}
+	g.mu.Unlock()
 	g.server.mu.Unlock()
 
 	g.mu.Lock()

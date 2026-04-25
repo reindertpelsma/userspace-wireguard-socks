@@ -218,7 +218,11 @@ func (b *MultiTransportBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, erro
 				}
 			}
 		}
-		go b.acceptLoop(ctx, entry)
+		// Capture this Open's closed channel for the acceptLoop. Reading
+		// b.closed inside the loop would race with a subsequent Open after
+		// Close (BindUpdate is exactly that pattern), since Open reassigns
+		// the field under b.mu while the prior acceptLoop is still draining.
+		go b.acceptLoop(ctx, entry, b.closed)
 	}
 	if chosenPort == 0 {
 		chosenPort = port
@@ -258,13 +262,15 @@ func (b *MultiTransportBind) receiveFunc() conn.ReceiveFunc {
 }
 
 // acceptLoop runs per listener and routes inbound sessions into recvCh.
-func (b *MultiTransportBind) acceptLoop(ctx context.Context, entry listenEntry) {
+// closed is captured at goroutine creation time (see Open) so a later Open
+// reassigning b.closed cannot race the read here.
+func (b *MultiTransportBind) acceptLoop(ctx context.Context, entry listenEntry, closed <-chan struct{}) {
 	for {
 		sess, err := entry.listener.Accept(ctx)
 		if err != nil {
 			select {
 			case <-ctx.Done():
-			case <-b.closed:
+			case <-closed:
 			default:
 			}
 			return

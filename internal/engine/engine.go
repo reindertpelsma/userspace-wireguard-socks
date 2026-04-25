@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -143,8 +144,16 @@ var (
 	proxyHTTPReadTimeout       = 15 * time.Second
 	proxyHTTPWriteTimeout      = 30 * time.Second
 	proxyHTTPIdleTimeout       = 30 * time.Second
-	tunnelDNSTCPDeadline       = 10 * time.Second
 )
+
+// tunnelDNSTCPDeadline is the per-message read+write deadline for the
+// tunnel-side DNS-over-TCP listener. atomic.Int64 (nanoseconds) so tests can
+// shorten it without racing the production read in serveTunnelDNSTCP.
+var tunnelDNSTCPDeadline atomic.Int64
+
+func init() {
+	tunnelDNSTCPDeadline.Store(int64(10 * time.Second))
+}
 
 func New(cfg config.Config, logger *log.Logger) (*Engine, error) {
 	if logger == nil {
@@ -2075,7 +2084,7 @@ func (e *Engine) serveTunnelDNSTCP(ln net.Listener) {
 			defer c.Close()
 			dc := &dns.Conn{Conn: c}
 			for {
-				_ = c.SetDeadline(time.Now().Add(tunnelDNSTCPDeadline))
+				_ = c.SetDeadline(time.Now().Add(time.Duration(tunnelDNSTCPDeadline.Load())))
 				req, err := dc.ReadMsg()
 				if err != nil {
 					return
