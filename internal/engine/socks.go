@@ -90,6 +90,9 @@ func (e *Engine) acquireSOCKSConnSlot() bool {
 	case sem <- struct{}{}:
 		return true
 	default:
+		if e.metrics != nil {
+			e.metrics.socksConnectionsCapped.Add(1)
+		}
 		return false
 	}
 }

@@ -39,6 +39,10 @@ const maxTurnCarrierPeers = 4096
 // capacity. Callers reject the upgrade.
 var errTurnCarrierFull = errors.New("turn carrier: too many concurrent peers")
 
+// TurnCarrierDropsTotal lives in turn_carriers_metrics.go so the metrics
+// reference is available even in lite builds (where no TURN carriers exist
+// and the counter therefore stays zero).
+
 type turnMuxPacketConn struct {
 	local     net.Addr
 	closeFn   func() error
@@ -119,6 +123,7 @@ func (c *turnMuxPacketConn) deliver(addr net.Addr, payload []byte) {
 }
 
 func (c *turnMuxPacketConn) recordDrop() {
+	TurnCarrierDropsTotal.Add(1)
 	c.dropMu.Lock()
 	c.drops++
 	now := time.Now()

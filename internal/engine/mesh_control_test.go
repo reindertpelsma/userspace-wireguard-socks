@@ -887,7 +887,7 @@ func TestMeshControlRateLimiter(t *testing.T) {
 		called++
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := meshControlRateLimit(inner)
+	handler := (&Engine{}).meshControlRateLimit(inner)
 
 	hit := func(remote string) int {
 		req := httptest.NewRequest(http.MethodGet, "/v1/challenge", nil)

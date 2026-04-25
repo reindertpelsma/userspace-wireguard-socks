@@ -307,7 +307,7 @@ func (e *Engine) startMeshControlServer() error {
 	mux.HandleFunc("/v1/acls", e.handleMeshControlACLs)
 	mux.HandleFunc("/v1/subscribe", e.handleMeshControlNotImplemented)
 
-	server := e.proxyHTTPServer(meshControlRateLimit(mux))
+	server := e.proxyHTTPServer(e.meshControlRateLimit(mux))
 	go func() {
 		if err := server.Serve(ln); err != nil && !isClosedErr(err) {
 			e.log.Printf("mesh control stopped: %v", err)
@@ -331,7 +331,7 @@ const (
 	meshControlMaxBuckets        = 4096
 )
 
-func meshControlRateLimit(next http.Handler) http.Handler {
+func (e *Engine) meshControlRateLimit(next http.Handler) http.Handler {
 	bucketsMu := sync.Mutex{}
 	buckets := make(map[string]*meshRateBucket)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -361,9 +361,15 @@ func meshControlRateLimit(next http.Handler) http.Handler {
 		}
 		bucketsMu.Unlock()
 		if !ok {
+			if e.metrics != nil {
+				e.metrics.meshRequestsRateLimited.Add(1)
+			}
 			w.Header().Set("Retry-After", "1")
 			writeAPIError(w, http.StatusTooManyRequests, "mesh control rate limit exceeded")
 			return
+		}
+		if e.metrics != nil {
+			e.metrics.meshRequestsOK.Add(1)
 		}
 		next.ServeHTTP(w, r)
 	})

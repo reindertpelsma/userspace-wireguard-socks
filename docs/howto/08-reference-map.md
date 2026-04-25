@@ -22,6 +22,7 @@ full behavioral contract.
 - [Compatibility matrix](../reference/compatibility.md)
 - [Testing notes](../reference/testing.md)
 - [Security model](../reference/security-model.md)
+- [Metrics](../reference/metrics.md)
 - [Standalone TURN daemon](../../turn/README.md)
 
 ## What To Read For Specific Jobs

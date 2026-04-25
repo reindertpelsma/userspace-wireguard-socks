@@ -263,6 +263,9 @@ func (e *Engine) relayCanAddFlowLocked(meta relayPacketMeta) bool {
 		maxFlows = 65536
 	}
 	if len(e.relayFlows) >= maxFlows {
+		if e.metrics != nil {
+			e.metrics.conntrackRefusals.Add(1)
+		}
 		return false
 	}
 	maxPerPeer := e.cfg.Relay.ConntrackMaxPerPeer
@@ -270,7 +273,13 @@ func (e *Engine) relayCanAddFlowLocked(meta relayPacketMeta) bool {
 		maxPerPeer = 4096
 	}
 	peer := e.relayPeerKey(meta.src.Addr())
-	return e.relayFlowPeers[peer] < maxPerPeer
+	if e.relayFlowPeers[peer] >= maxPerPeer {
+		if e.metrics != nil {
+			e.metrics.conntrackRefusals.Add(1)
+		}
+		return false
+	}
+	return true
 }
 
 func (e *Engine) relayPeerKey(ip netip.Addr) string {

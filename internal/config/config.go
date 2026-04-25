@@ -53,6 +53,31 @@ type Config struct {
 	DNSServer       DNSServer `yaml:"dns_server"`
 	Scripts         Scripts   `yaml:"scripts"`
 	Log             Log       `yaml:"log"`
+	Metrics         Metrics   `yaml:"metrics"`
+}
+
+// Metrics configures the optional Prometheus-compatible /metrics endpoint.
+// It is hosted on a separate listener from the admin API so the scrape
+// secret can be a different one (or none) — Prometheus scrape configs are
+// commonly committed to git or shared across teams, and we don't want that
+// secret to imply admin access. See docs/reference/metrics.md.
+type Metrics struct {
+	// Listen is the TCP host:port (or "unix:/path") for the metrics
+	// endpoint. Empty disables the metrics subsystem entirely.
+	Listen string `yaml:"listen"`
+	// Token, if non-empty, is required as a Bearer token on /metrics.
+	// Empty means the endpoint is unauthenticated — fine for loopback /
+	// firewalled bind addresses, dangerous otherwise. The operator picks.
+	Token string `yaml:"token"`
+	// PerPeerDetail emits per-peer time series (bytes, last_handshake).
+	// Off by default because hub deployments can have thousands of peers
+	// and Prometheus cardinality scales linearly. Capped at MaxPerPeer
+	// regardless of how many peers exist.
+	PerPeerDetail bool `yaml:"per_peer_detail"`
+	// MaxPerPeer caps the number of per-peer series emitted when
+	// PerPeerDetail is true. Beyond this, an "_overflow" peer label
+	// catches the rest in aggregate. Zero or negative means use default.
+	MaxPerPeer int `yaml:"max_per_peer"`
 }
 
 type WireGuard struct {
@@ -697,6 +722,9 @@ func (c *Config) Normalize() error {
 	}
 	if c.DNSServer.MaxInflight < 0 {
 		return fmt.Errorf("dns_server.max_inflight must be >= 0")
+	}
+	if c.Metrics.MaxPerPeer <= 0 {
+		c.Metrics.MaxPerPeer = 1024
 	}
 	if c.MeshControl.ChallengeRotateSeconds == 0 {
 		c.MeshControl.ChallengeRotateSeconds = 120

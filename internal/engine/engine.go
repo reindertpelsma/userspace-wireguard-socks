@@ -30,6 +30,7 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/buildcfg"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/netstackex"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/transport"
@@ -124,6 +125,11 @@ type Engine struct {
 	icmpForwardLimiter *rate.Limiter
 	meshAuth           meshAuthenticator
 	meshMasterKey      [32]byte
+
+	// metrics is non-nil iff metrics.listen is configured. Hot-path
+	// counter increments use atomic operations and are safe to call when
+	// metrics is nil (callers check). See internal/engine/metrics.go.
+	metrics *metricsState
 }
 
 type trackedConn struct {
@@ -380,6 +386,9 @@ func (e *Engine) Start() error {
 		return err
 	}
 	if err := e.startAPIServer(); err != nil {
+		return err
+	}
+	if err := e.startMetricsServer(); err != nil {
 		return err
 	}
 	e.startMeshPolling()
@@ -2189,6 +2198,34 @@ func (e *Engine) addListener(name string, ln net.Listener) {
 	e.addrs[name] = ln.Addr().String()
 	e.log.Printf("%s listening on %s", name, ln.Addr())
 }
+
+// listenerByName returns the named listener if registered, or nil. Used by
+// the metrics endpoint smoke tests to discover the kernel-picked port when
+// metrics.listen ends in :0.
+func (e *Engine) listenerByName(name string) net.Listener {
+	e.listenersMu.Lock()
+	defer e.listenersMu.Unlock()
+	return e.listenerMap[name]
+}
+
+// netstackStats surfaces a small subset of gVisor netstack counters for the
+// metrics layer. Returns nil when no userspace stack is configured (host
+// TUN mode, lite build paths without a netstack, etc.).
+func (e *Engine) netstackStats() *netstackStatsSnapshot {
+	if e.net == nil {
+		return nil
+	}
+	s := e.net.Stats()
+	if s == nil {
+		return nil
+	}
+	return &netstackStatsSnapshot{TCPRetransmits: s.TCPRetransmits}
+}
+
+// liteBuild reports whether this binary was compiled with the "lite" tag.
+// Used as a label on uwgsocks_build_info so an operator can tell from the
+// metrics scrape alone which feature surface is in play.
+func liteBuild() bool { return buildcfg.Lite }
 
 func (e *Engine) addPacketConn(name string, pc net.PacketConn) {
 	e.listenersMu.Lock()
