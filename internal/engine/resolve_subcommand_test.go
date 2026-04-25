@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -28,7 +29,11 @@ func TestUwgsocksResolveSubcommandWorksOnBothListeners(t *testing.T) {
 	repo := strings.TrimSpace(string(repoRoot))
 
 	binDir := t.TempDir()
-	binPath := filepath.Join(binDir, "uwgsocks-resolve-test")
+	binName := "uwgsocks-resolve-test"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	binPath := filepath.Join(binDir, binName)
 	build := exec.Command("go", "build", "-o", binPath, "./cmd/uwgsocks")
 	build.Dir = repo
 	if out, err := build.CombinedOutput(); err != nil {
