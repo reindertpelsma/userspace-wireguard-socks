@@ -30,8 +30,10 @@ image="${1:?usage: $0 <image>}"
 src_dir="${SRC_DIR:-/root/uwgsocks}"
 
 if ! docker image inspect "$image" >/dev/null 2>&1; then
-  echo "FAIL $image  image-not-pulled"
-  exit 1
+  if ! docker pull -q "$image" >/dev/null 2>&1; then
+    echo "FAIL $image  image-pull-failed"
+    exit 1
+  fi
 fi
 
 # Distro-specific install commands. We support apt (debian/ubuntu)

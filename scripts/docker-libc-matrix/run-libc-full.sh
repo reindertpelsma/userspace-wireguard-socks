@@ -29,8 +29,10 @@ src_dir="${SRC_DIR:-/root/uwgsocks}"
 deadline="${DEADLINE:-900}"
 
 if ! docker image inspect "$image" >/dev/null 2>&1; then
-  echo "FAIL $image  image-not-pulled"
-  exit 1
+  if ! docker pull -q "$image" >/dev/null 2>&1; then
+    echo "FAIL $image  image-pull-failed"
+    exit 1
+  fi
 fi
 
 # Pick install commands by distro family. For images with too-old
@@ -104,10 +106,12 @@ result=$(timeout "$deadline" docker run --rm \
 
 if echo "$result" | tail -1 | grep -q '^ALL_OK '; then
   libcver=$(echo "$result" | tail -1 | sed 's/^ALL_OK //')
-  # count pass/fail in test output
-  pkg_pass=$(echo "$result" | grep -c '^ok  ')
-  pkg_fail=$(echo "$result" | grep -c '^FAIL\s' || true)
-  printf "PASS %-22s %-50s pkgs=%d ok\n" "$image" "$libcver" "$pkg_pass"
+  # `tail -200` upstream truncates the per-package "ok ..." lines so
+  # we grep over the WHOLE result. The ALL_OK sentinel proves the
+  # entire suite ran successfully — the printed pkg count here is
+  # informational.
+  pkg_pass=$(echo "$result" | grep -cE '^ok\s' || true)
+  printf "PASS %-22s %-50s pkgs_ok=%d\n" "$image" "$libcver" "$pkg_pass"
   exit 0
 fi
 
