@@ -2348,7 +2348,10 @@ func TestRelayConntrackACLWithThreePeers(t *testing.T) {
 
 	conn := retryEngineDial(t, c1, "tcp", "100.64.50.3:18080")
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	// 5s was too tight under -race on macOS — the dial+write+read
+	// cycle through three WG peers can run >5s under race overhead.
+	// Scale matches the rest of the suite (1× normal, 10× race).
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second * testDeadlineScale))
 	if _, err := conn.Write([]byte("relay-conntrack-three-peers")); err != nil {
 		t.Fatal(err)
 	}
