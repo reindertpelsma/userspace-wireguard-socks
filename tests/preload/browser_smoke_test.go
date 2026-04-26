@@ -137,8 +137,13 @@ func waitForFileContent(t *testing.T, path, want string) {
 func runWrappedTargetBrowser(t *testing.T, art wrapperArtifacts, httpSock, transport, target string, args []string) ([]byte, []byte) {
 	t.Helper()
 
-	base := wrappedCommand(t, art, httpSock, transport, target, args, wrapperRunOptions{timeout: 45 * time.Second})
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	// Chromium startup inside a stripped container (no GPU, fallback
+	// software rendering, missing dbus) can take 30-50s before the
+	// first network request. Add comfortable budget for the wrapped
+	// browser to print --dump-dom output. 180s is well past worst
+	// observed startup; still fails fast on a real hang.
+	base := wrappedCommand(t, art, httpSock, transport, target, args, wrapperRunOptions{timeout: 180 * time.Second})
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, base.Path, base.Args[1:]...)
