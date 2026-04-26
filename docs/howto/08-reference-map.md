@@ -35,4 +35,14 @@ full behavioral contract.
 - Understanding transport tradeoffs: [Transport modes](../reference/transport-modes.md)
 - Running hidden servers behind a TURN edge: [TURN integration and relay modes](../reference/turn.md)
 - Platform caveats: [Compatibility matrix](../reference/compatibility.md)
-- Trust boundaries, defense-in-depth conventions, and per-surface defenses: [Security model](../reference/security-model.md)
+- Trust boundaries, untrusted/trusted sources, and explicit non-goals: [Security model](../reference/security-model.md)
+
+## For contributors changing the code
+
+Operator docs above describe behavior; the docs below describe how that
+behavior is implemented. Read them before opening a PR that touches a
+network-reachable surface, an auth path, or any mutex.
+
+- [Internal docs overview](../internal/README.md)
+- [Per-surface defenses + defense-in-depth conventions](../internal/security-conventions.md)
+- [Lock map for `internal/fdproxy` + preload](../internal/lock-map-fdproxy.md)
