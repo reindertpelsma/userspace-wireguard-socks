@@ -549,6 +549,181 @@ jobs:
           path: dist/${{ matrix.artifact_name }}
           if-no-files-found: error
 
+  # preload + wrapper test matrix across multiple libc versions and
+  # both architectures. The shipped uwgsocks/turn binaries are
+  # CGO_ENABLED=0 static and don't care about libc, but uwgpreload.so
+  # links against the host's libc so it MUST work on every glibc and
+  # musl version we claim to support. This job builds + runs the
+  # preload integration suite against five different libcs (glibc
+  # 2.27 / 2.31 / 2.36 + musl 1.2.x in two flavors) on each arch.
+  # Total: 10 parallel matrix entries; ~3 min wall time.
+  preload-libc-matrix:
+    name: preload libc ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - release-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # glibc 2.27 — Ubuntu 18.04, oldest claimed-supported glibc.
+          # Go 1.10 in repos is too old; install go1.24 from tarball.
+          - name: glibc-2.27-amd64
+            runner: ubuntu-latest
+            image: ubuntu:18.04
+            install: |
+              DEBIAN_FRONTEND=noninteractive apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates >/dev/null
+              wget -q https://go.dev/dl/go1.24.0.linux-amd64.tar.gz -O /tmp/go.tgz
+              tar -C /usr/local -xzf /tmp/go.tgz
+          - name: glibc-2.27-arm64
+            runner: ubuntu-24.04-arm
+            image: ubuntu:18.04
+            install: |
+              DEBIAN_FRONTEND=noninteractive apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates >/dev/null
+              wget -q https://go.dev/dl/go1.24.0.linux-arm64.tar.gz -O /tmp/go.tgz
+              tar -C /usr/local -xzf /tmp/go.tgz
+          # glibc 2.31 — Debian Bullseye / Ubuntu 20.04, golang image
+          # already has Go installed, much faster than tarball install.
+          - name: glibc-2.31-amd64
+            runner: ubuntu-latest
+            image: golang:1.24-bullseye
+            install: 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git >/dev/null'
+          - name: glibc-2.31-arm64
+            runner: ubuntu-24.04-arm
+            image: golang:1.24-bullseye
+            install: 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git >/dev/null'
+          # glibc 2.36 — Debian Bookworm, the current stable.
+          - name: glibc-2.36-amd64
+            runner: ubuntu-latest
+            image: golang:1.24-bookworm
+            install: 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git >/dev/null'
+          - name: glibc-2.36-arm64
+            runner: ubuntu-24.04-arm
+            image: golang:1.24-bookworm
+            install: 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git >/dev/null'
+          # musl 1.2.4 — Alpine 3.18.
+          - name: musl-1.2.4-amd64
+            runner: ubuntu-latest
+            image: golang:1.24-alpine3.19
+            install: 'apk add --no-cache gcc musl-dev linux-headers git'
+          - name: musl-1.2.4-arm64
+            runner: ubuntu-24.04-arm
+            image: golang:1.24-alpine3.19
+            install: 'apk add --no-cache gcc musl-dev linux-headers git'
+          # musl 1.2.5 — Alpine 3.20, current stable.
+          - name: musl-1.2.5-amd64
+            runner: ubuntu-latest
+            image: golang:1.24-alpine3.20
+            install: 'apk add --no-cache gcc musl-dev linux-headers git'
+          - name: musl-1.2.5-arm64
+            runner: ubuntu-24.04-arm
+            image: golang:1.24-alpine3.20
+            install: 'apk add --no-cache gcc musl-dev linux-headers git'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run preload tests in container
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD":/src \
+            -w /src \
+            --cap-add SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            ${{ matrix.image }} \
+            sh -c '${{ matrix.install }}; \
+                   export PATH=/usr/local/go/bin:$PATH; \
+                   git init -q . 2>/dev/null || true; \
+                   go version; \
+                   gcc --version | head -1; \
+                   go test -count=1 -timeout 600s ./tests/preload/... || \
+                     go test -count=1 -timeout 600s ./tests/preload/...'
+
+  # Headless-Chromium smoke through the wrapper across libc/musl
+  # versions. This is a heavier sibling of preload-libc-matrix that
+  # adds Node + Chromium and runs the playwright/headless-chrome smoke
+  # under both bare-ptrace and preload+ptrace transports. Catches the
+  # class of bugs where a real browser hits a syscall pattern simpler
+  # stubs miss (TLS init, asynchronous DNS, multiprocess fd sharing
+  # in the renderer process). One entry per libc family — if it works
+  # for one glibc and one musl, the syscall pattern is portable
+  # enough that we don't need a bigger matrix.
+  preload-chromium-matrix:
+    name: preload chromium ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - release-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: glibc-2.36-amd64
+            runner: ubuntu-latest
+            image: debian:bookworm
+            install: |
+              DEBIAN_FRONTEND=noninteractive apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                gcc libc6-dev git wget ca-certificates \
+                chromium nodejs >/dev/null
+              wget -q https://go.dev/dl/go1.24.0.linux-amd64.tar.gz -O /tmp/go.tgz
+              tar -C /usr/local -xzf /tmp/go.tgz
+            chrome_bin: /usr/bin/chromium
+          - name: glibc-2.36-arm64
+            runner: ubuntu-24.04-arm
+            image: debian:bookworm
+            install: |
+              DEBIAN_FRONTEND=noninteractive apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                gcc libc6-dev git wget ca-certificates \
+                chromium nodejs >/dev/null
+              wget -q https://go.dev/dl/go1.24.0.linux-arm64.tar.gz -O /tmp/go.tgz
+              tar -C /usr/local -xzf /tmp/go.tgz
+            chrome_bin: /usr/bin/chromium
+          - name: musl-amd64
+            runner: ubuntu-latest
+            image: alpine:3.20
+            install: |
+              apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates \
+                chromium nodejs go
+            chrome_bin: /usr/bin/chromium-browser
+          - name: musl-arm64
+            runner: ubuntu-24.04-arm
+            image: alpine:3.20
+            install: |
+              apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates \
+                chromium nodejs go
+            chrome_bin: /usr/bin/chromium-browser
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run headless-chromium smoke through wrapper
+        run: |
+          set -euo pipefail
+          # Run twice — once under bare ptrace (UWGS_BROWSER_SMOKE_TRANSPORT=ptrace),
+          # once under preload+ptrace — so a regression in either
+          # path fails. Bare ptrace is the harder mode (no preload
+          # interposition), so a chromium pass there is a strong
+          # claim that the tracer's full syscall coverage works for
+          # complex multi-process workloads.
+          for transport in ptrace preload-and-ptrace; do
+            echo "=== chromium smoke under $transport ==="
+            docker run --rm \
+              -v "$PWD":/src \
+              -w /src \
+              --cap-add SYS_PTRACE \
+              --security-opt seccomp=unconfined \
+              -e UWGS_RUN_HEADLESS_CHROME_SMOKE=1 \
+              -e UWGS_CHROME_BIN='${{ matrix.chrome_bin }}' \
+              -e UWGS_BROWSER_SMOKE_TRANSPORT=$transport \
+              ${{ matrix.image }} \
+              sh -c '${{ matrix.install }}; \
+                     export PATH=/usr/local/go/bin:$PATH; \
+                     git init -q . 2>/dev/null || true; \
+                     go test -count=1 -timeout 300s -run TestUWGWrapperNodeHeadlessChromeSmoke -v ./tests/preload/...'
+          done
+
   publish-release:
     name: publish release assets
     runs-on: ubuntu-latest
@@ -557,6 +732,8 @@ jobs:
       - build-uwgsocks-lite
       - build-turn
       - build-uwgwrapper
+      - preload-libc-matrix
+      - preload-chromium-matrix
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
