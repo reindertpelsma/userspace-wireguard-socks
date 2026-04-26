@@ -575,11 +575,11 @@ jobs:
           - name: glibc-2.27-amd64
             runner: ubuntu-latest
             image: ubuntu:18.04
-            install: 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates >/dev/null && wget -q https://go.dev/dl/go1.24.0.linux-amd64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
+            install: 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates >/dev/null && wget -q https://go.dev/dl/go1.25.0.linux-amd64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
           - name: glibc-2.27-arm64
             runner: ubuntu-24.04-arm
             image: ubuntu:18.04
-            install: 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates >/dev/null && wget -q https://go.dev/dl/go1.24.0.linux-arm64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
+            install: 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates >/dev/null && wget -q https://go.dev/dl/go1.25.0.linux-arm64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
           # glibc 2.31 — Debian Bullseye / Ubuntu 20.04, golang image
           # already has Go installed, much faster than tarball install.
           - name: glibc-2.31-amd64
@@ -612,11 +612,11 @@ jobs:
           - name: musl-1.2.3-amd64
             runner: ubuntu-latest
             image: alpine:3.16
-            install: 'apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates && wget -q https://go.dev/dl/go1.24.0.linux-amd64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
+            install: 'apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates && wget -q https://go.dev/dl/go1.25.0.linux-amd64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
           - name: musl-1.2.3-arm64
             runner: ubuntu-24.04-arm
             image: alpine:3.16
-            install: 'apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates && wget -q https://go.dev/dl/go1.24.0.linux-arm64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
+            install: 'apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates && wget -q https://go.dev/dl/go1.25.0.linux-arm64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
     steps:
       - uses: actions/checkout@v4
 
@@ -630,7 +630,7 @@ jobs:
             --security-opt seccomp=unconfined \
             ${{ matrix.image }} \
             sh -c '${{ matrix.install }}; \
-                   export PATH=/usr/local/go/bin:$PATH; \
+                   export PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto; \
                    git init -q . 2>/dev/null || true; \
                    go version; \
                    gcc --version | head -1; \
@@ -660,12 +660,12 @@ jobs:
           - name: glibc-2.36-amd64
             runner: ubuntu-latest
             image: debian:bookworm
-            install: 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates chromium nodejs >/dev/null && wget -q https://go.dev/dl/go1.24.0.linux-amd64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
+            install: 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates chromium nodejs >/dev/null && wget -q https://go.dev/dl/go1.25.0.linux-amd64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
             chrome_bin: /usr/bin/chromium
           - name: glibc-2.36-arm64
             runner: ubuntu-24.04-arm
             image: debian:bookworm
-            install: 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates chromium nodejs >/dev/null && wget -q https://go.dev/dl/go1.24.0.linux-arm64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
+            install: 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates chromium nodejs >/dev/null && wget -q https://go.dev/dl/go1.25.0.linux-arm64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
             chrome_bin: /usr/bin/chromium
           - name: musl-amd64
             runner: ubuntu-latest
@@ -701,7 +701,7 @@ jobs:
               -e UWGS_BROWSER_SMOKE_TRANSPORT=$transport \
               ${{ matrix.image }} \
               sh -c '${{ matrix.install }}; \
-                     export PATH=/usr/local/go/bin:$PATH; \
+                     export PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto; \
                      git init -q . 2>/dev/null || true; \
                      go test -buildvcs=false -count=1 -timeout 300s -run TestUWGWrapperNodeHeadlessChromeSmoke -v ./tests/preload/...'
           done
