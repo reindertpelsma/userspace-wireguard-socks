@@ -69,6 +69,34 @@ and every musl in current Alpine releases (1.1.22 → 1.2.5). Both 32-bit-only
 historical libc quirks (Alpine 3.10's musl 1.1) and the very latest glibc
 quirks (e.g., the 2.43+ `select(2)` → `pselect6(2)` mapping) are exercised.
 
+#### `uwgwrapper` full-suite + browser validation
+
+Beyond the smoke test, the local validation matrix exercises the
+**entire `go test ./...`** suite (race-clean, full integration tests)
+under five glibc/musl versions on each arch:
+
+| Distribution | libc | amd64 | arm64 |
+| --- | --- | :---: | :---: |
+| Ubuntu 18.04 | glibc 2.27 | full ✓ | full ✓ |
+| Debian Bullseye | glibc 2.31 | full ✓ | full ✓ |
+| Debian Bookworm | glibc 2.36 | full ✓ | full ✓ |
+| Alpine current (golang:alpine) | musl 1.2.5+ | full ✓ | full ✓ |
+| Alpine 3.16 | musl 1.2.3 | full ✓ | full ✓ |
+
+A separate **headless-Chromium** matrix runs the wrapper end-to-end with
+a real browser through both bare ptrace and preload+ptrace transports.
+This catches the syscall-pattern complexity (TLS init, async DNS,
+multi-process renderer fd sharing) that simpler stubs miss:
+
+| Distribution | libc | amd64 ptrace | amd64 preload+ptrace | arm64 ptrace | arm64 preload+ptrace |
+| --- | --- | :---: | :---: | :---: | :---: |
+| Debian Bookworm | glibc 2.36 | ✓ | ✓ | ✓ | ✓ |
+| Alpine 3.20 | musl 1.2.5 | ✓ | ✓ | ✓ | ✓ |
+
+CI runs an equivalent smaller matrix on every release tag (see
+`.github/workflows/release.yml` jobs `preload-libc-matrix` and
+`preload-chromium-matrix`) so regressions surface before publish.
+
 ### macOS
 
 - Core `uwgsocks` functionality is exercised in CI.
