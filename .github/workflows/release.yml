@@ -710,11 +710,31 @@ jobs:
           # complex multi-process workloads.
           for transport in ptrace preload-and-ptrace; do
             echo "=== chromium smoke under $transport ==="
+            # AppArmor docker-default on GH amd64 runners blocks the
+            # unshare/userns calls chromium uses for its sandbox setup
+            # even with --no-sandbox. Combined with our wrapper's
+            # ptrace, this manifests as chromium hanging forever
+            # (cmd.Run never returns) instead of a clean error. Setting
+            # apparmor=unconfined matches the seccomp=unconfined we
+            # already pass and lets chromium initialize.
+            #
+            # /dev/shm is 64M by default in docker; chromium forks many
+            # workers that try to mmap it. --disable-dev-shm-usage in
+            # the test code sidesteps this for chromium itself, but
+            # bumping to 2G is a cheap belt-and-suspenders against any
+            # /dev/shm pressure from helpers spawned via the wrapper.
+            #
+            # Outer go test timeout MUST be larger than the in-test
+            # context (300s) so a real wrapper hang gets dumped as
+            # a useful goroutine trace instead of being masked by the
+            # outer panic-on-timeout.
             docker run --rm \
               -v "$PWD":/src \
               -w /src \
               --cap-add SYS_PTRACE \
               --security-opt seccomp=unconfined \
+              --security-opt apparmor=unconfined \
+              --shm-size=2g \
               -e UWGS_RUN_HEADLESS_CHROME_SMOKE=1 \
               -e UWGS_CHROME_BIN='${{ matrix.chrome_bin }}' \
               -e UWGS_BROWSER_SMOKE_TRANSPORT=$transport \
@@ -722,7 +742,7 @@ jobs:
               sh -c '${{ matrix.install }}; \
                      export PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto GOFLAGS=-buildvcs=false; \
                      git init -q . 2>/dev/null || true; \
-                     go test -buildvcs=false -count=1 -timeout 300s -run TestUWGWrapperNodeHeadlessChromeSmoke -v ./tests/preload/...'
+                     go test -buildvcs=false -count=1 -timeout 600s -run TestUWGWrapperNodeHeadlessChromeSmoke -v ./tests/preload/...'
           done
 
   publish-release:
