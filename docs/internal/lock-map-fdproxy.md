@@ -325,7 +325,21 @@ rather than paper over with a comment.
 These come out of the lock-map exercise itself; track separately.
 
 1. **Lock-leak watchdog test for the C-side rwlocks.** Hold the write lock from a fake preload, kill the process, assert the manager either reclaims or exits cleanly.
-2. **Robust mutex rewrite for locks 4 and 5.** Linux supports `PTHREAD_PRIO_INHERIT | PTHREAD_PRIO_PROTECT` mutexes via `pthread_mutexattr_setrobust` that the kernel reclaims on owner death. ~50 lines of C + 30 lines of header changes; eliminates the "permanent stuck lock" bug class.
+2. **Robust mutex rewrite for locks 4 and 5.** Linux supports
+   `PTHREAD_MUTEX_ROBUST | PTHREAD_PROCESS_SHARED` mutexes that the
+   kernel reclaims on owner death. The design is sound — a working
+   test fixture (forks a child holding the wrlock, SIGKILLs it,
+   asserts the parent's reacquire returns within ms instead of
+   hanging) shipped successfully in isolation in this session's
+   history. Folding it into the live preload+ptrace path broke
+   `TestUWGWrapperBothMixedInterop` and
+   `TestUWGWrapperPtraceOnlyAccidentalPreloadUsesSecretPassthrough`
+   for reasons not yet diagnosed (suspected interaction between
+   futex waits and ptrace stop signals, OR a pthread_atfork edge
+   case where the child re-uses a kernel-tracked mutex without a
+   fresh `set_robust_list`). Reverted at commit eadb501; v1.1 work
+   should resurrect both the rewrite and the test in one focused
+   PR after diagnosing the integration carefully.
 3. **Stress tests for lock 1 and lock 2.** N goroutines doing add/remove/lookup; verify no race with `-race`. The two we found this session were probably not the only ones.
 4. **Static lock-order checker.** `go/analysis` pass that flags any function which acquires `g.mu` then `s.mu` (the wrong order). ~50 LOC, catches future regressions.
 5. **Per-entry generation counters** to defeat the ABA class above.
