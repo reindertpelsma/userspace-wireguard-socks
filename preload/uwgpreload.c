@@ -8,13 +8,9 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
-#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,42 +18,15 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
-#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/un.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "shared_state.h"
 #include "dns/preload_dns.c"
-
-#if defined(__ANDROID__)
-#define UWG_HAS_FOPENCOOKIE 0
-#define UWG_SENDMMSG_CONST const
-#define UWG_RECVMMSG_TIMEOUT_CONST const
-#define UWG_MMSG_FLAGS_T int
-#elif defined(__GLIBC__)
-#define UWG_HAS_FOPENCOOKIE 1
-#define UWG_SENDMMSG_CONST
-#define UWG_RECVMMSG_TIMEOUT_CONST
-#define UWG_MMSG_FLAGS_T int
-#else
-#define UWG_HAS_FOPENCOOKIE 1
-#define UWG_SENDMMSG_CONST
-#define UWG_RECVMMSG_TIMEOUT_CONST
-#define UWG_MMSG_FLAGS_T unsigned int
-#endif
-
-#if UWG_HAS_FOPENCOOKIE
-#if defined(__GLIBC__)
-typedef off64_t uwg_cookie_off_t;
-#else
-typedef off_t uwg_cookie_off_t;
-#endif
-#endif
 
 /* DNS routing mode helpers */
 static int dns_mode_full(void);
@@ -108,15 +77,11 @@ static ssize_t (*real_send_fn)(int, const void *, size_t, int);
 static ssize_t (*real_recv_fn)(int, void *, size_t, int);
 static ssize_t (*real_read_fn)(int, void *, size_t);
 static ssize_t (*real_write_fn)(int, void *, size_t);
-static ssize_t (*real_readv_fn)(int, const struct iovec *, int);
-static ssize_t (*real_writev_fn)(int, const struct iovec *, int);
 static ssize_t (*real_sendmsg_fn)(int, const struct msghdr *, int) = NULL;
 static ssize_t (*real_recvmsg_fn)(int, struct msghdr *, int) = NULL;
-static int (*real_sendmmsg_fn)(int, UWG_SENDMMSG_CONST struct mmsghdr *,
-                               unsigned int, UWG_MMSG_FLAGS_T);
-static int (*real_recvmmsg_fn)(int, struct mmsghdr *, unsigned int,
-                               UWG_MMSG_FLAGS_T,
-                               UWG_RECVMMSG_TIMEOUT_CONST struct timespec *);
+static int (*real_sendmmsg_fn)(int, struct mmsghdr *, unsigned int, int);
+static int (*real_recvmmsg_fn)(int, struct mmsghdr *, unsigned int, int,
+                               struct timespec *);
 static int (*real_dup_fn)(int);
 static int (*real_dup2_fn)(int, int);
 static int (*real_dup3_fn)(int, int, int);
@@ -126,20 +91,10 @@ static int (*real_shutdown_fn)(int, int);
 static int (*real_fcntl_fn)(int, int, ...);
 static int (*real_getsockopt_fn)(int, int, int, void *, socklen_t *);
 static int (*real_setsockopt_fn)(int, int, int, const void *, socklen_t);
-static int (*real_poll_fn)(struct pollfd *, nfds_t, int);
-static int (*real_ppoll_fn)(struct pollfd *, nfds_t, const struct timespec *,
-                            const sigset_t *);
-static int (*real_select_fn)(int, fd_set *, fd_set *, fd_set *,
-                             struct timeval *);
-static int (*real_pselect_fn)(int, fd_set *, fd_set *, fd_set *,
-                              const struct timespec *, const sigset_t *);
 static FILE *(*real_fdopen_fn)(int, const char *);
 
 static int fill_sockaddr_from_text(int family, const char *ip, uint16_t port,
                                    struct sockaddr *addr, socklen_t *addrlen);
-static _Atomic int g_state_poisoned;
-static int state_poisoned(void);
-static void mark_state_poisoned(void);
 static int tracked_rdlock(void);
 static int tracked_wrlock(void);
 static void tracked_rdunlock(void);
@@ -147,7 +102,7 @@ static void tracked_wrunlock(void);
 static struct tracked_slot *tracked_slots(void);
 static struct tracked_fd tracked_snapshot(int fd);
 static struct tracked_fd tracked_peek(int fd);
-static int tracked_store(int fd, const struct tracked_fd *state);
+static void tracked_store(int fd, const struct tracked_fd *state);
 static void tracked_clear_fd(int fd);
 static void tracked_clear_process(int32_t pid);
 static void tracked_map_if_needed(void);
@@ -170,12 +125,6 @@ static long passthrough_syscall(long nr, long a1, long a2, long a3, long a4,
 static long cold_syscall(long nr, long a1, long a2, long a3, long a4, long a5,
                          long a6);
 static int use_passthrough_secret(void);
-static int real_select_call(int nfds, fd_set *readfds, fd_set *writefds,
-                            fd_set *exceptfds, struct timeval *timeout);
-static int real_pselect_call(int nfds, fd_set *readfds, fd_set *writefds,
-                             fd_set *exceptfds,
-                             const struct timespec *timeout,
-                             const sigset_t *sigmask);
 static int fd_ok(int fd);
 static int should_cold_path(const struct tracked_fd *state);
 static uint32_t tracked_hash(int32_t pid, int fd);
@@ -213,8 +162,6 @@ static void init_real(void) {
   real_recv_fn = dlsym(RTLD_NEXT, "recv");
   real_write_fn = dlsym(RTLD_NEXT, "write");
   real_read_fn = dlsym(RTLD_NEXT, "read");
-  real_writev_fn = dlsym(RTLD_NEXT, "writev");
-  real_readv_fn = dlsym(RTLD_NEXT, "readv");
   real_dup_fn = dlsym(RTLD_NEXT, "dup");
   real_dup2_fn = dlsym(RTLD_NEXT, "dup2");
   real_dup3_fn = dlsym(RTLD_NEXT, "dup3");
@@ -224,10 +171,6 @@ static void init_real(void) {
   real_fcntl_fn = dlsym(RTLD_NEXT, "fcntl");
   real_getsockopt_fn = dlsym(RTLD_NEXT, "getsockopt");
   real_setsockopt_fn = dlsym(RTLD_NEXT, "setsockopt");
-  real_poll_fn = dlsym(RTLD_NEXT, "poll");
-  real_ppoll_fn = dlsym(RTLD_NEXT, "ppoll");
-  real_select_fn = dlsym(RTLD_NEXT, "select");
-  real_pselect_fn = dlsym(RTLD_NEXT, "pselect");
   real_fdopen_fn = dlsym(RTLD_NEXT, "fdopen");
 }
 
@@ -320,8 +263,8 @@ static ssize_t real_recvmsg_call(int sockfd, struct msghdr *msg, int flags) {
   return real_recvmsg_fn(sockfd, msg, flags);
 }
 
-static int real_sendmmsg_call(int sockfd, UWG_SENDMMSG_CONST struct mmsghdr *msgvec,
-                              unsigned int vlen, UWG_MMSG_FLAGS_T flags) {
+static int real_sendmmsg_call(int sockfd, struct mmsghdr *msgvec,
+                              unsigned int vlen, int flags) {
   if (use_passthrough_secret())
     return (int)passthrough_syscall(SYS_sendmmsg, sockfd, (long)msgvec, vlen,
                                     flags, 0);
@@ -329,8 +272,8 @@ static int real_sendmmsg_call(int sockfd, UWG_SENDMMSG_CONST struct mmsghdr *msg
 }
 
 static int real_recvmmsg_call(int sockfd, struct mmsghdr *msgvec,
-                              unsigned int vlen, UWG_MMSG_FLAGS_T flags,
-                              UWG_RECVMMSG_TIMEOUT_CONST struct timespec *timeout) {
+                              unsigned int vlen, int flags,
+                              struct timespec *timeout) {
   if (use_passthrough_secret())
     return (int)syscall(SYS_recvmmsg, sockfd, msgvec, vlen, flags, timeout,
                         syscall_passthrough_secret);
@@ -502,22 +445,6 @@ static ssize_t real_write_call(int fd, const void *buf, size_t len) {
   return (ssize_t)syscall(SYS_write, fd, buf, len);
 }
 
-static ssize_t real_readv_call(int fd, const struct iovec *iov, int iovcnt) {
-  if (use_passthrough_secret())
-    return (ssize_t)passthrough_syscall(SYS_readv, fd, (long)iov, iovcnt, 0, 0);
-  if (real_readv_fn)
-    return real_readv_fn(fd, iov, iovcnt);
-  return (ssize_t)syscall(SYS_readv, fd, iov, iovcnt);
-}
-
-static ssize_t real_writev_call(int fd, const struct iovec *iov, int iovcnt) {
-  if (use_passthrough_secret())
-    return (ssize_t)passthrough_syscall(SYS_writev, fd, (long)iov, iovcnt, 0, 0);
-  if (real_writev_fn)
-    return real_writev_fn(fd, iov, iovcnt);
-  return (ssize_t)syscall(SYS_writev, fd, iov, iovcnt);
-}
-
 static int real_dup_call(int fd) {
   if (use_passthrough_secret())
     return (int)passthrough_syscall(SYS_dup, fd, 0, 0, 0, 0);
@@ -527,24 +454,11 @@ static int real_dup_call(int fd) {
 }
 
 static int real_dup2_call(int oldfd, int newfd) {
-#ifdef SYS_dup2
   if (use_passthrough_secret())
     return (int)passthrough_syscall(SYS_dup2, oldfd, newfd, 0, 0, 0);
   if (real_dup2_fn)
     return real_dup2_fn(oldfd, newfd);
   return (int)syscall(SYS_dup2, oldfd, newfd);
-#else
-  if (oldfd == newfd) {
-    if (fcntl(oldfd, F_GETFD) < 0)
-      return -1;
-    return newfd;
-  }
-  if (use_passthrough_secret())
-    return (int)passthrough_syscall(SYS_dup3, oldfd, newfd, 0, 0, 0);
-  if (real_dup2_fn)
-    return real_dup2_fn(oldfd, newfd);
-  return (int)syscall(SYS_dup3, oldfd, newfd, 0);
-#endif
 }
 
 static int real_dup3_call(int oldfd, int newfd, int flags) {
@@ -609,236 +523,6 @@ static int real_setsockopt_call(int fd, int level, int optname,
   if (real_setsockopt_fn)
     return real_setsockopt_fn(fd, level, optname, optval, optlen);
   return (int)syscall(SYS_setsockopt, fd, level, optname, optval, optlen);
-}
-
-#ifndef UWG_KERNEL_SIGSET_SIZE
-#ifdef _NSIG
-#define UWG_KERNEL_SIGSET_SIZE (_NSIG / 8)
-#else
-#define UWG_KERNEL_SIGSET_SIZE (sizeof(sigset_t))
-#endif
-#endif
-
-static int real_poll_call(struct pollfd *fds, nfds_t nfds, int timeout) {
-  if (use_passthrough_secret()) {
-#ifdef SYS_poll
-    return (int)passthrough_syscall(SYS_poll, (long)fds, nfds, timeout, 0, 0);
-#elif defined(SYS_ppoll)
-    struct timespec ts;
-    struct timespec *tsp = NULL;
-    if (timeout >= 0) {
-      ts.tv_sec = timeout / 1000;
-      ts.tv_nsec = (long)(timeout % 1000) * 1000000L;
-      tsp = &ts;
-    }
-    return (int)passthrough_syscall(SYS_ppoll, (long)fds, nfds, (long)tsp, 0,
-                                    UWG_KERNEL_SIGSET_SIZE);
-#endif
-  }
-  if (real_poll_fn)
-    return real_poll_fn(fds, nfds, timeout);
-#ifdef SYS_poll
-  return (int)syscall(SYS_poll, fds, nfds, timeout);
-#elif defined(SYS_ppoll)
-  struct timespec ts;
-  struct timespec *tsp = NULL;
-  if (timeout >= 0) {
-    ts.tv_sec = timeout / 1000;
-    ts.tv_nsec = (long)(timeout % 1000) * 1000000L;
-    tsp = &ts;
-  }
-  return (int)syscall(SYS_ppoll, fds, nfds, tsp, NULL,
-                      UWG_KERNEL_SIGSET_SIZE);
-#else
-  errno = ENOSYS;
-  return -1;
-#endif
-}
-
-static int real_ppoll_call(struct pollfd *fds, nfds_t nfds,
-                           const struct timespec *timeout,
-                           const sigset_t *sigmask) {
-  if (use_passthrough_secret())
-    return (int)passthrough_syscall(SYS_ppoll, (long)fds, nfds, (long)timeout,
-                                    (long)sigmask, UWG_KERNEL_SIGSET_SIZE);
-  if (real_ppoll_fn)
-    return real_ppoll_fn(fds, nfds, timeout, sigmask);
-  return (int)syscall(SYS_ppoll, fds, nfds, timeout, sigmask,
-                      UWG_KERNEL_SIGSET_SIZE);
-}
-
-static void update_select_timeout_remaining(struct timeval *timeout,
-                                            const struct timeval *original,
-                                            const struct timespec *start,
-                                            const struct timespec *end) {
-  if (!timeout || !original || !start || !end)
-    return;
-  int64_t original_us =
-      (int64_t)original->tv_sec * 1000000LL + (int64_t)original->tv_usec;
-  int64_t elapsed_ns =
-      (int64_t)(end->tv_sec - start->tv_sec) * 1000000000LL +
-      (int64_t)(end->tv_nsec - start->tv_nsec);
-  int64_t elapsed_us = elapsed_ns <= 0 ? 0 : elapsed_ns / 1000LL;
-  int64_t remaining_us = original_us - elapsed_us;
-  if (remaining_us < 0)
-    remaining_us = 0;
-  timeout->tv_sec = (time_t)(remaining_us / 1000000LL);
-  timeout->tv_usec = (suseconds_t)(remaining_us % 1000000LL);
-}
-
-static int select_via_ppoll_common(int nfds, fd_set *readfds, fd_set *writefds,
-                                   fd_set *exceptfds,
-                                   const struct timespec *timeout,
-                                   const sigset_t *sigmask) {
-  // select/pselect carry too many syscall arguments to stash the hot-path
-  // bypass secret directly, so the fast path translates them into ppoll where
-  // the seccomp/preload secret still fits.
-  struct select_pollfd {
-    struct pollfd pfd;
-    unsigned char want_read;
-    unsigned char want_write;
-    unsigned char want_except;
-  };
-  struct select_pollfd *entries = NULL;
-  int count = 0;
-  int ready = 0;
-
-  if (nfds < 0) {
-    errno = EINVAL;
-    return -1;
-  }
-  for (int fd = 0; fd < nfds; fd++) {
-    if ((readfds && FD_ISSET(fd, readfds)) ||
-        (writefds && FD_ISSET(fd, writefds)) ||
-        (exceptfds && FD_ISSET(fd, exceptfds))) {
-      count++;
-    }
-  }
-
-  if (count > 0) {
-    entries = calloc((size_t)count, sizeof(*entries));
-    if (!entries) {
-      errno = ENOMEM;
-      return -1;
-    }
-    count = 0;
-    for (int fd = 0; fd < nfds; fd++) {
-      short events = 0;
-      if (readfds && FD_ISSET(fd, readfds))
-        events |= POLLIN;
-      if (writefds && FD_ISSET(fd, writefds))
-        events |= POLLOUT;
-      if (exceptfds && FD_ISSET(fd, exceptfds))
-        events |= POLLPRI;
-      if (!events)
-        continue;
-      entries[count].pfd.fd = fd;
-      entries[count].pfd.events = events;
-      entries[count].want_read = (events & POLLIN) != 0;
-      entries[count].want_write = (events & POLLOUT) != 0;
-      entries[count].want_except = (events & POLLPRI) != 0;
-      count++;
-    }
-  }
-
-  ready = real_ppoll_call(entries ? &entries[0].pfd : NULL, (nfds_t)count,
-                          timeout, sigmask);
-  if (ready < 0) {
-    free(entries);
-    return -1;
-  }
-
-  if (readfds)
-    FD_ZERO(readfds);
-  if (writefds)
-    FD_ZERO(writefds);
-  if (exceptfds)
-    FD_ZERO(exceptfds);
-
-  if (ready == 0) {
-    free(entries);
-    return 0;
-  }
-
-  ready = 0;
-  for (int i = 0; i < count; i++) {
-    short revents = entries[i].pfd.revents;
-    int fd = entries[i].pfd.fd;
-    if (entries[i].want_read &&
-        (revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL))) {
-      if (readfds)
-        FD_SET(fd, readfds);
-      ready++;
-    }
-    if (entries[i].want_write &&
-        (revents & (POLLOUT | POLLERR | POLLHUP | POLLNVAL))) {
-      if (writefds)
-        FD_SET(fd, writefds);
-      ready++;
-    }
-    if (entries[i].want_except && (revents & POLLPRI)) {
-      if (exceptfds)
-        FD_SET(fd, exceptfds);
-      ready++;
-    }
-  }
-
-  free(entries);
-  return ready;
-}
-
-static int real_select_call(int nfds, fd_set *readfds, fd_set *writefds,
-                            fd_set *exceptfds, struct timeval *timeout) {
-  if (use_passthrough_secret()) {
-    struct timeval original = {0, 0};
-    struct timespec start = {0, 0};
-    struct timespec end = {0, 0};
-    struct timespec ts;
-    struct timespec *tsp = NULL;
-    int rc;
-
-    if (timeout) {
-      original = *timeout;
-      ts.tv_sec = timeout->tv_sec;
-      ts.tv_nsec = (long)timeout->tv_usec * 1000L;
-      tsp = &ts;
-      (void)clock_gettime(CLOCK_MONOTONIC, &start);
-    }
-    rc = select_via_ppoll_common(nfds, readfds, writefds, exceptfds, tsp, NULL);
-    if (timeout && (rc >= 0 || errno == EINTR)) {
-      (void)clock_gettime(CLOCK_MONOTONIC, &end);
-      update_select_timeout_remaining(timeout, &original, &start, &end);
-    }
-    return rc;
-  }
-  if (real_select_fn)
-    return real_select_fn(nfds, readfds, writefds, exceptfds, timeout);
-#ifdef SYS_select
-  return (int)syscall(SYS_select, nfds, readfds, writefds, exceptfds, timeout);
-#else
-  if (timeout) {
-    struct timespec ts = {.tv_sec = timeout->tv_sec,
-                          .tv_nsec = (long)timeout->tv_usec * 1000L};
-    return select_via_ppoll_common(nfds, readfds, writefds, exceptfds, &ts,
-                                   NULL);
-  }
-  return select_via_ppoll_common(nfds, readfds, writefds, exceptfds, NULL,
-                                 NULL);
-#endif
-}
-
-static int real_pselect_call(int nfds, fd_set *readfds, fd_set *writefds,
-                             fd_set *exceptfds,
-                             const struct timespec *timeout,
-                             const sigset_t *sigmask) {
-  if (use_passthrough_secret())
-    return select_via_ppoll_common(nfds, readfds, writefds, exceptfds, timeout,
-                                   sigmask);
-  if (real_pselect_fn)
-    return real_pselect_fn(nfds, readfds, writefds, exceptfds, timeout,
-                           sigmask);
-  return select_via_ppoll_common(nfds, readfds, writefds, exceptfds, timeout,
-                                 sigmask);
 }
 
 
@@ -912,14 +596,8 @@ static void tracked_reconcile_current_process(void) {
   if (!shared_state || pid <= 0 || reconciled_pid == pid)
     return;
   lock = &shared_state->lock;
-  {
-    int rc = uwg_rwlock_wrlock(lock, current_tid());
-    if (rc != UWG_LOCK_OK) {
-      if (rc == UWG_LOCK_POISONED)
-        mark_state_poisoned();
-      return;
-    }
-  }
+  if (uwg_rwlock_wrlock(lock, current_tid()) != 0)
+    return;
   for (size_t i = 0; i < MAX_TRACKED_SLOTS; i++) {
     struct tracked_slot *slot = &shared_state->tracked[i];
     int *next = NULL;
@@ -940,14 +618,8 @@ static void tracked_reconcile_current_process(void) {
     size_t idx = 0;
     if (syscall(SYS_fcntl, fds[i], F_GETFD) >= 0 || errno != EBADF)
       continue;
-    {
-      int rc = uwg_rwlock_wrlock(lock, current_tid());
-      if (rc != UWG_LOCK_OK) {
-        if (rc == UWG_LOCK_POISONED)
-          mark_state_poisoned();
-        break;
-      }
-    }
+    if (uwg_rwlock_wrlock(lock, current_tid()) != 0)
+      break;
     if (tracked_find_slot_locked(pid, fds[i], 0, &idx) == 0) {
       shared_state->tracked[idx].owner_pid = -1;
       shared_state->tracked[idx].fd = -1;
@@ -976,11 +648,8 @@ static void hot_path_rdlock(void) {
     hot_path_read_depth++;
     return;
   }
-  if (hot_path_read_depth++ == 0) {
-    int rc = uwg_guard_rdlock(hot_path_guard(), current_tid());
-    if (rc == UWG_LOCK_POISONED)
-      mark_state_poisoned();
-  }
+  if (hot_path_read_depth++ == 0)
+    uwg_guard_rdlock(hot_path_guard(), current_tid());
 }
 
 static void hot_path_rdunlock(void) {
@@ -993,11 +662,8 @@ static void hot_path_rdunlock(void) {
 }
 
 static void hot_path_wrlock(void) {
-  if (hot_path_write_depth++ == 0) {
-    int rc = uwg_guard_wrlock(hot_path_guard(), current_tid());
-    if (rc == UWG_LOCK_POISONED)
-      mark_state_poisoned();
-  }
+  if (hot_path_write_depth++ == 0)
+    uwg_guard_wrlock(hot_path_guard(), current_tid());
 }
 
 static void hot_path_wrunlock(void) {
@@ -1053,61 +719,25 @@ static void tracked_test_delay(void) {
   usleep(usec);
 }
 
-/* g_state_poisoned is forward-declared above; defined here.
- * Set whenever any of our shared/local rwlocks detect EOWNERDEAD or
- * a reader-drain timeout. Once set, the preload stops trying to track
- * per-fd state and falls back to plain pass-through behavior — the
- * wrapped app keeps working at native speed but loses tunnel routing
- * for any *new* sockets, and any already-tracked sockets will start
- * getting EBADF/ECONNRESET on their next syscall as the per-fd shadow
- * state goes unmaintained.
- *
- * The user-visible contract: a process or thread that segfaults inside
- * the preload no longer hangs every other thread; the affected sockets
- * just die. */
-
-static int state_poisoned(void) {
-  return atomic_load_explicit(&g_state_poisoned, memory_order_acquire);
-}
-
-static void mark_state_poisoned(void) {
-  atomic_store_explicit(&g_state_poisoned, 1, memory_order_release);
-}
-
 static int tracked_rdlock(void) {
   tracked_map_if_needed();
-  if (state_poisoned())
-    return -1;
   if (tracked_write_depth > 0)
     return -1;
   if (tracked_read_depth++ > 0)
     return 0;
-  int rc = uwg_rwlock_rdlock(tracked_lock(), current_tid());
-  if (rc == UWG_LOCK_OK)
+  if (uwg_rwlock_rdlock(tracked_lock(), current_tid()) == 0)
     return 0;
-  /* Only POISONED triggers the process-wide degrade. TRANSIENT and
-   * REENTRANT just mean "skip this op" — the lock is still healthy
-   * and a future attempt will succeed. */
-  if (rc == UWG_LOCK_POISONED)
-    mark_state_poisoned();
   tracked_read_depth--;
   return -1;
 }
 
 static int tracked_wrlock(void) {
   tracked_map_if_needed();
-  if (state_poisoned()) {
-    errno = EDEADLK;
-    return -1;
-  }
   if (tracked_read_depth > 0 || tracked_write_depth > 0) {
     errno = EDEADLK;
     return -1;
   }
-  int rc = uwg_rwlock_wrlock(tracked_lock(), current_tid());
-  if (rc != UWG_LOCK_OK) {
-    if (rc == UWG_LOCK_POISONED)
-      mark_state_poisoned();
+  if (uwg_rwlock_wrlock(tracked_lock(), current_tid()) != 0) {
     errno = EDEADLK;
     return -1;
   }
@@ -1222,17 +852,16 @@ static struct tracked_fd tracked_peek(int fd) {
   return out;
 }
 
-static int tracked_store(int fd, const struct tracked_fd *state) {
+static void tracked_store(int fd, const struct tracked_fd *state) {
   size_t idx = 0;
   int32_t pid = current_pid_key();
   if (!fd_ok(fd) || !state)
-    return -1;
+    return;
   if (tracked_wrlock() != 0)
-    return -1;
+    return;
   if (tracked_find_slot_locked(pid, fd, 1, &idx) < 0) {
     tracked_wrunlock();
-    errno = EMFILE;
-    return -1;
+    return;
   }
   tracked_test_delay();
   if (tracked_fd_is_zero(state)) {
@@ -1245,7 +874,6 @@ static int tracked_store(int fd, const struct tracked_fd *state) {
     tracked_slots()[idx].state = *state;
   }
   tracked_wrunlock();
-  return 0;
 }
 
 static void tracked_clear_fd(int fd) {
@@ -1336,8 +964,7 @@ static ssize_t stdio_cookie_write(void *cookie, const char *buf, size_t size) {
   return write(state->fd, buf, size);
 }
 
-static int stdio_cookie_seek(void *cookie, uwg_cookie_off_t *offset,
-                             int whence) {
+static int stdio_cookie_seek(void *cookie, off64_t *offset, int whence) {
   (void)cookie;
   (void)offset;
   (void)whence;
@@ -1394,15 +1021,15 @@ static int sockaddr_to_ip_port(const struct sockaddr *addr, char *ip,
   return -1;
 }
 
-static int copy_tracking(int dst, int src) {
+static void copy_tracking(int dst, int src) {
   if (!fd_ok(dst))
-    return 0;
+    return;
   if (fd_ok(src)) {
     struct tracked_fd state = tracked_snapshot(src);
-    return tracked_store(dst, &state);
+    tracked_store(dst, &state);
+    return;
   }
   tracked_clear_fd(dst);
-  return 0;
 }
 
 static const char *manager_path(void) {
@@ -1559,12 +1186,7 @@ int dns_tcp_connect(void) {
     state.domain = AF_UNIX;
     state.type = SOCK_STREAM;
     state.protocol = 0;
-    if (tracked_store(fd, &state) != 0) {
-      int e = errno ? errno : EMFILE;
-      real_close_call(fd);
-      errno = e;
-      return -1;
-    }
+    tracked_store(fd, &state);
   }
   return fd;
 }
@@ -1577,13 +1199,6 @@ static int dns_mode_full(void) {
 static int dns_mode_libc(void) {
   const char *v = getenv("UWGS_DNS_MODE");
   return v && strcmp(v, "libc") == 0;
-}
-
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((unused))
-#endif
-static int dns_mode_libc_unused_marker(void) {
-  return dns_mode_libc();
 }
 
 static int dns_mode_none(void) {
@@ -1667,12 +1282,7 @@ static int force_dns_stream_fd(int fd) {
     state.proxied = 1;
     state.kind = KIND_TCP_STREAM;
     state.hot_ready = 1;
-    if (tracked_store(fd, &state) != 0) {
-      int e = errno ? errno : EMFILE;
-      real_close_call(fd);
-      errno = e;
-      return -1;
-    }
+    tracked_store(fd, &state);
   }
   return 0;
 }
@@ -1695,12 +1305,7 @@ static int force_dns_dgram_fd(int fd) {
     state.proxied = 1;
     state.kind = KIND_UDP_CONNECTED;
     state.hot_ready = 1;
-    if (tracked_store(fd, &state) != 0) {
-      int e = errno ? errno : EMFILE;
-      real_close_call(fd);
-      errno = e;
-      return -1;
-    }
+    tracked_store(fd, &state);
   }
   return 0;
 }
@@ -1752,12 +1357,7 @@ static int replace_fd(int fd, int manager_fd, int kind) {
     state.hot_ready = 1;
     state.saved_fl = fl;
     state.saved_fdfl = fdfl;
-    if (tracked_store(fd, &state) != 0) {
-      int e = errno ? errno : EMFILE;
-      real_close_call(fd);
-      errno = e;
-      return -1;
-    }
+    tracked_store(fd, &state);
   }
   return 0;
 }
@@ -2164,12 +1764,7 @@ static int managed_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
     state.remote_family = AF_INET;
     state.remote_port = (uint16_t)port;
     snprintf(state.remote_ip, sizeof(state.remote_ip), "%s", ip);
-    if (tracked_store(accepted, &state) != 0) {
-      int e = errno ? errno : EMFILE;
-      real_close_call(accepted);
-      errno = e;
-      return -1;
-    }
+    tracked_store(accepted, &state);
   }
   return accepted;
 }
@@ -2194,12 +1789,7 @@ int socket(int domain, int type, int protocol) {
       state.protocol = protocol;
       state.saved_fl = real_fcntl_fn ? real_fcntl_fn(fd, F_GETFL) : 0;
       state.saved_fdfl = real_fcntl_fn ? real_fcntl_fn(fd, F_GETFD) : 0;
-      if (tracked_store(fd, &state) != 0) {
-        int e = errno ? errno : EMFILE;
-        real_close_call(fd);
-        errno = e;
-        return -1;
-      }
+      tracked_store(fd, &state);
     }
   }
   return fd;
@@ -2291,7 +1881,6 @@ int __connect(int fd, const struct sockaddr *addr, socklen_t len) {
   return connect(fd, addr, len);
 }
 
-#if UWG_HAS_FOPENCOOKIE
 FILE *fdopen(int fd, const char *mode) {
   init_real();
   if (tracked_reentrant_socket_fd(fd))
@@ -2326,41 +1915,6 @@ FILE *fdopen(int fd, const char *mode) {
 }
 
 FILE *fdopen64(int fd, const char *mode) { return fdopen(fd, mode); }
-#endif
-
-int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
-  init_real();
-  return real_poll_call(fds, nfds, timeout);
-}
-
-int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
-           struct timeval *timeout) {
-  init_real();
-  return real_select_call(nfds, readfds, writefds, exceptfds, timeout);
-}
-
-int __select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
-             struct timeval *timeout) {
-  return select(nfds, readfds, writefds, exceptfds, timeout);
-}
-
-int pselect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
-            const struct timespec *timeout, const sigset_t *sigmask) {
-  init_real();
-  return real_pselect_call(nfds, readfds, writefds, exceptfds, timeout,
-                           sigmask);
-}
-
-int __pselect(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
-              const struct timespec *timeout, const sigset_t *sigmask) {
-  return pselect(nfds, readfds, writefds, exceptfds, timeout, sigmask);
-}
-
-int ppoll(struct pollfd *fds, nfds_t nfds, const struct timespec *timeout,
-          const sigset_t *sigmask) {
-  init_real();
-  return real_ppoll_call(fds, nfds, timeout, sigmask);
-}
 
 ssize_t send(int fd, const void *buf, size_t len, int flags) {
   init_real();
@@ -2492,151 +2046,6 @@ ssize_t __read(int fd, void *buf, size_t len) {
 
 ssize_t __read_nocancel(int fd, void *buf, size_t len) {
   return read(fd, buf, len);
-}
-
-static int iovec_total_len(const struct iovec *iov, int iovcnt,
-                           size_t *total) {
-  if (iovcnt < 0) {
-    errno = EINVAL;
-    return -1;
-  }
-  if (iovcnt > 0 && !iov) {
-    errno = EFAULT;
-    return -1;
-  }
-  *total = 0;
-  for (int i = 0; i < iovcnt; i++) {
-    if (iov[i].iov_len > (size_t)SSIZE_MAX - *total) {
-      errno = EINVAL;
-      return -1;
-    }
-    *total += iov[i].iov_len;
-  }
-  return 0;
-}
-
-static int gather_iovec_payload(const struct iovec *iov, int iovcnt,
-                                void **out, size_t *out_len) {
-  size_t total = 0;
-  if (iovec_total_len(iov, iovcnt, &total) != 0)
-    return -1;
-  char *buf = malloc(total ? total : 1);
-  if (!buf) {
-    errno = ENOMEM;
-    return -1;
-  }
-  size_t off = 0;
-  for (int i = 0; i < iovcnt; i++) {
-    if (iov[i].iov_len == 0)
-      continue;
-    memcpy(buf + off, iov[i].iov_base, iov[i].iov_len);
-    off += iov[i].iov_len;
-  }
-  *out = buf;
-  *out_len = total;
-  return 0;
-}
-
-static ssize_t scatter_iovec_payload(const struct iovec *iov, int iovcnt,
-                                     const void *data, size_t len) {
-  size_t total = 0;
-  if (iovec_total_len(iov, iovcnt, &total) != 0)
-    return -1;
-  (void)total;
-  size_t off = 0;
-  const char *src = data;
-  for (int i = 0; i < iovcnt && off < len; i++) {
-    size_t copy = iov[i].iov_len;
-    if (copy > len - off)
-      copy = len - off;
-    if (copy) {
-      memcpy(iov[i].iov_base, src + off, copy);
-      off += copy;
-    }
-  }
-  return (ssize_t)off;
-}
-
-ssize_t readv(int fd, const struct iovec *iov, int iovcnt) {
-  init_real();
-  if (tracked_reentrant_socket_fd(fd))
-    return -1;
-  hot_path_rdlock();
-  struct tracked_fd state = tracked_snapshot(fd);
-  int cold = fd_ok(fd) && should_cold_path(&state);
-  hot_path_rdunlock();
-  if (cold)
-    return (ssize_t)cold_syscall(SYS_readv, fd, (long)iov, iovcnt, 0, 0, 0);
-  if (!fd_ok(fd) || !state.proxied)
-    return real_readv_call(fd, iov, iovcnt);
-  if (state.kind != KIND_UDP_CONNECTED && state.kind != KIND_UDP_LISTENER)
-    return real_readv_call(fd, iov, iovcnt);
-
-  size_t total = 0;
-  if (iovec_total_len(iov, iovcnt, &total) != 0)
-    return -1;
-  if (total == 0)
-    return 0;
-
-  void *packet = NULL;
-  ssize_t n = read_packet(fd, &packet);
-  if (n < 0)
-    return -1;
-
-  ssize_t out = -1;
-  if (state.kind == KIND_UDP_CONNECTED) {
-    size_t copy = (size_t)n < total ? (size_t)n : total;
-    out = scatter_iovec_payload(iov, iovcnt, packet, copy);
-  } else {
-    char *payload = malloc(total ? total : 1);
-    if (!payload) {
-      errno = ENOMEM;
-    } else {
-      ssize_t decoded =
-          decode_udp_datagram(packet, (size_t)n, payload, total, NULL, NULL);
-      if (decoded >= 0)
-        out = scatter_iovec_payload(iov, iovcnt, payload, (size_t)decoded);
-      free(payload);
-    }
-  }
-  free(packet);
-  return out;
-}
-
-ssize_t __readv(int fd, const struct iovec *iov, int iovcnt) {
-  return readv(fd, iov, iovcnt);
-}
-
-ssize_t writev(int fd, const struct iovec *iov, int iovcnt) {
-  init_real();
-  if (tracked_reentrant_socket_fd(fd))
-    return -1;
-  hot_path_rdlock();
-  struct tracked_fd state = tracked_snapshot(fd);
-  int cold = fd_ok(fd) && should_cold_path(&state);
-  hot_path_rdunlock();
-  if (cold)
-    return (ssize_t)cold_syscall(SYS_writev, fd, (long)iov, iovcnt, 0, 0, 0);
-  if (!fd_ok(fd) || !state.proxied)
-    return real_writev_call(fd, iov, iovcnt);
-  if (state.kind == KIND_UDP_LISTENER) {
-    errno = EDESTADDRREQ;
-    return -1;
-  }
-  if (state.kind != KIND_UDP_CONNECTED)
-    return real_writev_call(fd, iov, iovcnt);
-
-  void *buf = NULL;
-  size_t len = 0;
-  if (gather_iovec_payload(iov, iovcnt, &buf, &len) != 0)
-    return -1;
-  int err = write_packet(fd, buf, len);
-  free(buf);
-  return err == 0 ? (ssize_t)len : -1;
-}
-
-ssize_t __writev(int fd, const struct iovec *iov, int iovcnt) {
-  return writev(fd, iov, iovcnt);
 }
 
 ssize_t sendto(int fd, const void *buf, size_t len, int flags,
@@ -2868,12 +2277,8 @@ int dup(int oldfd) {
   if (cold)
     return (int)cold_syscall(SYS_dup, oldfd, 0, 0, 0, 0, 0);
   int fd = real_dup_call(oldfd);
-  if (fd >= 0 && copy_tracking(fd, oldfd) != 0) {
-    int e = errno ? errno : EMFILE;
-    real_close_call(fd);
-    errno = e;
-    return -1;
-  }
+  if (fd >= 0)
+    copy_tracking(fd, oldfd);
   return fd;
 }
 
@@ -2886,18 +2291,10 @@ int dup2(int oldfd, int newfd) {
   int cold = fd_ok(oldfd) && should_cold_path(&state);
   hot_path_rdunlock();
   if (cold)
-#ifdef SYS_dup2
     return (int)cold_syscall(SYS_dup2, oldfd, newfd, 0, 0, 0, 0);
-#else
-    return (int)cold_syscall(SYS_dup3, oldfd, newfd, 0, 0, 0, 0);
-#endif
   int fd = real_dup2_call(oldfd, newfd);
-  if (fd >= 0 && copy_tracking(newfd, oldfd) != 0) {
-    int e = errno ? errno : EMFILE;
-    real_close_call(newfd);
-    errno = e;
-    return -1;
-  }
+  if (fd >= 0)
+    copy_tracking(newfd, oldfd);
   return fd;
 }
 
@@ -2916,12 +2313,8 @@ int dup3(int oldfd, int newfd, int flags) {
     return -1;
   }
   int fd = real_dup3_call(oldfd, newfd, flags);
-  if (fd >= 0 && copy_tracking(newfd, oldfd) != 0) {
-    int e = errno ? errno : EMFILE;
-    real_close_call(newfd);
-    errno = e;
-    return -1;
-  }
+  if (fd >= 0)
+    copy_tracking(newfd, oldfd);
   return fd;
 }
 
@@ -3144,11 +2537,6 @@ int getsockopt(int fd, int level, int optname, void *optval,
   struct tracked_fd state = tracked_snapshot(fd);
   int managed = fd_ok(fd) && (state.active || state.proxied) && optval && optlen;
   hot_path_rdunlock();
-  if (debug_enabled() && managed) {
-    debugf("getsockopt fd=%d level=%d opt=%d active=%d proxied=%d kind=%d hot=%d",
-           fd, level, optname, state.active, state.proxied, state.kind,
-           state.hot_ready);
-  }
   if (managed) {
     if (level == SOL_SOCKET) {
       if (optname == SO_ERROR && *optlen >= sizeof(int)) {
@@ -3209,16 +2597,6 @@ int getsockopt(int fd, int level, int optname, void *optval,
   return real_getsockopt_call(fd, level, optname, optval, optlen);
 }
 
-int __getsockopt(int fd, int level, int optname, void *optval,
-                 socklen_t *optlen) {
-  return getsockopt(fd, level, optname, optval, optlen);
-}
-
-int __libc_getsockopt(int fd, int level, int optname, void *optval,
-                      socklen_t *optlen) {
-  return getsockopt(fd, level, optname, optval, optlen);
-}
-
 int setsockopt(int fd, int level, int optname, const void *optval,
                socklen_t optlen) {
   init_real();
@@ -3229,11 +2607,6 @@ int setsockopt(int fd, int level, int optname, const void *optval,
   int tracked_socket = fd_ok(fd) && (state.active || state.proxied);
   int proxied = fd_ok(fd) && state.proxied;
   hot_path_rdunlock();
-  if (debug_enabled() && tracked_socket) {
-    debugf("setsockopt fd=%d level=%d opt=%d active=%d proxied=%d kind=%d hot=%d optlen=%u",
-           fd, level, optname, state.active, state.proxied, state.kind,
-           state.hot_ready, (unsigned)optlen);
-  }
   if (tracked_socket && level == SOL_SOCKET && optval && optlen >= sizeof(int)) {
     int value = *(const int *)optval;
     if (optname == SO_REUSEADDR) {
@@ -3274,16 +2647,6 @@ int setsockopt(int fd, int level, int optname, const void *optval,
 #endif
   }
   return real_setsockopt_call(fd, level, optname, optval, optlen);
-}
-
-int __setsockopt(int fd, int level, int optname, const void *optval,
-                 socklen_t optlen) {
-  return setsockopt(fd, level, optname, optval, optlen);
-}
-
-int __libc_setsockopt(int fd, int level, int optname, const void *optval,
-                      socklen_t optlen) {
-  return setsockopt(fd, level, optname, optval, optlen);
 }
 
 ssize_t sendmsg(int fd, const struct msghdr *msg, int flags) {
@@ -3355,8 +2718,7 @@ ssize_t recvmsg(int fd, struct msghdr *msg, int flags) {
   return real_recvmsg_call(fd, msg, flags);
 }
 
-int sendmmsg(int fd, UWG_SENDMMSG_CONST struct mmsghdr *vmessages,
-             unsigned int vlen, UWG_MMSG_FLAGS_T flags) {
+int sendmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags) {
   init_real();
   if (tracked_reentrant_socket_fd(fd))
     return -1;
@@ -3364,19 +2726,18 @@ int sendmmsg(int fd, UWG_SENDMMSG_CONST struct mmsghdr *vmessages,
   if (fd_ok(fd) && state.proxied) {
     unsigned int i;
     for (i = 0; i < vlen; i++) {
-      ssize_t n = sendmsg(fd, &vmessages[i].msg_hdr, (int)flags);
+      ssize_t n = sendmsg(fd, &vmessages[i].msg_hdr, flags);
       if (n < 0)
         return i ? (int)i : -1;
-      ((struct mmsghdr *)vmessages)[i].msg_len = (unsigned int)n;
+      vmessages[i].msg_len = (unsigned int)n;
     }
     return (int)i;
   }
   return real_sendmmsg_call(fd, vmessages, vlen, flags);
 }
 
-int recvmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen,
-             UWG_MMSG_FLAGS_T flags,
-             UWG_RECVMMSG_TIMEOUT_CONST struct timespec *timeout) {
+int recvmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen, int flags,
+             struct timespec *timeout) {
   init_real();
   if (tracked_reentrant_socket_fd(fd))
     return -1;
@@ -3385,7 +2746,7 @@ int recvmmsg(int fd, struct mmsghdr *vmessages, unsigned int vlen,
   if (fd_ok(fd) && state.proxied) {
     unsigned int i;
     for (i = 0; i < vlen; i++) {
-      ssize_t n = recvmsg(fd, &vmessages[i].msg_hdr, (int)flags);
+      ssize_t n = recvmsg(fd, &vmessages[i].msg_hdr, flags);
       if (n < 0)
         return i ? (int)i : -1;
       vmessages[i].msg_len = (unsigned int)n;
