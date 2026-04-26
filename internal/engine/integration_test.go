@@ -3142,7 +3142,10 @@ func directHTTPGet(t *testing.T, target string) string {
 func retryDial(t *testing.T, dialer proxy.Dialer, target string) net.Conn {
 	t.Helper()
 	var last error
-	deadline := time.Now().Add(10 * time.Second)
+	// Scale the overall retry budget under -race; each individual
+	// dial is bounded by the underlying SOCKS5/dialer timeout, but
+	// the OUTER retry needs more wallclock under race overhead.
+	deadline := time.Now().Add(10 * time.Second * testDeadlineScale)
 	for time.Now().Before(deadline) {
 		c, err := dialer.Dial("tcp", target)
 		if err == nil {
@@ -3158,9 +3161,13 @@ func retryDial(t *testing.T, dialer proxy.Dialer, target string) net.Conn {
 func retryEngineDial(t *testing.T, eng *engine.Engine, network, target string) net.Conn {
 	t.Helper()
 	var last error
-	deadline := time.Now().Add(10 * time.Second)
+	// Both the per-attempt ctx and the outer deadline scale —
+	// race-detector overhead can push a single SOCKS+WG dial well
+	// past 2s on macOS-latest runners.
+	deadline := time.Now().Add(10 * time.Second * testDeadlineScale)
+	perAttempt := 2 * time.Second * testDeadlineScale
 	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), perAttempt)
 		c, err := eng.DialContext(ctx, network, target)
 		cancel()
 		if err == nil {
