@@ -568,22 +568,18 @@ jobs:
         include:
           # glibc 2.27 — Ubuntu 18.04, oldest claimed-supported glibc.
           # Go 1.10 in repos is too old; install go1.24 from tarball.
+          # NOTE: install scripts MUST be one-liners with && chains —
+          # multi-line YAML scalars get interpolated into sh -c '...'
+          # with literal newlines, which leaves stray semicolons on
+          # their own lines and breaks the shell with "; unexpected".
           - name: glibc-2.27-amd64
             runner: ubuntu-latest
             image: ubuntu:18.04
-            install: |
-              DEBIAN_FRONTEND=noninteractive apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates >/dev/null
-              wget -q https://go.dev/dl/go1.24.0.linux-amd64.tar.gz -O /tmp/go.tgz
-              tar -C /usr/local -xzf /tmp/go.tgz
+            install: 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates >/dev/null && wget -q https://go.dev/dl/go1.24.0.linux-amd64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
           - name: glibc-2.27-arm64
             runner: ubuntu-24.04-arm
             image: ubuntu:18.04
-            install: |
-              DEBIAN_FRONTEND=noninteractive apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates >/dev/null
-              wget -q https://go.dev/dl/go1.24.0.linux-arm64.tar.gz -O /tmp/go.tgz
-              tar -C /usr/local -xzf /tmp/go.tgz
+            install: 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates >/dev/null && wget -q https://go.dev/dl/go1.24.0.linux-arm64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
           # glibc 2.31 — Debian Bullseye / Ubuntu 20.04, golang image
           # already has Go installed, much faster than tarball install.
           - name: glibc-2.31-amd64
@@ -616,17 +612,11 @@ jobs:
           - name: musl-1.2.3-amd64
             runner: ubuntu-latest
             image: alpine:3.16
-            install: |
-              apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates
-              wget -q https://go.dev/dl/go1.24.0.linux-amd64.tar.gz -O /tmp/go.tgz
-              tar -C /usr/local -xzf /tmp/go.tgz
+            install: 'apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates && wget -q https://go.dev/dl/go1.24.0.linux-amd64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
           - name: musl-1.2.3-arm64
             runner: ubuntu-24.04-arm
             image: alpine:3.16
-            install: |
-              apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates
-              wget -q https://go.dev/dl/go1.24.0.linux-arm64.tar.gz -O /tmp/go.tgz
-              tar -C /usr/local -xzf /tmp/go.tgz
+            install: 'apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates && wget -q https://go.dev/dl/go1.24.0.linux-arm64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
     steps:
       - uses: actions/checkout@v4
 
@@ -665,41 +655,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # NOTE: install scripts MUST be one-liners with && chains —
+          # see preload-libc-matrix above for why.
           - name: glibc-2.36-amd64
             runner: ubuntu-latest
             image: debian:bookworm
-            install: |
-              DEBIAN_FRONTEND=noninteractive apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-                gcc libc6-dev git wget ca-certificates \
-                chromium nodejs >/dev/null
-              wget -q https://go.dev/dl/go1.24.0.linux-amd64.tar.gz -O /tmp/go.tgz
-              tar -C /usr/local -xzf /tmp/go.tgz
+            install: 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates chromium nodejs >/dev/null && wget -q https://go.dev/dl/go1.24.0.linux-amd64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
             chrome_bin: /usr/bin/chromium
           - name: glibc-2.36-arm64
             runner: ubuntu-24.04-arm
             image: debian:bookworm
-            install: |
-              DEBIAN_FRONTEND=noninteractive apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-                gcc libc6-dev git wget ca-certificates \
-                chromium nodejs >/dev/null
-              wget -q https://go.dev/dl/go1.24.0.linux-arm64.tar.gz -O /tmp/go.tgz
-              tar -C /usr/local -xzf /tmp/go.tgz
+            install: 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev git wget ca-certificates chromium nodejs >/dev/null && wget -q https://go.dev/dl/go1.24.0.linux-arm64.tar.gz -O /tmp/go.tgz && tar -C /usr/local -xzf /tmp/go.tgz'
             chrome_bin: /usr/bin/chromium
           - name: musl-amd64
             runner: ubuntu-latest
             image: alpine:3.20
-            install: |
-              apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates \
-                chromium nodejs go
+            install: 'apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates chromium nodejs go'
             chrome_bin: /usr/bin/chromium-browser
           - name: musl-arm64
             runner: ubuntu-24.04-arm
             image: alpine:3.20
-            install: |
-              apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates \
-                chromium nodejs go
+            install: 'apk add --no-cache gcc musl-dev linux-headers git wget ca-certificates chromium nodejs go'
             chrome_bin: /usr/bin/chromium-browser
     steps:
       - uses: actions/checkout@v4
