@@ -634,8 +634,8 @@ jobs:
                    git init -q . 2>/dev/null || true; \
                    go version; \
                    gcc --version | head -1; \
-                   go test -count=1 -timeout 600s ./tests/preload/... || \
-                     go test -count=1 -timeout 600s ./tests/preload/...'
+                   go test -buildvcs=false -count=1 -timeout 600s ./tests/preload/... || \
+                     go test -buildvcs=false -count=1 -timeout 600s ./tests/preload/...'
 
   # Headless-Chromium smoke through the wrapper across libc/musl
   # versions. This is a heavier sibling of preload-libc-matrix that
@@ -703,7 +703,7 @@ jobs:
               sh -c '${{ matrix.install }}; \
                      export PATH=/usr/local/go/bin:$PATH; \
                      git init -q . 2>/dev/null || true; \
-                     go test -count=1 -timeout 300s -run TestUWGWrapperNodeHeadlessChromeSmoke -v ./tests/preload/...'
+                     go test -buildvcs=false -count=1 -timeout 300s -run TestUWGWrapperNodeHeadlessChromeSmoke -v ./tests/preload/...'
           done
 
   publish-release:
