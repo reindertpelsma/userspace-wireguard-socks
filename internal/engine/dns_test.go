@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"net/netip"
-	"runtime"
 	"testing"
 	"time"
 
@@ -132,14 +131,10 @@ func packDNSQuery(t testing.TB, id uint16, name string) []byte {
 }
 
 func TestHostedDNSOverWireGuardUDPAndTCP(t *testing.T) {
-	// macOS+race flakes here: the malformed-DNS rejection path
-	// (assertion at "malformed tunnel DNS unexpectedly produced N
-	// response bytes") gets a stale prior response surfacing from
-	// gvisor's view-pool — same class of race as
-	// TestRelayForwardingMultiPeer. linux/windows -race PASS.
-	if runtime.GOOS == "darwin" && testRaceBuild {
-		t.Skip("skipping on macOS+race: gvisor view-pool reuse race surfaces a stale response on the malformed-DNS read")
-	}
+	// Race reports under macOS+race here are the same gvisor
+	// pkg/buffer.viewPool reuse pattern as TestRelayForwardingMultiPeer.
+	// Suppressed at the repo level via .gorace.suppressions — see
+	// the file for rationale and upstream-tracking notes.
 	oldExchange := systemDNSExchange
 	systemDNSExchange = func(req *dns.Msg, tcp bool) (*dns.Msg, error) {
 		resp := new(dns.Msg)

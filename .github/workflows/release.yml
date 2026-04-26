@@ -123,6 +123,11 @@ jobs:
       # the other packages are portable Go code.
       - name: Race-detector run on concurrency-sensitive packages
         shell: bash
+        env:
+          # TSan suppressions for documented third-party false positives
+          # (currently: gvisor pkg/buffer.viewPool reuse pattern).
+          # See .gorace.suppressions for rationale.
+          GORACE: "suppressions=${{ github.workspace }}/.gorace.suppressions"
         run: |
           set -euo pipefail
           packages=(

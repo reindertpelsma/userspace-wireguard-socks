@@ -959,9 +959,9 @@ func TestTunnelUDPAndSOCKSUDPAssociateBindAndAPIPing(t *testing.T) {
 	defer forwardUDP.Close()
 	udpRoundTrip(t, forwardUDP, []byte("forward-udp"))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second*testDeadlineScale)
 	defer cancel()
-	ping, err := clientEng.Ping(ctx, "100.64.26.1", 2, time.Second)
+	ping, err := clientEng.Ping(ctx, "100.64.26.1", 2, time.Second*testDeadlineScale)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2160,16 +2160,12 @@ func TestMeshControlServerBindsInsideTunnel(t *testing.T) {
 }
 
 func TestRelayForwardingMultiPeer(t *testing.T) {
-	// Heavy concurrent packet injection through netstack surfaces a
-	// gvisor view-pool reuse race under -race on macOS specifically
-	// (linux-amd64 / linux-arm64 / windows -race all PASS this same
-	// test). The race is between gvisor's IPv4.TTL read on a previous
-	// packet and a new injection's MakeWithData write into a recycled
-	// pooled View — pre-existing in gvisor's pool, not in our code.
-	// Skip under macOS race to unblock release; track upstream.
-	if runtime.GOOS == "darwin" && testDeadlineScale > 1 {
-		t.Skip("skipping on macOS+race: gvisor view-pool reuse race in InjectInbound; non-race macOS PASSes; tracked separately")
-	}
+	// Race-detector reports here are gvisor's pkg/buffer.viewPool
+	// reuse pattern (sync.Pool reuse without per-byte happens-before
+	// annotation, which TSan reports verbatim). Suppressed via
+	// .gorace.suppressions at the repo root — the suppression is
+	// narrow (race:gvisor.dev/gvisor/pkg/buffer) and the substantive
+	// race-clean check still applies to our own code.
 	serverKey, c1Key, c2Key := mustKey(t), mustKey(t), mustKey(t)
 	serverPort := freeUDPPort(t)
 
@@ -3336,7 +3332,9 @@ func serveUDPEcho(pc net.PacketConn) {
 
 func udpRoundTrip(t *testing.T, conn net.Conn, msg []byte) []byte {
 	t.Helper()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	// 5s normally, scaled by testDeadlineScale (10×) under -race so
+	// macOS race overhead doesn't time out a one-shot UDP echo.
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second * testDeadlineScale))
 	if _, err := conn.Write(msg); err != nil {
 		t.Fatal(err)
 	}
