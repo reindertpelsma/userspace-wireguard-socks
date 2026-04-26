@@ -285,6 +285,12 @@ func TestUWGWrapperMessageSyscallsAcrossTransports(t *testing.T) {
 		// path has no per-syscall counter, so the round-trip output
 		// is the only signal there.
 		syscalls []string
+		// anyOfSyscalls is for cases where libc may use one of
+		// several syscall numbers — each inner slice is "at least
+		// one of these names must have count ≥ 1". E.g., musl
+		// emulates sendmmsg as a loop of sendmsg, so {"sendmmsg",
+		// "sendmsg"} accepts either. AND across outer slices.
+		anyOfSyscalls [][]string
 	}{
 		{
 			name:     "tcp-sendmsg-recvmsg",
@@ -323,17 +329,25 @@ func TestUWGWrapperMessageSyscallsAcrossTransports(t *testing.T) {
 			syscalls: []string{"readv", "writev"},
 		},
 		{
-			name:     "udp-sendmmsg-recvmmsg",
-			args:     []string{"100.64.94.1", "18081", "udp-mmsg", "udp", "mmsg"},
-			want:     "udp-mmsg",
-			syscalls: []string{"sendmmsg", "recvmmsg"},
+			name: "udp-sendmmsg-recvmmsg",
+			args: []string{"100.64.94.1", "18081", "udp-mmsg", "udp", "mmsg"},
+			want: "udp-mmsg",
+			// musl <1.x and some libc paths emulate sendmmsg as a
+			// loop of sendmsg syscalls — the tracer then sees
+			// sendmsg counts instead of sendmmsg. Check
+			// EITHER family. recvmmsg has the same potential
+			// asymmetry on some libcs. The point is "the libc
+			// call reached the tracer", not which syscall number
+			// the libc happened to use.
+			anyOfSyscalls: [][]string{{"sendmmsg", "sendmsg"}, {"recvmmsg", "recvmsg"}},
 		},
 	}
 	transports := []string{"preload", "preload-and-ptrace", "ptrace", "ptrace-seccomp", "ptrace-only"}
 	for _, transport := range transports {
 		for _, tc := range cases {
 			t.Run(transport+"/"+tc.name, func(t *testing.T) {
-				if transportTracerCountsHotpathSyscalls(transport) && len(tc.syscalls) > 0 {
+				hasCounters := len(tc.syscalls) > 0 || len(tc.anyOfSyscalls) > 0
+				if transportTracerCountsHotpathSyscalls(transport) && hasCounters {
 					out, stats := runWrappedTargetWithStats(t, art, httpSock, transport, art.stub, tc.args, wrapperRunOptions{
 						timeout: 60 * time.Second,
 					})
@@ -342,6 +356,15 @@ func TestUWGWrapperMessageSyscallsAcrossTransports(t *testing.T) {
 					}
 					for _, name := range tc.syscalls {
 						assertSyscallAtLeast(t, stats, name, 1)
+					}
+					for _, group := range tc.anyOfSyscalls {
+						var total uint64
+						for _, name := range group {
+							total += stats.Syscalls[name]
+						}
+						if total < 1 {
+							t.Fatalf("expected at least one of %v >= 1, got 0 (all=%v)", group, stats.Syscalls)
+						}
 					}
 					return
 				}
