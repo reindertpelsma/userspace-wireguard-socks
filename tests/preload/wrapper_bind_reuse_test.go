@@ -257,9 +257,22 @@ func TestUWGWrapperReuseAcrossTransports(t *testing.T) {
 				})
 			defer killProcessGroup(bCmd)
 
+			// SO_REUSEPORT load-balances incoming UDP datagrams across
+			// 64 listening sockets per wrapper; we need at least one
+			// reply from each wrapper (udp-a + udp-b). The kernel's
+			// hash distribution can starve one wrapper for many
+			// attempts, and any single listener can be momentarily
+			// slow under -race / lite-build CI load. Use an inline
+			// non-fatal probe so a single 5s timeout doesn't kill
+			// the whole test — the outer 40-iteration budget is
+			// what bounds liveness here.
 			seenUDP := map[string]bool{}
+			addr := fmt.Sprintf("127.0.0.1:%d", udpPort)
 			for i := 0; i < 40 && !(seenUDP["udp-a"] && seenUDP["udp-b"]); i++ {
-				seenUDP[roundTripHostUDP(t, fmt.Sprintf("127.0.0.1:%d", udpPort), "ping")] = true
+				reply, ok := tryRoundTripHostUDP(addr, "ping", 5*time.Second)
+				if ok {
+					seenUDP[reply] = true
+				}
 			}
 			if !seenUDP["udp-a"] || !seenUDP["udp-b"] {
 				t.Fatalf("UDP reuse replies did not reach both listeners: %v", seenUDP)
@@ -310,6 +323,30 @@ func roundTripTunnelTCP(t *testing.T, eng interface {
 		t.Fatal(err)
 	}
 	return string(buf[:n])
+}
+
+// tryRoundTripHostUDP is a non-fatal sibling of roundTripHostUDP for
+// callers that probe in a retry loop. Returns ("", false) on any
+// dial/write/read error including timeouts; the caller decides whether
+// to retry or fail.
+func tryRoundTripHostUDP(address, payload string, timeout time.Duration) (string, bool) {
+	conn, err := net.DialTimeout("udp", address, timeout)
+	if err != nil {
+		return "", false
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte(payload)); err != nil {
+		return "", false
+	}
+	buf := make([]byte, 256)
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return "", false
+	}
+	n, err := conn.Read(buf)
+	if err != nil {
+		return "", false
+	}
+	return string(buf[:n]), true
 }
 
 func roundTripHostUDP(t *testing.T, address, payload string) string {
