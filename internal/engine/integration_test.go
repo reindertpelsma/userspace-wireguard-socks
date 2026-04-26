@@ -202,9 +202,9 @@ func TestTransparentInboundICMPToHost(t *testing.T) {
 	}}
 	clientEng := mustStart(t, clientCfg)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second*testDeadlineScale)
 	defer cancel()
-	ping, err := clientEng.Ping(ctx, hostIP.String(), 1, 2*time.Second)
+	ping, err := clientEng.Ping(ctx, hostIP.String(), 1, 2*time.Second*testDeadlineScale)
 	if err != nil {
 		t.Fatal(err)
 	}
