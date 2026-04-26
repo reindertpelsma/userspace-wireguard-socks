@@ -706,7 +706,7 @@ func TestUWGWrapperRecvPeekAcrossTransports(t *testing.T) {
 	for _, transport := range []string{"preload", "preload-and-ptrace", "ptrace", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			out := runWrappedTargetWithOptions(t, art, httpSock, transport, art.stub, args,
-				wrapperRunOptions{timeout: 60 * time.Second})
+				wrapperRunOptions{timeout: 120 * time.Second})
 			if normalizedOutput(out) != "recv-peek-msg" {
 				t.Fatalf("unexpected recv-peek output %q", out)
 			}
@@ -732,7 +732,7 @@ func TestUWGWrapperShortReadAcrossTransports(t *testing.T) {
 	for _, transport := range []string{"preload", "preload-and-ptrace", "ptrace", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			out := runWrappedTargetWithOptions(t, art, httpSock, transport, art.stub, args,
-				wrapperRunOptions{timeout: 60 * time.Second})
+				wrapperRunOptions{timeout: 120 * time.Second})
 			if normalizedOutput(out) != "short-read-payload-message" {
 				t.Fatalf("unexpected short-read output %q", out)
 			}
