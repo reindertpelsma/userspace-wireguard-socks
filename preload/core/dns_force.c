@@ -32,7 +32,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
+#include "freestanding.h"
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <netinet/in.h>

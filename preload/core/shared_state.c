@@ -47,7 +47,7 @@
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
+#include "freestanding.h"
 #include <sys/mman.h>
 #include <sys/syscall.h>
 
