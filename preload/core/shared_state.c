@@ -54,21 +54,27 @@
 #include "../shared_state.h"
 #include "syscall.h"
 
-/* Set by uwg_state_init(); read by every dispatcher. Points to either
- * an mmap'd shared file (when UWGS_SHARED_STATE_PATH is set), or to
- * the in-memory fallback below if init couldn't open the file. The
- * fallback is what makes phase1.so work as a drop-in replacement for
- * the legacy preload — no external state-file dependency.
+/* In-memory fallback when no shared-state file is available — what
+ * makes phase1.so work as a drop-in replacement for the legacy preload.
  *
- * Static init: magic + version are populated below so dispatchers see
- * a valid table even before uwg_state_init runs (during early
- * constructor work, libc init, etc.). The init code transparently
- * promotes to the shared mmap if the file is available. */
-static struct uwg_shared_state uwg_state_local = {
-    .magic = UWG_SHARED_MAGIC,
-    .version = UWG_SHARED_VERSION,
-};
+ * Declared without explicit initializers so the entire 10MB struct
+ * (mostly the 65K-slot tracked[] array) lives in .bss instead of
+ * .data; otherwise the .so balloons by ~10MB on disk. The few fields
+ * that need non-zero defaults (magic/version) get populated at first
+ * lookup via the lazy_local_init helper below. */
+static struct uwg_shared_state uwg_state_local;
 static struct uwg_shared_state *uwg_state = &uwg_state_local;
+static _Atomic int uwg_state_local_inited;
+
+static void lazy_local_init(void) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(
+            &uwg_state_local_inited, &expected, 1,
+            memory_order_acq_rel, memory_order_acquire)) {
+        uwg_state_local.magic = UWG_SHARED_MAGIC;
+        uwg_state_local.version = UWG_SHARED_VERSION;
+    }
+}
 
 /* Initialization guard. CAS-based — async-signal-safe. */
 static _Atomic int uwg_state_init_state; /* 0=unstarted, 1=in-progress, 2=done */
@@ -153,8 +159,9 @@ int uwg_state_init(void) {
     }
     if (!path || !*path) {
         /* No shared file → keep the static fallback (uwg_state already
-         * points at uwg_state_local). Dispatchers see a valid table
-         * with magic/version set; everything stays in-process. */
+         * points at uwg_state_local). Lazy-init magic/version so a
+         * later mmap-mismatch check still sees a valid table. */
+        lazy_local_init();
         atomic_store_explicit(&uwg_state_init_state, 2, memory_order_release);
         return 0;
     }
