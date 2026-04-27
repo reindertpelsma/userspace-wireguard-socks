@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: ISC
  *
  * Freestanding replacements for the small libc surface that
- * preload/core/* relies on. The Phase 1 .so build links these
+ * the preload/core sources rely on. The Phase 1 .so build links these
  * AGAINST glibc's versions (so memcpy/memset come from libc) — the
  * macros below collapse to the libc symbols. The Phase 2 static
  * blob build defines UWG_FREESTANDING and the macros expand to
