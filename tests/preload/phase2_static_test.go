@@ -70,13 +70,20 @@ func TestPhase2StaticBinaryEchoTCP(t *testing.T) {
 	if out, err := gccCmd.CombinedOutput(); err != nil {
 		t.Fatalf("gcc -static failed: %v\n%s", err, out)
 	}
-	// Confirm it really is statically linked.
-	fileOut, _ := exec.Command("file", client).CombinedOutput()
-	if !strings.Contains(string(fileOut), "statically linked") &&
-		!strings.Contains(string(fileOut), "static-pie linked") {
-		t.Fatalf("client isn't statically linked: %s", fileOut)
+	// Confirm it really is statically linked. `file` is missing in
+	// some minimal containers (e.g. golang:alpine without the file
+	// package); treat its absence as "trust gcc -static did its job"
+	// rather than failing the test.
+	if _, fileErr := exec.LookPath("file"); fileErr == nil {
+		fileOut, _ := exec.Command("file", client).CombinedOutput()
+		if !strings.Contains(string(fileOut), "statically linked") &&
+			!strings.Contains(string(fileOut), "static-pie linked") {
+			t.Fatalf("client isn't statically linked: %s", fileOut)
+		}
+		t.Logf("client: %s", strings.TrimSpace(string(fileOut)))
+	} else {
+		t.Logf("client: %s (file(1) unavailable; trusting gcc -static)", client)
 	}
-	t.Logf("client: %s", strings.TrimSpace(string(fileOut)))
 
 	// Build wrapper artifacts (we need uwgwrapper + a tunnel server).
 	art := buildPhase1Artifacts(t)

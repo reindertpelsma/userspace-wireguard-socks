@@ -30,6 +30,8 @@
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>      /* struct timespec — pulled transitively via <sys/socket.h>
+                          on glibc, but musl requires the explicit include. */
 #include "freestanding.h"
 #include "freestanding_runtime.h"
 #include <sys/socket.h>
