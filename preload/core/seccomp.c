@@ -105,6 +105,14 @@ static const int uwg_trapped_syscalls[] = {
      * shim_libc layer catches these at the libc level for tunnel
      * fds. Raw-asm uses leak — Phase 1.5 supervisor closes the
      * gap by re-arming the SIGSYS handler before libc-init runs. */
+
+    /* rt_sigaction trapped specifically to protect our SIGSYS handler
+     * from being clobbered by application runtimes (Go's runtime
+     * installs its own SIGSYS handler during M startup; chromium-style
+     * sandbox layers do similar). Our handler uwg_dispatch silently
+     * succeeds when the signum is SIGSYS, leaving our handler in place;
+     * other signums passthrough to the real kernel call. */
+    SYS_rt_sigaction,
 };
 
 /* execve / execveat → RET_TRACE for Phase 2 bootstrap supervisor.

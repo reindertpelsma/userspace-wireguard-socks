@@ -75,7 +75,8 @@ CORE_SRCS=(
     preload/core/static_entry.c
 )
 
-OUT_DIR="${1:-preload}"
+OUT_DIR="${1:-cmd/uwgwrapper/assets}"
+mkdir -p "$OUT_DIR"
 OUT_SO="$OUT_DIR/uwgpreload-static-${ARCH}.so"
 
 # First sanity check: does core/ compile freestanding (no libc)?

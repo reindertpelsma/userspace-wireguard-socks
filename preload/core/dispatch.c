@@ -69,6 +69,16 @@ long uwg_dispatch(long nr, long a1, long a2, long a3,
     case SYS_pread64:     return uwg_pread((int)a1, (void *)a2, (size_t)a3, (int64_t)a4);
     case SYS_pwrite64:    return uwg_pwrite((int)a1, (const void *)a2, (size_t)a3, (int64_t)a4);
 
+    /* --- handler-protection --- */
+    case SYS_rt_sigaction:
+        /* Reject SIGSYS sigaction silently (return success). Other
+         * signums passthrough to the kernel. SIGSYS = 31 on Linux. */
+        if ((int)a1 == 31) {
+            /* Application thinks it installed a handler; ours stays. */
+            return 0;
+        }
+        return uwg_passthrough_syscall4(SYS_rt_sigaction, a1, a2, a3, a4);
+
     default:
         /* Filter and dispatch table out of sync — bug. The filter
          * trapped a syscall we didn't register. Fail closed. */

@@ -71,27 +71,47 @@ type staticBlobSpec struct {
 	LowVaddr, HighVaddr uint64
 }
 
-// staticBlobPath picks the blob path per platform.
+// staticBlobPath picks the blob path per platform. Source order:
+//  1. UWGS_STATIC_BLOB env var (explicit override).
+//  2. cmd/uwgwrapper/assets/uwgpreload-static-${arch}.so produced
+//     by preload/build_static.sh during the wrapper build (sibling
+//     to the wrapper binary or in CWD/cmd/uwgwrapper/assets).
+//
+// Embedding via //go:embed is a planned follow-up — currently the
+// build flow runs build_static.sh before `go build` and the
+// resulting .so is placed next to the wrapper binary or in the
+// repo's cmd/uwgwrapper/assets/.
 func staticBlobPath() string {
 	if p := os.Getenv("UWGS_STATIC_BLOB"); p != "" {
 		return p
 	}
 	exe, _ := os.Executable()
-	dir := ""
+	exeDir := ""
 	if exe != "" {
-		// Sibling path: same directory as uwgwrapper binary.
 		for i := len(exe) - 1; i >= 0; i-- {
 			if exe[i] == '/' {
-				dir = exe[:i+1]
+				exeDir = exe[:i+1]
 				break
 			}
 		}
 	}
+	var name string
 	switch runtime.GOARCH {
 	case "amd64":
-		return dir + "uwgpreload-static-amd64.so"
+		name = "uwgpreload-static-amd64.so"
 	case "arm64":
-		return dir + "uwgpreload-static-arm64.so"
+		name = "uwgpreload-static-arm64.so"
+	default:
+		return ""
+	}
+	for _, candidate := range []string{
+		exeDir + name,
+		exeDir + "assets/" + name,
+		"cmd/uwgwrapper/assets/" + name,
+	} {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
 	}
 	return ""
 }
