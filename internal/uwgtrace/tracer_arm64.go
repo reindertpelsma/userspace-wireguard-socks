@@ -971,7 +971,8 @@ func (t *tracer) handleReadv(tid int, regs unix.PtraceRegs, seccompStop bool) er
 	if err != nil {
 		return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 	}
-	result, _, _, _, handled, err := t.emulateRecvBuffer(tid, fd, total)
+	// readv has no flags; rely on the socket's O_NONBLOCK via SavedFL.
+	result, _, _, _, handled, err := t.emulateRecvBuffer(tid, fd, total, 0)
 	if !handled {
 		return t.resumeDefault(tid, seccompStop)
 	}
@@ -1236,7 +1237,19 @@ func (t *tracer) handleRecvfrom(tid int, regs unix.PtraceRegs, seccompStop bool)
 		}
 		return t.finishEmulated(tid, regs, int64(n), seccompStop)
 	case uwgshared.KindUDPConnected:
-		packet, err := readPacketFD(localFD)
+		// Same MSG_DONTWAIT / O_NONBLOCK propagation as the TCP path.
+		// On arm64 the recvfrom flags arg is Regs[3] (4th positional).
+		recvFlags := int(int32(regs.Regs[3]))
+		if state.SavedFL&unix.O_NONBLOCK != 0 {
+			recvFlags |= unix.MSG_DONTWAIT
+		}
+		var packet []byte
+		var err error
+		if recvFlags&unix.MSG_DONTWAIT != 0 {
+			packet, err = readPacketFDNonblock(localFD)
+		} else {
+			packet, err = readPacketFD(localFD)
+		}
 		if err != nil {
 			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
@@ -1266,7 +1279,17 @@ func (t *tracer) handleRecvfrom(tid int, regs unix.PtraceRegs, seccompStop bool)
 		}
 		return t.finishEmulated(tid, regs, int64(len(out)), seccompStop)
 	case uwgshared.KindUDPListener:
-		packet, err := readPacketFD(localFD)
+		recvFlags := int(int32(regs.Regs[3]))
+		if state.SavedFL&unix.O_NONBLOCK != 0 {
+			recvFlags |= unix.MSG_DONTWAIT
+		}
+		var packet []byte
+		var err error
+		if recvFlags&unix.MSG_DONTWAIT != 0 {
+			packet, err = readPacketFDNonblock(localFD)
+		} else {
+			packet, err = readPacketFD(localFD)
+		}
 		if err != nil {
 			return t.finishEmulated(tid, regs, -errnoResult(err), seccompStop)
 		}
@@ -1312,11 +1335,15 @@ func (t *tracer) handleSendmsg(tid int, regs unix.PtraceRegs, seccompStop bool) 
 func (t *tracer) handleRecvmsg(tid int, regs unix.PtraceRegs, seccompStop bool) error {
 	fd := int(int32(regs.Regs[0]))
 	msgPtr := uintptr(regs.Regs[1])
+	// recvmsg's flags arg is the 3rd positional → arm64 Regs[2].
+	// Previously dropped — see amd64 handler for the chromium /
+	// libuv / Go-netpoller hang it caused.
+	flags := int(int32(regs.Regs[2]))
 	state := t.trackedSnapshot(tid, fd)
 	if state.Active == 0 && state.Proxied == 0 {
 		return t.resumeDefault(tid, seccompStop)
 	}
-	result, handled, err := t.emulateRecvmsg(tid, fd, msgPtr)
+	result, handled, err := t.emulateRecvmsg(tid, fd, msgPtr, flags)
 	if !handled {
 		return t.resumeDefault(tid, seccompStop)
 	}
@@ -1380,6 +1407,8 @@ func (t *tracer) handleRecvmmsg(tid int, regs unix.PtraceRegs, seccompStop bool)
 	fd := int(int32(regs.Regs[0]))
 	vecPtr := uintptr(regs.Regs[1])
 	vlen := uint64(regs.Regs[2])
+	// recvmmsg's flags is the 4th positional → arm64 Regs[3].
+	flags := int(int32(regs.Regs[3]))
 	state := t.trackedSnapshot(tid, fd)
 	if state.Active == 0 && state.Proxied == 0 {
 		return t.resumeDefault(tid, seccompStop)
@@ -1396,7 +1425,14 @@ func (t *tracer) handleRecvmmsg(tid int, regs unix.PtraceRegs, seccompStop bool)
 	var received uint64
 	for i := uint64(0); i < vlen; i++ {
 		msgPtr := vecPtr + uintptr(i*tracedMMSghdrSize)
-		result, handled, err := t.emulateRecvmsg(tid, fd, msgPtr)
+		// After the first packet, force MSG_DONTWAIT so we don't
+		// block waiting for a hypothetical second packet — matches
+		// the kernel's recvmmsg semantics.
+		iterFlags := flags
+		if received > 0 {
+			iterFlags |= unix.MSG_DONTWAIT
+		}
+		result, handled, err := t.emulateRecvmsg(tid, fd, msgPtr, iterFlags)
 		if !handled {
 			if i == 0 {
 				return t.resumeDefault(tid, seccompStop)
@@ -1440,7 +1476,7 @@ func (t *tracer) emulateSendmsg(tid, fd int, msgPtr uintptr) (int64, bool, error
 	}, msg.name, uint64(msg.nameLen))
 }
 
-func (t *tracer) emulateRecvmsg(tid, fd int, msgPtr uintptr) (int64, bool, error) {
+func (t *tracer) emulateRecvmsg(tid, fd int, msgPtr uintptr, callerFlags int) (int64, bool, error) {
 	msg, err := t.readTraceMSghdr(tid, msgPtr)
 	if err != nil {
 		return 0, true, err
@@ -1449,7 +1485,7 @@ func (t *tracer) emulateRecvmsg(tid, fd int, msgPtr uintptr) (int64, bool, error
 	if err != nil {
 		return 0, true, err
 	}
-	result, flags, source, sourceLen, handled, err := t.emulateRecvBuffer(tid, fd, total)
+	result, flags, source, sourceLen, handled, err := t.emulateRecvBuffer(tid, fd, total, callerFlags)
 	if !handled || err != nil {
 		return 0, handled, err
 	}
@@ -1619,7 +1655,9 @@ func (t *tracer) emulateSendBuffer(tid, fd int, payload func() ([]byte, error), 
 	}
 }
 
-func (t *tracer) emulateRecvBuffer(tid, fd, max int) ([]byte, int32, []byte, int, bool, error) {
+// See tracer_linux_amd64.go::emulateRecvBuffer for the rationale on
+// callerFlags propagation. Same MSG_DONTWAIT / O_NONBLOCK plumbing.
+func (t *tracer) emulateRecvBuffer(tid, fd, max int, callerFlags int) ([]byte, int32, []byte, int, bool, error) {
 	state := t.trackedSnapshot(tid, fd)
 	if state.Active != 0 && state.Proxied == 0 && int(state.Type)&0xf == unix.SOCK_DGRAM && state.Kind == uwgshared.KindUDPConnected {
 		dest, ok := remoteSockaddrFromState(state)
@@ -1676,10 +1714,14 @@ func (t *tracer) emulateRecvBuffer(tid, fd, max int) ([]byte, int32, []byte, int
 	if max < 0 {
 		return nil, 0, nil, 0, true, syscall.EINVAL
 	}
+	effectiveFlags := callerFlags
+	if state.SavedFL&unix.O_NONBLOCK != 0 {
+		effectiveFlags |= unix.MSG_DONTWAIT
+	}
 	switch state.Kind {
 	case uwgshared.KindTCPStream:
 		out := make([]byte, max)
-		n, err := unix.Read(localFD, out)
+		n, _, err := unix.Recvfrom(localFD, out, effectiveFlags)
 		if err != nil {
 			return nil, 0, nil, 0, true, err
 		}
@@ -1690,7 +1732,13 @@ func (t *tracer) emulateRecvBuffer(tid, fd, max int) ([]byte, int32, []byte, int
 		})
 		return out[:n], 0, source, sourceLen, true, nil
 	case uwgshared.KindUDPConnected:
-		packet, err := readPacketFD(localFD)
+		var packet []byte
+		var err error
+		if effectiveFlags&unix.MSG_DONTWAIT != 0 {
+			packet, err = readPacketFDNonblock(localFD)
+		} else {
+			packet, err = readPacketFD(localFD)
+		}
 		if err != nil {
 			return nil, 0, nil, 0, true, err
 		}
@@ -1715,7 +1763,13 @@ func (t *tracer) emulateRecvBuffer(tid, fd, max int) ([]byte, int32, []byte, int
 		})
 		return out, flags, source, sourceLen, true, nil
 	case uwgshared.KindUDPListener:
-		packet, err := readPacketFD(localFD)
+		var packet []byte
+		var err error
+		if effectiveFlags&unix.MSG_DONTWAIT != 0 {
+			packet, err = readPacketFDNonblock(localFD)
+		} else {
+			packet, err = readPacketFD(localFD)
+		}
 		if err != nil {
 			return nil, 0, nil, 0, true, err
 		}
@@ -3206,6 +3260,28 @@ func readPacketFD(fd int) ([]byte, error) {
 		return nil, err
 	}
 	return buf, nil
+}
+
+// See tracer_linux_amd64.go::readPacketFDNonblock for rationale.
+func readPacketFDNonblock(fd int) ([]byte, error) {
+	pollfds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	for {
+		n, err := unix.Poll(pollfds, 0)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			return nil, syscall.EAGAIN
+		}
+		if pollfds[0].Revents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR) == 0 {
+			return nil, syscall.EAGAIN
+		}
+		break
+	}
+	return readPacketFD(fd)
 }
 
 func readAllFD(fd int, buf []byte) error {
