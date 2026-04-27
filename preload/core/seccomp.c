@@ -96,14 +96,30 @@ static const int uwg_trapped_syscalls[] = {
     SYS_pwrite64,
 };
 
-/* execve / execveat → RET_TRACE for Phase 2 bootstrap supervisor */
-static const int uwg_traced_syscalls[] = {
-    SYS_execve,
-    SYS_execveat,
-};
+/* execve / execveat → RET_TRACE for Phase 2 bootstrap supervisor.
+ *
+ * Phase 1 caveat: SECCOMP_RET_TRACE with NO tracer attached makes
+ * the kernel fail the syscall with -ENOSYS (man seccomp(2)). The
+ * Phase 2 bootstrap supervisor will attach a ptracer that handles
+ * PTRACE_EVENT_SECCOMP for execve and re-arms preload in the new
+ * image. Until that lands, RET_TRACE is unsafe — it would break
+ * execve everywhere.
+ *
+ * For Phase 1 we keep this list EMPTY so execve/execveat fall
+ * through to the default RET_ALLOW. The trade-off: a wrapped
+ * dynamic process that exec's a static binary loses preload
+ * coverage. That's the documented Phase 1 limitation.
+ *
+ * When Phase 2 lands, populate this list with:
+ *     SYS_execve,
+ *     SYS_execveat,
+ */
+static const int uwg_traced_syscalls[] = {0}; /* sentinel — not used */
+#define UWG_N_TRACED_REAL 0  /* override count macro below */
 
 #define UWG_N_TRAPPED  (sizeof(uwg_trapped_syscalls) / sizeof(uwg_trapped_syscalls[0]))
-#define UWG_N_TRACED   (sizeof(uwg_traced_syscalls)  / sizeof(uwg_traced_syscalls[0]))
+/* Phase 1: traced list is intentionally empty; see comment above. */
+#define UWG_N_TRACED   UWG_N_TRACED_REAL
 
 /*
  * Filter program build buffer. Sized to comfortably hold:

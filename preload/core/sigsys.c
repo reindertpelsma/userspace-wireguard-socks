@@ -273,6 +273,14 @@ int uwg_install_sigsys_handler(void) {
 int uwg_install_sigsys_handler(void) {
     struct sigaction sa;
     sa.sa_sigaction = uwg_sigsys_handler;
+    /* SA_ONSTACK is required for Go-runtime compatibility: Go's
+     * runtime/signal_unix.go preserves user-installed signal
+     * handlers ONLY if they're flagged with SA_ONSTACK. Without
+     * the flag, Go's runtime treats the handler as "unwanted" and
+     * may override it during runtime init, causing trapped
+     * syscalls to crash or hang inside Go's signal machinery.
+     * Per-thread sigaltstack is set up lazily in the handler
+     * itself (or during early thread init in Phase 2). */
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     /* NO SA_NODEFER → kernel adds SIGSYS to mask while handler
      * runs → blocks recursive SIGSYS. */
