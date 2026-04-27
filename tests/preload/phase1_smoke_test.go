@@ -130,6 +130,24 @@ func TestPhase1SeccompPreload(t *testing.T) {
 		// Unconnected UDP recv without poll() — same but on the
 		// LISTENER kind (uwg_decode_udp_datagram path).
 		{name: "udp_unconnected_no_poll", modes: []string{"udp-unconnected-no-poll"}, sentry: "phase1-udp-unp", port: "18081"},
+		// connect()-then-getsockname/getpeername on a UDP fd. Phase 1
+		// passes these through to the kernel on the unix socketpair fd
+		// (the manager-stream end after dup3). They must succeed even
+		// though the underlying fd is no longer the original UDP socket
+		// — the kernel returns AF_UNIX sockaddrs but the call doesn't
+		// fail. Phase 1 followup: synthesize tunnel-side AF_INET sockaddrs
+		// so introspection-heavy apps see a sensible answer.
+		{name: "udp_connect_probe", modes: []string{"udp-connect-probe"}, sentry: "phase1-udp-probe", port: "18081"},
+		// Big TCP syscall surface — exercises setsockopt/getsockopt/
+		// fcntl(F_GETFL/F_SETFL/F_GETFD/F_SETFD)/getsockname/getpeername/
+		// dup/dup2/dup3/poll/ppoll/read/write on a connected TCP fd.
+		// Adversarial because each operation either commutes with our
+		// proxied-fd state or has to passthrough cleanly; one mis-routed
+		// op breaks the whole sequence.
+		{name: "tcp_syscall_surface", modes: []string{"syscall-surface"}, sentry: "phase1-tcp-surface", port: "18080"},
+		// Same but with the "extra" surface variant (adds shutdown,
+		// extra fcntl shapes, and recv with MSG_PEEK).
+		{name: "tcp_syscall_surface_extra", modes: []string{"syscall-surface-extra"}, sentry: "phase1-tcp-surface-x", port: "18080"},
 	}
 
 	for _, tc := range cases {
