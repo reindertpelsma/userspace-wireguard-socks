@@ -119,10 +119,23 @@ func TestPhase1DropInLegacyTCP(t *testing.T) {
 		// supports it natively without uwgwrapper. Confirms drop-in is a
 		// true superset of the legacy LD_PRELOAD-only behaviour.
 		{name: "tcp_exec", args: []string{"tcp", "exec"}, expect: "phase1-dropin-tcp-exec"},
+		{name: "tcp_msg", args: []string{"tcp", "msg"}, expect: "phase1-dropin-tcp-msg"},
+		{name: "tcp_iov", args: []string{"tcp", "iov"}, expect: "phase1-dropin-tcp-iov"},
+		{name: "tcp_select", args: []string{"tcp", "select"}, expect: "phase1-dropin-tcp-sel"},
+		{name: "tcp_pselect", args: []string{"tcp", "pselect"}, expect: "phase1-dropin-tcp-psel"},
+		{name: "tcp_recv_peek", args: []string{"tcp", "recv-peek"}, expect: "phase1-dropin-tcp-peek"},
+		{name: "tcp_syscall_surface", args: []string{"syscall-surface"}, expect: "phase1-dropin-tcp-surf"},
+		{name: "tcp_syscall_surface_extra", args: []string{"syscall-surface-extra"}, expect: "phase1-dropin-tcp-surfx"},
 		{name: "udp", args: []string{"udp"}, expect: "phase1-dropin-udp"},
+		{name: "udp_msg", args: []string{"udp", "msg"}, expect: "phase1-dropin-udp-msg"},
+		{name: "udp_iov", args: []string{"udp", "iov"}, expect: "phase1-dropin-udp-iov"},
+		{name: "udp_mmsg", args: []string{"mmsg"}, expect: "phase1-dropin-udp-mmsg"},
+		{name: "udp_no_poll", args: []string{"udp-no-poll"}, expect: "phase1-dropin-udp-np"},
 		{name: "udp_unconnected", args: []string{"udp-unconnected"}, expect: "phase1-dropin-udp-unc"},
+		{name: "udp_unconnected_no_poll", args: []string{"udp-unconnected-no-poll"}, expect: "phase1-dropin-udp-unp"},
 		{name: "udp_unconnected_bound", args: []string{"udp-unconnected"},
 			env: []string{"UWGS_STUB_BIND=100.64.94.2:19091"}, expect: "phase1-dropin-udp-bound"},
+		{name: "udp_connect_probe", args: []string{"udp-connect-probe"}, expect: "phase1-dropin-udp-probe"},
 	}
 	for _, tc := range cases {
 		tc := tc
