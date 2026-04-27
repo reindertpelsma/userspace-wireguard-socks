@@ -40,3 +40,37 @@ func TestPhase1FxlockStress(t *testing.T) {
 	}
 	t.Logf("fxlock stress: %s", strings.TrimSpace(string(out)))
 }
+
+// TestPhase1CacheRaceStress drives the actual shared_state.c
+// per-fd-locked cache via uwg_state_store / lookup / clear from many
+// threads on overlapping fds. Each store stamps a marker into
+// saved_fl; each subsequent lookup must see a self-consistent
+// snapshot (no mixed-writer fields) — torn=0 is the bar.
+//
+// This is the integration test the user's spec calls out: hammers
+// concurrent socket/connect/close on the same fd from multiple
+// threads. With per-fd rwlock + race_close, the legacy
+// torn-read class of races is eliminated.
+func TestPhase1CacheRaceStress(t *testing.T) {
+	requirePhase1Toolchain(t)
+	repo := filepath.Clean(filepath.Join("..", ".."))
+	bin := filepath.Join(t.TempDir(), "cache_race_stress")
+	cmd := exec.Command("gcc", "-O2", "-D_GNU_SOURCE", "-pthread",
+		"-I", "preload/core", "-I", "preload",
+		"-o", bin,
+		"preload/core/tests/cache_race_stress.c",
+		"preload/core/shared_state.c",
+		"preload/core/freestanding_runtime.c")
+	cmd.Dir = repo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("compile cache_race_stress.c: %v\n%s", err, out)
+	}
+	out, err := exec.Command(bin).CombinedOutput()
+	if err != nil {
+		t.Fatalf("cache_race_stress run failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "torn=0") {
+		t.Fatalf("cache stress detected torn reads: %s", out)
+	}
+	t.Logf("cache race stress: %s", strings.TrimSpace(string(out)))
+}

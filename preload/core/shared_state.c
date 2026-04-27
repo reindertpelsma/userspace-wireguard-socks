@@ -97,16 +97,30 @@ static _Atomic int uwg_state_local_inited;
 #define UWG_FD_CACHE_SIZE 4096
 #endif
 
-/* Compact 16-byte cache entry — the hot fields needed by every
- * dispatcher inlined for one-load lookups. Cold-path fields
- * (bind_ip, remote_ip text) require a fall-through to the full
- * shared-state hash lookup. */
+/*
+ * Per-fd race-safe cache.
+ *
+ * Each direct-indexed cache entry is paired with a futex-based rwlock
+ * (preload/core/futex_rwlock.h). All cache reads acquire rdlock; all
+ * cache writes acquire wrlock. This eliminates the torn-read class of
+ * races where a writer mutates owner_pid + flags + saved_fl between
+ * two atomic loads in the reader, and a stale combination is observed.
+ *
+ * The lock array is co-located in BSS and zero-initialized — that's
+ * the lock's "no writer / no readers" state.
+ *
+ * Memory cost: one fxlock (24 bytes) per entry, plus the 16-byte cache
+ * entry itself = 40 bytes per fd × UWG_FD_CACHE_SIZE (4096) = 160KB
+ * BSS per process.
+ *
+ * Cache fields are now plain (non-atomic) — the lock provides ordering.
+ */
 struct uwg_fd_cache_entry {
-    _Atomic int32_t  owner_pid;     /* 0 = empty/invalid; pid = valid */
-    _Atomic uint16_t flags;         /* bit0=tracked, bit1=proxied, bit2-4=kind, bit5=hot_ready */
-    _Atomic uint16_t saved_fl;      /* O_NONBLOCK = 04000 etc, raw libc value */
-    _Atomic uint32_t generation;    /* bumped on store/clear so readers can detect a stale entry */
-    uint32_t reserved;
+    int32_t  owner_pid;          /* 0 = empty/invalid; pid = valid */
+    uint16_t flags;              /* bit0=tracked, bit1=proxied, ... */
+    uint16_t saved_fl;           /* raw O_NONBLOCK etc */
+    uint32_t generation;         /* bumped on every store/clear */
+    uint32_t reserved;           /* padding to 16 bytes */
 };
 _Static_assert(sizeof(struct uwg_fd_cache_entry) == 16,
                "fd cache entry must stay compact");
@@ -117,44 +131,104 @@ _Static_assert(sizeof(struct uwg_fd_cache_entry) == 16,
 #define UWG_CACHE_KIND_SHIFT  2
 #define UWG_CACHE_KIND_MASK   0x001Cu  /* bits 2-4 */
 
+#include "futex_rwlock.h"
+
 static struct uwg_fd_cache_entry uwg_fd_cache[UWG_FD_CACHE_SIZE];
+static struct uwg_fxlock         uwg_fd_cache_lock[UWG_FD_CACHE_SIZE];
 
-static inline void uwg_fd_cache_invalidate(int fd) {
-    if (fd < 0 || fd >= UWG_FD_CACHE_SIZE) return;
-    atomic_store_explicit(&uwg_fd_cache[fd].owner_pid, 0,
-                          memory_order_release);
-    atomic_fetch_add_explicit(&uwg_fd_cache[fd].generation, 1,
-                              memory_order_release);
-}
-
-static inline void uwg_fd_cache_store(int fd, int32_t pid,
-                                      const struct tracked_fd *s) {
-    if (fd < 0 || fd >= UWG_FD_CACHE_SIZE) return;
+/* Set under wrlock. Stores the compact cache fields atomically (from
+ * the reader's POV) because all readers go through rdlock. */
+static inline void uwg_fd_cache_store_locked(int fd, int32_t pid,
+                                             const struct tracked_fd *s) {
+    /* Caller holds wrlock on uwg_fd_cache_lock[fd]. */
+    struct uwg_fd_cache_entry *e = &uwg_fd_cache[fd];
     uint16_t flags = UWG_CACHE_F_TRACKED;
     if (s->proxied)   flags |= UWG_CACHE_F_PROXIED;
     if (s->hot_ready) flags |= UWG_CACHE_F_HOT_READY;
     flags |= (uint16_t)((s->kind & 0x7) << UWG_CACHE_KIND_SHIFT);
-    atomic_fetch_add_explicit(&uwg_fd_cache[fd].generation, 1,
-                              memory_order_release);
-    atomic_store_explicit(&uwg_fd_cache[fd].flags, flags,
-                          memory_order_release);
-    atomic_store_explicit(&uwg_fd_cache[fd].saved_fl,
-                          (uint16_t)(s->saved_fl & 0xFFFF),
-                          memory_order_release);
-    atomic_store_explicit(&uwg_fd_cache[fd].owner_pid, pid,
-                          memory_order_release);
+    e->generation++;
+    e->flags     = flags;
+    e->saved_fl  = (uint16_t)(s->saved_fl & 0xFFFF);
+    e->owner_pid = pid;
 }
 
 /* Fast-path test: returns 1 if fd is DEFINITELY not tracked (cached
- * negative), 0 if we need to fall through to the full lookup. */
+ * negative for current pid), 0 if caller must fall through to the
+ * shared-hash slow path. Acquires per-fd rdlock so the read of
+ * (owner_pid, flags) is consistent with the writer that last
+ * populated the entry. */
 static inline int uwg_fd_cache_negative(int fd, int32_t pid) {
     if (fd < 0 || fd >= UWG_FD_CACHE_SIZE) return 0;
-    int32_t cached_pid = atomic_load_explicit(&uwg_fd_cache[fd].owner_pid,
-                                              memory_order_acquire);
-    if (cached_pid != pid) return 0; /* miss — could be tracked */
-    uint16_t flags = atomic_load_explicit(&uwg_fd_cache[fd].flags,
-                                          memory_order_acquire);
-    return (flags & UWG_CACHE_F_TRACKED) ? 0 : 1;
+    int rc = uwg_fxlock_rdlock(&uwg_fd_cache_lock[fd]);
+    if (rc < 0) return 0; /* re-entrant or race — treat as miss */
+    struct uwg_fd_cache_entry *e = &uwg_fd_cache[fd];
+    int negative = 0;
+    if (e->owner_pid == pid && !(e->flags & UWG_CACHE_F_TRACKED)) {
+        negative = 1;
+    }
+    uwg_fxlock_rdunlock(&uwg_fd_cache_lock[fd]);
+    return negative;
+}
+
+/* Public store wrapper that acquires its own wrlock. Called from
+ * uwg_state_store after the shared hash table has been updated. */
+static inline void uwg_fd_cache_store(int fd, int32_t pid,
+                                      const struct tracked_fd *s) {
+    if (fd < 0 || fd >= UWG_FD_CACHE_SIZE) return;
+    int rc = uwg_fxlock_wrlock(&uwg_fd_cache_lock[fd]);
+    if (rc < 0) return; /* re-entrant — caller is mid-write; skip */
+    uwg_fd_cache_store_locked(fd, pid, s);
+    uwg_fxlock_wrunlock(&uwg_fd_cache_lock[fd]);
+}
+
+/* Public negative-store wrapper (lookup found the fd not tracked).
+ * Acquires its own wrlock. */
+static inline void uwg_fd_cache_store_negative(int fd, int32_t pid) {
+    if (fd < 0 || fd >= UWG_FD_CACHE_SIZE) return;
+    int rc = uwg_fxlock_wrlock(&uwg_fd_cache_lock[fd]);
+    if (rc < 0) return;
+    struct uwg_fd_cache_entry *e = &uwg_fd_cache[fd];
+    e->generation++;
+    e->flags     = 0;
+    e->saved_fl  = 0;
+    e->owner_pid = pid;
+    uwg_fxlock_wrunlock(&uwg_fd_cache_lock[fd]);
+}
+
+/* Cache invalidate: writer side of close/clear. Sets race_close so
+ * any active reader sees the entry going away on its next look,
+ * then takes wrlock and zeroes the entry. The race_close flag is
+ * set BEFORE the wrlock so a concurrent reader that just finished
+ * its rdunlock can observe the flag and treat the cache as miss. */
+static inline void uwg_fd_cache_invalidate(int fd) {
+    if (fd < 0 || fd >= UWG_FD_CACHE_SIZE) return;
+    /* race_close: visible to any concurrent rdlock holder before they
+     * unlock, so they know not to re-trust the entry. The flag is
+     * cleared inside the wrlock below. */
+    atomic_store_explicit(&uwg_fd_cache_lock[fd].race_close, 1,
+                          memory_order_release);
+    int rc = uwg_fxlock_wrlock(&uwg_fd_cache_lock[fd]);
+    if (rc < 0) {
+        /* Re-entrant write (same thread already holds wrlock). The
+         * caller is in the middle of a write transaction; just clear
+         * the entry directly — we already hold the lock. */
+        struct uwg_fd_cache_entry *e = &uwg_fd_cache[fd];
+        e->generation++;
+        e->owner_pid = 0;
+        e->flags     = 0;
+        e->saved_fl  = 0;
+        atomic_store_explicit(&uwg_fd_cache_lock[fd].race_close, 0,
+                              memory_order_release);
+        return;
+    }
+    struct uwg_fd_cache_entry *e = &uwg_fd_cache[fd];
+    e->generation++;
+    e->owner_pid = 0;
+    e->flags     = 0;
+    e->saved_fl  = 0;
+    atomic_store_explicit(&uwg_fd_cache_lock[fd].race_close, 0,
+                          memory_order_release);
+    uwg_fxlock_wrunlock(&uwg_fd_cache_lock[fd]);
 }
 
 static void lazy_local_init(void) {
@@ -319,22 +393,6 @@ int uwg_state_init(void) {
  * struct (all fields 0 → caller will see active=0, proxied=0,
  * kind=KIND_NONE → "not a tunnel fd, pass through").
  */
-/* Populate the per-process cache with a negative entry — "looked up,
- * not tracked". Subsequent lookups for the same (pid, fd) hit the
- * fast path. Called from uwg_state_lookup whenever the slow hash
- * lookup returns no entry. */
-static inline void uwg_fd_cache_store_negative(int fd, int32_t pid) {
-    if (fd < 0 || fd >= UWG_FD_CACHE_SIZE) return;
-    atomic_fetch_add_explicit(&uwg_fd_cache[fd].generation, 1,
-                              memory_order_release);
-    atomic_store_explicit(&uwg_fd_cache[fd].flags, 0,
-                          memory_order_release);
-    atomic_store_explicit(&uwg_fd_cache[fd].saved_fl, 0,
-                          memory_order_release);
-    atomic_store_explicit(&uwg_fd_cache[fd].owner_pid, pid,
-                          memory_order_release);
-}
-
 struct tracked_fd uwg_state_lookup(int fd) {
     struct tracked_fd out;
     memset(&out, 0, sizeof(out));
