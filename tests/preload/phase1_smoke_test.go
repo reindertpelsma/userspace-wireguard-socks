@@ -148,6 +148,17 @@ func TestPhase1SeccompPreload(t *testing.T) {
 		// Same but with the "extra" surface variant (adds shutdown,
 		// extra fcntl shapes, and recv with MSG_PEEK).
 		{name: "tcp_syscall_surface_extra", modes: []string{"syscall-surface-extra"}, sentry: "phase1-tcp-surface-x", port: "18080"},
+		// short-read + select / pselect — exercises the wait-for-readable
+		// paths via select(2)/pselect(2). Phase 1 doesn't trap select/
+		// pselect (kernel handles them on the manager-fd directly), so
+		// these test that our intercepted send doesn't break the kernel-
+		// side waitset state.
+		{name: "tcp_select", modes: []string{"tcp", "select"}, sentry: "phase1-tcp-sel", port: "18080"},
+		{name: "tcp_pselect", modes: []string{"tcp", "pselect"}, sentry: "phase1-tcp-psel", port: "18080"},
+		// recv-peek — exercises MSG_PEEK on the connected-TCP path.
+		// Our handler must propagate flags faithfully to the kernel-side
+		// recvmsg or the peeked byte gets consumed.
+		{name: "tcp_recv_peek", modes: []string{"tcp", "recv-peek"}, sentry: "phase1-tcp-peek", port: "18080"},
 	}
 
 	for _, tc := range cases {
