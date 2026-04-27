@@ -105,6 +105,31 @@ func TestPhase1SeccompPreload(t *testing.T) {
 		// carry the sockaddr-tagged frame (1 family + 1 padding + 2 port +
 		// IP + payload).
 		{name: "udp_unconnected", modes: []string{"udp-unconnected"}, sentry: "phase1-udp-unconn", port: "18081"},
+		// TCP with sendmsg/recvmsg — exercises the explicit msghdr path
+		// in uwg_recvmsg / uwg_sendmsg on a KIND_TCP_STREAM fd (passthrough).
+		{name: "tcp_msg", modes: []string{"tcp", "msg"}, sentry: "phase1-tcp-msg", port: "18080"},
+		// UDP-connected with sendmsg/recvmsg — exercises the explicit
+		// msghdr path on a KIND_UDP_CONNECTED fd (framing).
+		{name: "udp_msg", modes: []string{"udp", "msg"}, sentry: "phase1-udp-msg", port: "18081"},
+		// UDP-connected with readv/writev — exercises the iov-scatter/
+		// iov-gather paths in stream_ops.c for KIND_UDP_CONNECTED.
+		{name: "udp_iov", modes: []string{"udp", "iov"}, sentry: "phase1-udp-iov", port: "18081"},
+		// UDP-connected with sendmmsg/recvmmsg — exercises the multi-
+		// datagram dispatch loop in msg_ops.c.
+		{name: "udp_mmsg", modes: []string{"mmsg"}, sentry: "phase1-udp-mmsg", port: "18081"},
+		// dup propagation — child fd from dup() must inherit proxied
+		// state without re-registering with fdproxy.
+		{name: "tcp_dup", modes: []string{"tcp", "dup"}, sentry: "phase1-tcp-dup", port: "18080"},
+		// fork propagation — child process must keep the proxied fd
+		// usable. (execve is intentionally NOT covered; Phase 1 doesn't
+		// re-arm preload across exec.)
+		{name: "tcp_fork", modes: []string{"tcp", "fork"}, sentry: "phase1-tcp-fork", port: "18080"},
+		// UDP recv without prior poll() — exercises blocking
+		// uwg_read_packet on a freshly-sent connected UDP fd.
+		{name: "udp_no_poll", modes: []string{"udp-no-poll"}, sentry: "phase1-udp-np", port: "18081"},
+		// Unconnected UDP recv without poll() — same but on the
+		// LISTENER kind (uwg_decode_udp_datagram path).
+		{name: "udp_unconnected_no_poll", modes: []string{"udp-unconnected-no-poll"}, sentry: "phase1-udp-unp", port: "18081"},
 	}
 
 	for _, tc := range cases {

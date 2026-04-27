@@ -368,6 +368,10 @@ long uwg_sendmsg(int fd, const struct msghdr *msg, int flags) {
     return uwg_passthrough_syscall3(SYS_sendmsg, fd, (long)msg, flags);
 }
 
+/* From recvmmsg(2): MSG_WAITFORONE = 0x10000 — return after first
+ * datagram received, regardless of vlen. */
+#define UWG_MSG_WAITFORONE 0x10000
+
 long uwg_recvmmsg(int fd, struct mmsghdr *vec, unsigned int vlen,
                   int flags, struct timespec *to) {
     struct tracked_fd state = uwg_state_lookup(fd);
@@ -377,14 +381,19 @@ long uwg_recvmmsg(int fd, struct mmsghdr *vec, unsigned int vlen,
 
     if (state.proxied && (state.kind == KIND_UDP_CONNECTED ||
                           state.kind == KIND_UDP_LISTENER)) {
-        /* Drain up to vlen datagrams. Stop on the first short read /
-         * EAGAIN / error. Returns the count of successfully received
-         * messages, or -errno if the FIRST recv failed. */
+        /* Drain up to vlen datagrams. Per recvmmsg(2): without
+         * MSG_WAITFORONE, every recv inherits the fd's blocking mode
+         * — the kernel waits for vlen datagrams (or `to` to expire,
+         * which we don't track precisely; best-effort is fine for
+         * Phase 1). With MSG_WAITFORONE, return as soon as one is
+         * received. Stop on the first error and return either the
+         * partial count or the -errno from the first recv. */
         if (!vec || vlen == 0) return -22;
+        int caller_nonblock = recv_is_nonblock(&state, flags);
+        int wait_for_one = (flags & UWG_MSG_WAITFORONE) != 0;
         unsigned int got = 0;
         for (unsigned int i = 0; i < vlen; i++) {
-            int nb = (i > 0) /* after first, never block */
-                   || recv_is_nonblock(&state, flags);
+            int nb = caller_nonblock || (wait_for_one && i > 0);
             long rc = udp_recv_fd(fd, &state, state.kind, nb,
                                   vec[i].msg_hdr.msg_iov,
                                   (int)vec[i].msg_hdr.msg_iovlen,
