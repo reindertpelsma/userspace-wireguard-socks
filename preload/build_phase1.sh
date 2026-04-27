@@ -32,6 +32,7 @@ CORE_SRCS=(
     preload/core/fd_ops.c
     preload/core/udp_frame.c
     preload/core/dns_force.c
+    preload/core/trace.c
 )
 
 SHIM_SRCS=(

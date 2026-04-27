@@ -168,6 +168,10 @@ long uwg_decode_udp_datagram(const void *frame, size_t frame_len,
 int uwg_addr_from_text(int family, const char *ip, uint16_t port,
                        struct sockaddr *sa, uint32_t *sa_len);
 
+/* Optional per-call trace log. See trace.c. Active when
+ * UWGS_PRELOAD_TRACE=/path/to/log is set; otherwise no-op. */
+void uwg_tracef(const char *fmt, ...);
+
 /* DNS-on-:53 forcing. See dns_force.c.
  * uwg_should_force_dns53 returns 1 if connect() to addr should be
  * diverted through fdproxy's DNS endpoint per UWGS_DNS_MODE.

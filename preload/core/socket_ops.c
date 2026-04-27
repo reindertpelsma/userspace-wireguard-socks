@@ -40,6 +40,7 @@
  */
 long uwg_socket(int domain, int type, int protocol) {
     long fd = uwg_passthrough_syscall3(SYS_socket, domain, type, protocol);
+    uwg_tracef("socket domain=%d type=%d proto=%d -> %ld", domain, type, protocol, fd);
     if (fd < 0) return fd;
 
     /* Only track fds in families the wrapper cares about. AF_UNIX,

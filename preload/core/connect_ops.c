@@ -53,10 +53,20 @@ int uwg_parse_ok_reply(const char *reply, char *ip_buf, size_t ip_len,
 long uwg_connect(int fd, const struct sockaddr *addr, uint32_t alen) {
     /* Always respect a NULL or oddly-sized addr by passthrough. */
     if (!addr || alen < sizeof(struct sockaddr)) {
-        return uwg_passthrough_syscall3(SYS_connect, fd, (long)addr, alen);
+        long rc = uwg_passthrough_syscall3(SYS_connect, fd, (long)addr, alen);
+        uwg_tracef("connect fd=%d addr=null -> %ld", fd, rc);
+        return rc;
+    }
+
+    char dest_dbg[64];
+    uint16_t port_dbg = 0; int fam_dbg = 0;
+    if (uwg_addr_format(addr, dest_dbg, sizeof(dest_dbg), &port_dbg, &fam_dbg) != 0) {
+        dest_dbg[0] = '?'; dest_dbg[1] = 0;
     }
 
     struct tracked_fd state = uwg_state_lookup(fd);
+    uwg_tracef("connect fd=%d to=%s:%d active=%d type=%d proto=%d",
+               fd, dest_dbg, (int)port_dbg, state.active, state.type, state.protocol);
 
     /* Not tracked, not interesting → passthrough. */
     if (!state.active ||
