@@ -168,6 +168,13 @@ long uwg_decode_udp_datagram(const void *frame, size_t frame_len,
 int uwg_addr_from_text(int family, const char *ip, uint16_t port,
                        struct sockaddr *sa, uint32_t *sa_len);
 
+/* Freestanding IPv6 text parser — replaces inet_pton(AF_INET6, ...)
+ * for the Phase 2 static-binary build. Writes 16 raw bytes (network
+ * byte order) to `out`. Returns 0 on success or -1 on parse failure.
+ * Accepts canonical RFC 4291 forms including "::" compression and
+ * IPv4-in-IPv6 mapped notation. */
+int uwg_parse_ipv6(const char *s, uint8_t out[16]);
+
 /* Optional per-call trace log. See trace.c. Active when
  * UWGS_PRELOAD_TRACE=/path/to/log is set; otherwise no-op. */
 void uwg_tracef(const char *fmt, ...);

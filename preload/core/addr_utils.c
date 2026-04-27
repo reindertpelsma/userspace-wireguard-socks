@@ -11,11 +11,18 @@
 #include <stdint.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
+#include "freestanding.h"
+#include "dispatch.h"
 
-/* ntohs/htons in inline form — async-signal-safe and freestanding. */
+/* ntohs/ntohl in inline form — async-signal-safe and freestanding.
+ * We use our own to avoid the libc dep on arpa/inet.h for the static
+ * Phase 2 build. */
 static inline uint16_t uwg_ntohs(uint16_t n) {
     return (uint16_t)((n >> 8) | (n << 8));
+}
+static inline uint32_t uwg_ntohl(uint32_t n) {
+    return ((n & 0xFFu) << 24) | ((n & 0xFF00u) << 8) |
+           ((n & 0xFF0000u) >> 8) | ((n & 0xFF000000u) >> 24);
 }
 
 /* Detect if a sockaddr's address bytes are loopback. AF_INET 127/8,
@@ -25,7 +32,7 @@ int uwg_addr_is_loopback(const struct sockaddr *addr) {
     if (!addr) return 0;
     if (addr->sa_family == AF_INET) {
         const struct sockaddr_in *sin = (const struct sockaddr_in *)addr;
-        uint32_t a = ntohl(sin->sin_addr.s_addr);
+        uint32_t a = uwg_ntohl(sin->sin_addr.s_addr);
         return (a >> 24) == 127;
     }
     if (addr->sa_family == AF_INET6) {
@@ -58,7 +65,7 @@ static int uwg_fmt_uint(char *buf, unsigned int v) {
 /* IPv4 dotted-quad formatter. Returns bytes written. */
 static int uwg_fmt_ipv4(char *buf, uint32_t addr_be) {
     /* addr_be is in network byte order. */
-    uint32_t h = ntohl(addr_be);
+    uint32_t h = uwg_ntohl(addr_be);
     int off = 0;
     off += uwg_fmt_uint(buf + off, (h >> 24) & 0xff); buf[off++] = '.';
     off += uwg_fmt_uint(buf + off, (h >> 16) & 0xff); buf[off++] = '.';
@@ -263,16 +270,138 @@ int uwg_addr_from_text(int family, const char *ip, uint16_t port,
         for (size_t i = 0; i < sizeof(sin6); i++) ((char *)&sin6)[i] = 0;
         sin6.sin6_family = AF_INET6;
         sin6.sin6_port = (uint16_t)((port >> 8) | (port << 8));
-        /* IPv6 parsing — defer to inet_pton (libc, async-signal-safe in
-         * practice; pure parser, no allocation). The static-binary
-         * Phase 2 build will substitute a freestanding parser. */
-        if (inet_pton(AF_INET6, ip, &sin6.sin6_addr) != 1) return -22;
+        if (uwg_parse_ipv6(ip, sin6.sin6_addr.s6_addr) < 0) return -22;
         uint32_t copy = *sa_len < sizeof(sin6) ? *sa_len : (uint32_t)sizeof(sin6);
         for (uint32_t i = 0; i < copy; i++) ((char *)sa)[i] = ((char *)&sin6)[i];
         *sa_len = (uint32_t)sizeof(sin6);
         return 0;
     }
     return -22;
+}
+
+/*
+ * Freestanding IPv6 text parser. Replaces libc's inet_pton(AF_INET6, …)
+ * for the Phase 2 static-binary build, where libc isn't linked in.
+ *
+ * Accepts the canonical RFC 4291 forms:
+ *   - Full 8-group: "2001:db8:85a3:0:0:8a2e:370:7334"
+ *   - Compressed-zero "::" run: "2001:db8::8a2e:370:7334" / "::1" / "::"
+ *   - IPv4-in-IPv6 mapped: "::ffff:192.168.1.1"
+ *
+ * Writes 16 raw bytes (network byte order) to `out`. Returns 0 on
+ * success, -1 on parse failure.
+ */
+int uwg_parse_ipv6(const char *s, uint8_t out[16]) {
+    if (!s || !out) return -1;
+    uint8_t pre[16] = {0};   /* groups before "::" */
+    uint8_t post[16] = {0};  /* groups after "::" */
+    int pre_groups = 0, post_groups = 0;
+    int saw_double_colon = 0;
+    int in_post = 0;
+
+    /* Reject leading colon unless it's "::". */
+    if (s[0] == ':' && s[1] != ':') return -1;
+    if (s[0] == ':' && s[1] == ':') {
+        saw_double_colon = 1;
+        in_post = 1;
+        s += 2;
+        if (*s == 0) {
+            for (int i = 0; i < 16; i++) out[i] = 0;
+            return 0;
+        }
+    }
+
+    for (;;) {
+        /* Parse one hex group (1-4 hex digits) OR detect IPv4 tail. */
+        const char *start = s;
+        uint32_t v = 0;
+        int hex_digits = 0;
+        while (*s) {
+            int d;
+            if (*s >= '0' && *s <= '9') d = *s - '0';
+            else if (*s >= 'a' && *s <= 'f') d = *s - 'a' + 10;
+            else if (*s >= 'A' && *s <= 'F') d = *s - 'A' + 10;
+            else break;
+            v = (v << 4) | (uint32_t)d;
+            hex_digits++;
+            s++;
+            if (hex_digits > 4) return -1;
+        }
+        if (hex_digits == 0) return -1;
+
+        /* If next char is '.', this group was actually the start of an
+         * IPv4-tail (e.g. "192.168.1.1" → 4 octets = 2 groups). Re-parse
+         * from `start` as IPv4 dotted-quad. */
+        if (*s == '.') {
+            uint32_t a = 0;
+            int octets = 0, octet = 0, saw_dot_digit = 0;
+            for (const char *p = start;; p++) {
+                if (*p == '.' || *p == 0) {
+                    if (!saw_dot_digit) return -1;
+                    a = (a << 8) | (uint32_t)(octet & 0xff);
+                    octets++;
+                    octet = 0; saw_dot_digit = 0;
+                    if (*p == 0) break;
+                    if (octets > 3) return -1;
+                } else if (*p >= '0' && *p <= '9') {
+                    octet = octet * 10 + (*p - '0');
+                    if (octet > 255) return -1;
+                    saw_dot_digit = 1;
+                } else {
+                    return -1;
+                }
+            }
+            if (octets != 4) return -1;
+            /* Append the 4 IPv4 bytes as 2 IPv6 groups (4 bytes total). */
+            uint8_t *dst = in_post ? &post[post_groups * 2] : &pre[pre_groups * 2];
+            int *cnt = in_post ? &post_groups : &pre_groups;
+            if (*cnt + 2 > 8) return -1;
+            dst[0] = (uint8_t)((a >> 24) & 0xff);
+            dst[1] = (uint8_t)((a >> 16) & 0xff);
+            dst[2] = (uint8_t)((a >>  8) & 0xff);
+            dst[3] = (uint8_t)(a & 0xff);
+            *cnt += 2;
+            break;  /* end of address */
+        }
+
+        /* Store the 16-bit group. */
+        {
+            uint8_t *dst = in_post ? &post[post_groups * 2] : &pre[pre_groups * 2];
+            int *cnt = in_post ? &post_groups : &pre_groups;
+            if (*cnt + 1 > 8) return -1;
+            dst[0] = (uint8_t)((v >> 8) & 0xff);
+            dst[1] = (uint8_t)(v & 0xff);
+            (*cnt)++;
+        }
+
+        if (*s == 0) break;
+        if (*s != ':') return -1;
+        s++;
+        if (*s == ':') {
+            if (saw_double_colon) return -1;  /* only one "::" allowed */
+            saw_double_colon = 1;
+            in_post = 1;
+            s++;
+            if (*s == 0) break;  /* trailing "::" */
+        }
+    }
+
+    /* Reassemble: if we had "::", pre_groups + 0-padding + post_groups.
+     * Without "::", must have all 8 groups. */
+    int total = pre_groups + post_groups;
+    if (saw_double_colon) {
+        if (total > 8) return -1;
+        int zero_groups = 8 - total;
+        for (int i = 0; i < pre_groups * 2; i++) out[i] = pre[i];
+        for (int i = 0; i < zero_groups * 2; i++) out[pre_groups * 2 + i] = 0;
+        for (int i = 0; i < post_groups * 2; i++) {
+            out[pre_groups * 2 + zero_groups * 2 + i] = post[i];
+        }
+    } else {
+        if (total != 8) return -1;
+        for (int i = 0; i < 16; i++) out[i] = pre[i];
+    }
+    return 0;
 }
 
 int uwg_parse_ok_reply(const char *reply, char *ip_buf, size_t ip_len,
