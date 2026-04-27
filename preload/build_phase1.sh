@@ -30,6 +30,7 @@ CORE_SRCS=(
     preload/core/stream_ops.c
     preload/core/msg_ops.c
     preload/core/fd_ops.c
+    preload/core/udp_frame.c
 )
 
 SHIM_SRCS=(

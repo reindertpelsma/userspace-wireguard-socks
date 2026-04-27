@@ -7,15 +7,59 @@ package preload_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
 
-// TestPhase1SeccompPreloadTCP validates the new SIGSYS+seccomp-based
+// requirePhase1Toolchain is the Phase 1 equivalent of requireWrapperToolchain
+// but accepts both linux/amd64 and linux/arm64. The Phase 1 SIGSYS preload
+// is explicitly arch-portable (preload/core/syscall.h covers both x86_64
+// and aarch64), so the test should exercise both.
+func requirePhase1Toolchain(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("phase1 wrapper tests are linux-only")
+	}
+	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
+		t.Skipf("phase1 wrapper tests are linux/amd64 + linux/arm64 only (got %s)", runtime.GOARCH)
+	}
+	if _, err := exec.LookPath("gcc"); err != nil {
+		t.Skip("gcc is required for phase1 integration tests")
+	}
+}
+
+// buildPhase1Artifacts builds only the artifacts the Phase 1 smoke test
+// needs (the wrapper, the legacy preload as a placeholder, and the
+// libc-routed C stub_client). Skips the x86_64-only rawmix/raw_client
+// helpers that buildWrapperArtifacts would otherwise pull in.
+func buildPhase1Artifacts(t *testing.T) wrapperArtifacts {
+	t.Helper()
+	repo := filepath.Clean(filepath.Join("..", ".."))
+	tmp := t.TempDir()
+	embeddedPreloadDir := filepath.Join(repo, "cmd", "uwgwrapper", "assets")
+	embeddedPreload := filepath.Join("cmd", "uwgwrapper", "assets", "uwgpreload.so")
+	art := wrapperArtifacts{
+		wrapper: filepath.Join(tmp, "uwgwrapper"),
+		preload: filepath.Join(tmp, "uwgpreload.so"),
+		stub:    filepath.Join(tmp, "stub_client"),
+	}
+	if err := os.MkdirAll(embeddedPreloadDir, 0o755); err != nil {
+		t.Fatalf("mkdir embedded preload dir: %v", err)
+	}
+	run(t, repo, "gcc", "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-o", embeddedPreload, "preload/uwgpreload.c", "-ldl", "-pthread", "-lpthread")
+	run(t, repo, "gcc", "-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-o", art.preload, "preload/uwgpreload.c", "-ldl", "-pthread", "-lpthread")
+	run(t, repo, "gcc", "-O2", "-Wall", "-Wextra", "-o", art.stub, "tests/preload/testdata/stub_client.c")
+	buildWithEnv(t, repo, map[string]string{"CGO_ENABLED": "0"}, "go", "build", "-o", art.wrapper, "./cmd/uwgwrapper")
+	return art
+}
+
+// TestPhase1SeccompPreload validates the new SIGSYS+seccomp-based
 // preload (preload/uwgpreload-phase1.so, built from preload/core/*)
 // against a real uwgsocks engine + fdproxy.
 //
@@ -25,9 +69,13 @@ import (
 // SIGSYS-based interception in unexpected ways — Go-binary support
 // is a known Phase 1 gap to be addressed in Phase 2 alongside the
 // libc-symbol shim layer. C/libc-routed syscalls work cleanly.
-func TestPhase1SeccompPreloadTCP(t *testing.T) {
-	requireWrapperToolchain(t)
-	art := buildWrapperArtifacts(t)
+//
+// Subtests cover the major data-plane shapes: connected TCP, connected
+// UDP, and unconnected UDP (recvfrom/sendto with sockaddr-tagged
+// frames). Each must echo its sentinel message back unchanged.
+func TestPhase1SeccompPreload(t *testing.T) {
+	requirePhase1Toolchain(t)
+	art := buildPhase1Artifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
 
 	repo := filepath.Clean(filepath.Join("..", ".."))
@@ -39,25 +87,48 @@ func TestPhase1SeccompPreloadTCP(t *testing.T) {
 	}
 	art.preload = phase1So
 
-	// Use the C stub_client which is libc-routed. Its tcp mode does
-	// connect() → write() → read() → echo back the message → exit.
-	args := []string{"100.64.94.1", "18080", "phase1-tcp", "tcp"}
-	base := wrappedCommand(t, art, httpSock, "preload", art.stub, args, wrapperRunOptions{})
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, base.Path, base.Args[1:]...)
-	cmd.Env = append([]string{}, base.Env...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	out, err := runCommandCombinedFileBacked(t, cmd)
-	t.Logf("=== output (%d bytes) ===\n%s\n=== end ===", len(out), out)
+	cases := []struct {
+		name   string
+		modes  []string // stub_client modes to append after `host port msg`
+		sentry string
+		port   string
+	}{
+		// Connected TCP — exercises the tunnel TCP-stream fast path
+		// (read/write are kernel passthrough on the manager-stream fd).
+		{name: "tcp", modes: []string{"tcp"}, sentry: "phase1-tcp", port: "18080"},
+		// Connected UDP — exercises uwg_write_packet / uwg_read_packet
+		// for KIND_UDP_CONNECTED. read/write/recv/send all go through
+		// 4-byte-length-prefix framing.
+		{name: "udp_connected", modes: []string{"udp"}, sentry: "phase1-udp-conn", port: "18081"},
+		// Unconnected UDP — exercises uwg_encode_udp_datagram /
+		// uwg_decode_udp_datagram for KIND_UDP_LISTENER. sendto/recvfrom
+		// carry the sockaddr-tagged frame (1 family + 1 padding + 2 port +
+		// IP + payload).
+		{name: "udp_unconnected", modes: []string{"udp-unconnected"}, sentry: "phase1-udp-unconn", port: "18081"},
+	}
 
-	if ctx.Err() == context.DeadlineExceeded {
-		t.Fatalf("timed out — see output above")
-	}
-	if err != nil {
-		t.Fatalf("wrapper run failed: %v", err)
-	}
-	if !strings.Contains(string(out), "phase1-tcp") {
-		t.Fatalf("expected phase1-tcp in output; got: %q", out)
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"100.64.94.1", tc.port, tc.sentry}, tc.modes...)
+			base := wrappedCommand(t, art, httpSock, "preload", art.stub, args, wrapperRunOptions{})
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, base.Path, base.Args[1:]...)
+			cmd.Env = append([]string{}, base.Env...)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			out, err := runCommandCombinedFileBacked(t, cmd)
+			t.Logf("=== output (%d bytes) ===\n%s\n=== end ===", len(out), out)
+
+			if ctx.Err() == context.DeadlineExceeded {
+				t.Fatalf("timed out — see output above")
+			}
+			if err != nil {
+				t.Fatalf("wrapper run failed: %v", err)
+			}
+			if !strings.Contains(string(out), tc.sentry) {
+				t.Fatalf("expected %q in output; got: %q", tc.sentry, out)
+			}
+		})
 	}
 }

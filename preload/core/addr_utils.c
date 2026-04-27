@@ -205,6 +205,69 @@ static int parse_uint_field(const char *s, uint16_t *out) {
     return 0;
 }
 
+/* Fill `sa` with an IPv4 or IPv6 sockaddr from the text representation
+ * `ip` (NUL-terminated) plus host-order `port`. On entry, *sa_len is
+ * the user-provided buffer size; on success, *sa_len is updated to
+ * the FULL size of the constructed sockaddr (POSIX semantics for
+ * recvfrom: caller learns the actual address length even if their
+ * buffer was smaller, in which case `sa` was truncated).
+ *
+ * Returns 0 on success or -EINVAL if the text doesn't parse. */
+int uwg_addr_from_text(int family, const char *ip, uint16_t port,
+                       struct sockaddr *sa, uint32_t *sa_len) {
+    if (!sa || !sa_len || !ip) return -22;
+    if (family == AF_INET) {
+        struct sockaddr_in sin;
+        for (size_t i = 0; i < sizeof(sin); i++) ((char *)&sin)[i] = 0;
+        sin.sin_family = AF_INET;
+        sin.sin_port = (uint16_t)((port >> 8) | (port << 8));
+        /* Parse dotted-quad without libc. */
+        uint32_t acc = 0;
+        int octet = 0, saw_digit = 0, dots = 0;
+        for (const char *p = ip; ; p++) {
+            if (*p == '.' || *p == 0) {
+                if (!saw_digit) return -22;
+                acc = (acc << 8) | (uint32_t)(octet & 0xff);
+                octet = 0; saw_digit = 0;
+                if (*p == 0) break;
+                dots++;
+                if (dots > 3) return -22;
+            } else if (*p >= '0' && *p <= '9') {
+                octet = octet * 10 + (*p - '0');
+                if (octet > 255) return -22;
+                saw_digit = 1;
+            } else {
+                return -22;
+            }
+        }
+        if (dots != 3) return -22;
+        /* sin.sin_addr.s_addr is in network byte order. */
+        sin.sin_addr.s_addr = (uint32_t)((acc & 0x000000ff) << 24 |
+                                          (acc & 0x0000ff00) <<  8 |
+                                          (acc & 0x00ff0000) >>  8 |
+                                          (acc & 0xff000000) >> 24);
+        uint32_t copy = *sa_len < sizeof(sin) ? *sa_len : (uint32_t)sizeof(sin);
+        for (uint32_t i = 0; i < copy; i++) ((char *)sa)[i] = ((char *)&sin)[i];
+        *sa_len = (uint32_t)sizeof(sin);
+        return 0;
+    }
+    if (family == AF_INET6) {
+        struct sockaddr_in6 sin6;
+        for (size_t i = 0; i < sizeof(sin6); i++) ((char *)&sin6)[i] = 0;
+        sin6.sin6_family = AF_INET6;
+        sin6.sin6_port = (uint16_t)((port >> 8) | (port << 8));
+        /* IPv6 parsing — defer to inet_pton (libc, async-signal-safe in
+         * practice; pure parser, no allocation). The static-binary
+         * Phase 2 build will substitute a freestanding parser. */
+        if (inet_pton(AF_INET6, ip, &sin6.sin6_addr) != 1) return -22;
+        uint32_t copy = *sa_len < sizeof(sin6) ? *sa_len : (uint32_t)sizeof(sin6);
+        for (uint32_t i = 0; i < copy; i++) ((char *)sa)[i] = ((char *)&sin6)[i];
+        *sa_len = (uint32_t)sizeof(sin6);
+        return 0;
+    }
+    return -22;
+}
+
 int uwg_parse_ok_reply(const char *reply, char *ip_buf, size_t ip_len,
                        uint16_t *port) {
     if (!reply || !ip_buf || ip_len == 0) return -22;

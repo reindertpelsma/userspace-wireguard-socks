@@ -141,4 +141,31 @@ int  uwg_fdproxy_request(const char *line, char *reply, size_t reply_len);
 int  uwg_fdproxy_write_request(int fd, const char *line);
 long uwg_fdproxy_read_reply(int fd, char *reply, size_t reply_len);
 
+/* UDP datagram framing — see udp_frame.c.
+ * uwg_write_packet returns 0 on success or -errno.
+ * uwg_read_packet[_nonblock] returns the byte count read into out
+ * (0..out_max) on success, -errno on failure (-EAGAIN if nonblock
+ * and nothing is queued).
+ * uwg_encode_udp_datagram returns total encoded length on success
+ * or -errno on failure.
+ * uwg_decode_udp_datagram returns 0 on success and writes a pointer
+ * INTO `frame` plus the payload length to *payload / *payload_len.
+ */
+int  uwg_write_packet(int fd, const void *buf, size_t len);
+long uwg_read_packet(int fd, void *out, size_t out_max);
+long uwg_read_packet_nonblock(int fd, void *out, size_t out_max);
+long uwg_encode_udp_datagram(const struct sockaddr *dest,
+                             const void *payload, size_t payload_len,
+                             void *out, size_t out_max);
+long uwg_decode_udp_datagram(const void *frame, size_t frame_len,
+                             struct sockaddr *src, size_t src_len,
+                             const void **payload, size_t *payload_len);
+
+/* Build a sockaddr from text-form IP + host-order port. See
+ * addr_utils.c. *sa_len becomes the FULL constructed-sockaddr size
+ * on return; the caller can detect truncation by comparing it to
+ * the original buffer length. */
+int uwg_addr_from_text(int family, const char *ip, uint16_t port,
+                       struct sockaddr *sa, uint32_t *sa_len);
+
 #endif /* UWG_PRELOAD_CORE_DISPATCH_H */

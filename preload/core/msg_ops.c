@@ -9,38 +9,99 @@
  * to a kernel passthrough — fdproxy treats the manager-side socket
  * as a raw byte stream so any libc message-style call works directly.
  *
- * For UDP-connected and UDP-listener fds, these are the protocol-
- * level operations that DO require wrapper-side translation:
- *   - sendmsg/sendto: serialize destination + payload into the
- *     fdproxy datagram protocol (4-byte length prefix + payload for
- *     connected; sockaddr-tagged frame for unconnected listener).
- *   - recvmsg/recvfrom: read a length-prefixed frame from fdproxy
- *     and unpack into msg/buf.
+ * For UDP-connected and UDP-listener fds, these speak the framed
+ * datagram protocol (see preload/core/udp_frame.c):
+ *   - sendmsg/sendto KIND_UDP_CONNECTED: gather iovecs into a stack
+ *     buffer and uwg_write_packet (4-byte BE length prefix + raw bytes).
+ *   - sendmsg/sendto KIND_UDP_LISTENER: must include a destination;
+ *     uwg_encode_udp_datagram tags the payload with sockaddr, then
+ *     uwg_write_packet.
+ *   - recvmsg/recvfrom KIND_UDP_CONNECTED: uwg_read_packet returns the
+ *     raw bytes; we copy out (truncating to user buffer), and synthesize
+ *     the source sockaddr from the saved remote_ip/remote_port.
+ *   - recvmsg/recvfrom KIND_UDP_LISTENER: uwg_read_packet returns the
+ *     tagged frame; uwg_decode_udp_datagram unpacks src + payload.
  *
  * MSG_DONTWAIT propagation is load-bearing here. The legacy ptrace
  * path's recvmsg failed to propagate this flag, causing chromium /
  * libuv / Go-netpoller apps to deadlock. v0.1.0-beta.46 fixed it on
  * the ptrace side; this layer re-applies the same logic at the
- * SIGSYS layer.
- *
- * Phase 1 status:
- *   - TCP-stream fast path: all six syscalls passthrough cleanly.
- *   - UDP-connected / UDP-listener data plane: -ENOSYS for now —
- *     full lift from legacy uwgpreload.c is the next migration
- *     commit. The framing helpers are non-trivial (4-byte length
- *     prefix, sockaddr-tagged datagrams for listener case).
- *   - DGRAM-on-loopback: passthrough (kernel handles).
+ * SIGSYS layer — for both the TCP-stream passthrough AND the framed
+ * UDP recv, where a non-blocking read on the manager socket avoids
+ * blocking our dispatcher when the tracee already gave up.
  */
 
 #include <stddef.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <netinet/in.h>
 
 #include "../shared_state.h"
 #include "syscall.h"
 #include "dispatch.h"
 
 #define UWG_MSG_DONTWAIT 0x40 /* matches kernel ABI */
+#define UWG_MSG_CMSG_CLOEXEC 0x40000000
+#define UWG_SOCK_TYPE_MASK 0xff
+
+/* Bounce-buffer size for UDP framed I/O. Must match udp_frame.c.
+ * Stack-allocated per call; the sigaltstack is 64K so this is fine. */
+#define UWG_FRAME_MAX 16384
+
+/* Forward decl from listener_ops.c */
+long uwg_ensure_udp_listener(int fd);
+/* Forward decl from addr_utils.c */
+int uwg_addr_is_loopback(const struct sockaddr *addr);
+
+static int is_icmp_state(const struct tracked_fd *state) {
+    /* IPPROTO_ICMP = 1, IPPROTO_ICMPV6 = 58. */
+    return state->protocol == 1 || state->protocol == 58;
+}
+
+static int is_dgram(const struct tracked_fd *state) {
+    return (state->type & UWG_SOCK_TYPE_MASK) == 2 /* SOCK_DGRAM */;
+}
+
+/*
+ * Lazy listener bootstrap for unconnected-UDP send/recv. Mirrors
+ * legacy uwgpreload.c::ensure_udp_listener call sites:
+ *   - sendto/sendmsg: when active && DGRAM && !proxied && !icmp,
+ *     and the destination is non-loopback (loopback gets kernel
+ *     passthrough so localhost services keep working).
+ *   - recvfrom/recvmsg: when active && DGRAM && !proxied && bound &&
+ *     !icmp (only bound sockets can sensibly recv).
+ *
+ * Returns 0 on success (state may have been mutated to KIND_UDP_LISTENER),
+ * a negative -errno on failure, or 0 with state unchanged when no
+ * bootstrap was needed.
+ */
+static long maybe_lazy_udp_listener_send(int fd, struct tracked_fd *state,
+                                         const struct sockaddr *dest) {
+    if (!state->active || state->proxied) return 0;
+    if (!is_dgram(state) || is_icmp_state(state)) return 0;
+    if (dest && uwg_addr_is_loopback(dest)) return 0;
+    long rc = uwg_ensure_udp_listener(fd);
+    if (rc < 0) return rc;
+    *state = uwg_state_lookup(fd);
+    return 0;
+}
+
+static long maybe_lazy_udp_listener_recv(int fd, struct tracked_fd *state) {
+    if (!state->active || state->proxied) return 0;
+    if (!is_dgram(state) || is_icmp_state(state)) return 0;
+    if (!state->bound) return 0;
+    long rc = uwg_ensure_udp_listener(fd);
+    if (rc < 0) return rc;
+    *state = uwg_state_lookup(fd);
+    return 0;
+}
+
+static int recv_is_nonblock(const struct tracked_fd *state, int caller_flags) {
+    if (caller_flags & UWG_MSG_DONTWAIT) return 1;
+    if (state->saved_fl & 04000 /* O_NONBLOCK */) return 1;
+    return 0;
+}
 
 /*
  * Helper: when the fd has O_NONBLOCK set on the tracee side, OR
@@ -58,39 +119,154 @@ static int effective_recv_flags(const struct tracked_fd *state, int caller_flags
     return caller_flags;
 }
 
-/*
- * recvfrom and sendto are 6-arg syscalls; we can't put the bypass-
- * secret in arg6 because all 6 are user data. Solution from legacy
- * uwgpreload.c: convert to recvmsg/sendmsg (3 args, leaves arg6 free).
- *
- * The conversion is exact for the common case. Edge cases that don't
- * map cleanly (recvfrom with MSG_CMSG_CLOEXEC; sendto with NULL
- * dest_addr but nonzero addrlen) fall back to the raw 6-arg syscall
- * path — which DOES go through SIGSYS again. We avoid recursion by
- * having the SIGSYS handler check: if the dispatch path falls back
- * to a raw 6-arg call, the kernel's seccomp filter would re-trap;
- * we accept that double-trip cost on these edge cases (very rare
- * in practice) for the simpler design.
- *
- * For Phase 1 we don't yet implement the fallback — we just punt
- * to -ENOSYS for the edge cases and rely on apps using clean shapes.
- */
+static size_t iov_total(const struct iovec *iov, int iovcnt) {
+    size_t total = 0;
+    for (int i = 0; i < iovcnt; i++) total += iov[i].iov_len;
+    return total;
+}
 
-#define UWG_MSG_CMSG_CLOEXEC 0x40000000
+static size_t iov_gather(const struct iovec *iov, int iovcnt,
+                         void *out, size_t out_max) {
+    char *dst = (char *)out;
+    size_t off = 0;
+    for (int i = 0; i < iovcnt && off < out_max; i++) {
+        size_t copy = iov[i].iov_len;
+        if (copy > out_max - off) copy = out_max - off;
+        if (copy) memcpy(dst + off, iov[i].iov_base, copy);
+        off += copy;
+    }
+    return off;
+}
+
+static size_t iov_scatter(const struct iovec *iov, int iovcnt,
+                          const void *in, size_t in_len) {
+    const char *src = (const char *)in;
+    size_t off = 0;
+    for (int i = 0; i < iovcnt && off < in_len; i++) {
+        size_t copy = iov[i].iov_len;
+        if (copy > in_len - off) copy = in_len - off;
+        if (copy) memcpy(iov[i].iov_base, src + off, copy);
+        off += copy;
+    }
+    return off;
+}
+
+/*
+ * Receive one datagram from `fd` into `iov`/`iovcnt`. Honors
+ * O_NONBLOCK / MSG_DONTWAIT via `eff_nonblock`. Sets src/slen if
+ * requested. Returns bytes copied to iov on success, or -errno.
+ *
+ * Flow:
+ *   1. Stack-alloc UWG_FRAME_MAX bounce.
+ *   2. uwg_read_packet[_nonblock] into bounce.
+ *   3. KIND_UDP_CONNECTED: bounce IS the payload — synthesize src
+ *      from saved remote_ip/remote_port.
+ *      KIND_UDP_LISTENER: decode bounce → src + inner-payload-ptr.
+ *   4. Scatter into iov (truncating to total iov capacity).
+ */
+static long udp_recv_fd(int fd, const struct tracked_fd *state, int kind,
+                        int eff_nonblock,
+                        const struct iovec *iov, int iovcnt,
+                        struct sockaddr *src, uint32_t *slen) {
+    char tmp[UWG_FRAME_MAX];
+    long n = eff_nonblock
+                 ? uwg_read_packet_nonblock(fd, tmp, sizeof(tmp))
+                 : uwg_read_packet(fd, tmp, sizeof(tmp));
+    if (n < 0) return n;
+
+    size_t cap = iov_total(iov, iovcnt);
+    if (kind == KIND_UDP_CONNECTED) {
+        /* tmp[0..n] is the payload. Fill src from saved peer. */
+        if (src && slen) {
+            int fam = state->remote_family ? state->remote_family : state->domain;
+            uwg_addr_from_text(fam, state->remote_ip, state->remote_port, src, slen);
+        }
+        size_t copy = (size_t)n < cap ? (size_t)n : cap;
+        return (long)iov_scatter(iov, iovcnt, tmp, copy);
+    }
+    /* KIND_UDP_LISTENER */
+    const void *payload = NULL;
+    size_t payload_len = 0;
+    /* Decode source straight into user-provided sockaddr if it has
+     * room; otherwise into a stack bounce, then truncate-copy. */
+    struct sockaddr_in6 sa_full;
+    uint32_t full_len = (uint32_t)sizeof(sa_full);
+    long rc = uwg_decode_udp_datagram(tmp, (size_t)n,
+                                      (struct sockaddr *)&sa_full, full_len,
+                                      &payload, &payload_len);
+    if (rc < 0) return rc;
+    if (src && slen) {
+        uint32_t actual = (sa_full.sin6_family == AF_INET)
+                              ? (uint32_t)sizeof(struct sockaddr_in)
+                              : (uint32_t)sizeof(struct sockaddr_in6);
+        uint32_t copy = *slen < actual ? *slen : actual;
+        memcpy(src, &sa_full, copy);
+        *slen = actual;
+    }
+    size_t copy = payload_len < cap ? payload_len : cap;
+    return (long)iov_scatter(iov, iovcnt, payload, copy);
+}
+
+/*
+ * Send one datagram from `iov`/`iovcnt` to `dest` (KIND_UDP_LISTENER)
+ * or to the connected peer (KIND_UDP_CONNECTED). Returns bytes sent
+ * (== gathered iov total) on success or -errno.
+ */
+static long udp_send_fd(int fd, int kind,
+                        const struct iovec *iov, int iovcnt,
+                        const struct sockaddr *dest) {
+    /* Refuse oversized: gather will hit UWG_FRAME_MAX. */
+    char tmp[UWG_FRAME_MAX];
+
+    if (kind == KIND_UDP_CONNECTED) {
+        /* Sending with a non-NULL dest on a connected UDP socket is
+         * EISCONN per Linux. */
+        if (dest) return -106; /* -EISCONN */
+        size_t cap = iov_total(iov, iovcnt);
+        if (cap > sizeof(tmp)) return -90; /* -EMSGSIZE */
+        size_t got = iov_gather(iov, iovcnt, tmp, sizeof(tmp));
+        int rc = uwg_write_packet(fd, tmp, got);
+        if (rc < 0) return rc;
+        return (long)got;
+    }
+    /* KIND_UDP_LISTENER */
+    if (!dest) return -89; /* -EDESTADDRREQ */
+    /* Encode dest+payload into tmp via two-phase build:
+     * 1. Gather iovec to a small buffer (raw payload).
+     * 2. uwg_encode_udp_datagram into tmp.
+     * Two stack buffers fit comfortably in 64K sigaltstack. */
+    char raw[UWG_FRAME_MAX];
+    size_t cap = iov_total(iov, iovcnt);
+    if (cap > sizeof(raw)) return -90;
+    size_t got = iov_gather(iov, iovcnt, raw, sizeof(raw));
+    long enc = uwg_encode_udp_datagram(dest, raw, got, tmp, sizeof(tmp));
+    if (enc < 0) return enc;
+    int rc = uwg_write_packet(fd, tmp, (size_t)enc);
+    if (rc < 0) return rc;
+    return (long)got;
+}
 
 long uwg_recvfrom(int fd, void *buf, size_t len, int flags,
                   struct sockaddr *src, uint32_t *slen) {
     struct tracked_fd state = uwg_state_lookup(fd);
-    int eff_flags = (state.proxied && state.kind == KIND_TCP_STREAM)
-                        ? effective_recv_flags(&state, flags)
-                        : flags;
 
     /* MSG_CMSG_CLOEXEC and src-without-slen are awkward — punt for
-     * Phase 1. */
+     * Phase 1 (very rare in real apps). */
     if (flags & UWG_MSG_CMSG_CLOEXEC) return -38L;
     if (src && !slen) return -22; /* -EINVAL */
 
-    /* Build msghdr and use recvmsg (3-arg). */
+    long lz = maybe_lazy_udp_listener_recv(fd, &state);
+    if (lz < 0) return lz;
+
+    if (state.proxied && (state.kind == KIND_UDP_CONNECTED ||
+                          state.kind == KIND_UDP_LISTENER)) {
+        struct iovec iov = { .iov_base = buf, .iov_len = len };
+        return udp_recv_fd(fd, &state, state.kind,
+                           recv_is_nonblock(&state, flags),
+                           &iov, 1, src, slen);
+    }
+
+    /* TCP-stream / non-tunnel: build msghdr and use recvmsg. */
     struct iovec iov = { .iov_base = buf, .iov_len = len };
     struct msghdr msg;
     msg.msg_name = src;
@@ -101,10 +277,9 @@ long uwg_recvfrom(int fd, void *buf, size_t len, int flags,
     msg.msg_controllen = 0;
     msg.msg_flags = 0;
 
-    /* Tunnel non-TCP-stream still needs the protocol-level translation
-     * we haven't implemented yet. */
-    if (state.proxied && state.kind != KIND_TCP_STREAM) return -38L;
-
+    int eff_flags = (state.proxied && state.kind == KIND_TCP_STREAM)
+                        ? effective_recv_flags(&state, flags)
+                        : flags;
     long rc = uwg_passthrough_syscall3(SYS_recvmsg, fd, (long)&msg, eff_flags);
     if (rc >= 0 && src && slen) *slen = msg.msg_namelen;
     return rc;
@@ -113,7 +288,16 @@ long uwg_recvfrom(int fd, void *buf, size_t len, int flags,
 long uwg_sendto(int fd, const void *buf, size_t len, int flags,
                 const struct sockaddr *dest, uint32_t dlen) {
     struct tracked_fd state = uwg_state_lookup(fd);
-    if (state.proxied && state.kind != KIND_TCP_STREAM) return -38L;
+
+    long lz = maybe_lazy_udp_listener_send(fd, &state, dest);
+    if (lz < 0) return lz;
+
+    if (state.proxied && (state.kind == KIND_UDP_CONNECTED ||
+                          state.kind == KIND_UDP_LISTENER)) {
+        if (dest == NULL && dlen != 0) return -22;
+        struct iovec iov = { .iov_base = (void *)buf, .iov_len = len };
+        return udp_send_fd(fd, state.kind, &iov, 1, dest);
+    }
 
     /* dest=NULL with nonzero dlen is the awkward case — punt. */
     if (dest == NULL && dlen != 0) return -22;
@@ -134,12 +318,29 @@ long uwg_sendto(int fd, const void *buf, size_t len, int flags,
 long uwg_recvmsg(int fd, struct msghdr *msg, int flags) {
     struct tracked_fd state = uwg_state_lookup(fd);
 
+    long lz = maybe_lazy_udp_listener_recv(fd, &state);
+    if (lz < 0) return lz;
+
+    if (state.proxied && (state.kind == KIND_UDP_CONNECTED ||
+                          state.kind == KIND_UDP_LISTENER)) {
+        if (!msg) return -22;
+        struct sockaddr *src = (struct sockaddr *)msg->msg_name;
+        uint32_t slen = msg->msg_namelen;
+        long rc = udp_recv_fd(fd, &state, state.kind,
+                              recv_is_nonblock(&state, flags),
+                              msg->msg_iov, (int)msg->msg_iovlen,
+                              src, src ? &slen : 0);
+        if (rc >= 0) {
+            if (src) msg->msg_namelen = slen;
+            msg->msg_controllen = 0;
+            msg->msg_flags = 0;
+        }
+        return rc;
+    }
+
     if (state.proxied && state.kind == KIND_TCP_STREAM) {
         int eff_flags = effective_recv_flags(&state, flags);
         return uwg_passthrough_syscall3(SYS_recvmsg, fd, (long)msg, eff_flags);
-    }
-    if (state.proxied) {
-        return -38L;
     }
     return uwg_passthrough_syscall3(SYS_recvmsg, fd, (long)msg, flags);
 }
@@ -147,11 +348,22 @@ long uwg_recvmsg(int fd, struct msghdr *msg, int flags) {
 long uwg_sendmsg(int fd, const struct msghdr *msg, int flags) {
     struct tracked_fd state = uwg_state_lookup(fd);
 
+    if (msg) {
+        long lz = maybe_lazy_udp_listener_send(
+            fd, &state, (const struct sockaddr *)msg->msg_name);
+        if (lz < 0) return lz;
+    }
+
+    if (state.proxied && (state.kind == KIND_UDP_CONNECTED ||
+                          state.kind == KIND_UDP_LISTENER)) {
+        if (!msg) return -22;
+        const struct sockaddr *dest = (const struct sockaddr *)msg->msg_name;
+        return udp_send_fd(fd, state.kind,
+                           msg->msg_iov, (int)msg->msg_iovlen, dest);
+    }
+
     if (state.proxied && state.kind == KIND_TCP_STREAM) {
         return uwg_passthrough_syscall3(SYS_sendmsg, fd, (long)msg, flags);
-    }
-    if (state.proxied) {
-        return -38L;
     }
     return uwg_passthrough_syscall3(SYS_sendmsg, fd, (long)msg, flags);
 }
@@ -160,13 +372,42 @@ long uwg_recvmmsg(int fd, struct mmsghdr *vec, unsigned int vlen,
                   int flags, struct timespec *to) {
     struct tracked_fd state = uwg_state_lookup(fd);
 
+    long lz = maybe_lazy_udp_listener_recv(fd, &state);
+    if (lz < 0) return lz;
+
+    if (state.proxied && (state.kind == KIND_UDP_CONNECTED ||
+                          state.kind == KIND_UDP_LISTENER)) {
+        /* Drain up to vlen datagrams. Stop on the first short read /
+         * EAGAIN / error. Returns the count of successfully received
+         * messages, or -errno if the FIRST recv failed. */
+        if (!vec || vlen == 0) return -22;
+        unsigned int got = 0;
+        for (unsigned int i = 0; i < vlen; i++) {
+            int nb = (i > 0) /* after first, never block */
+                   || recv_is_nonblock(&state, flags);
+            long rc = udp_recv_fd(fd, &state, state.kind, nb,
+                                  vec[i].msg_hdr.msg_iov,
+                                  (int)vec[i].msg_hdr.msg_iovlen,
+                                  (struct sockaddr *)vec[i].msg_hdr.msg_name,
+                                  vec[i].msg_hdr.msg_name
+                                      ? &vec[i].msg_hdr.msg_namelen : 0);
+            if (rc < 0) {
+                if (got > 0) return (long)got;
+                return rc;
+            }
+            vec[i].msg_len = (unsigned int)rc;
+            vec[i].msg_hdr.msg_controllen = 0;
+            vec[i].msg_hdr.msg_flags = 0;
+            got++;
+        }
+        (void)to;
+        return (long)got;
+    }
+
     if (state.proxied && state.kind == KIND_TCP_STREAM) {
         int eff_flags = effective_recv_flags(&state, flags);
         return uwg_passthrough_syscall5(SYS_recvmmsg, fd, (long)vec,
                                         (long)vlen, eff_flags, (long)to);
-    }
-    if (state.proxied) {
-        return -38L;
     }
     return uwg_passthrough_syscall5(SYS_recvmmsg, fd, (long)vec,
                                     (long)vlen, flags, (long)to);
@@ -175,12 +416,37 @@ long uwg_recvmmsg(int fd, struct mmsghdr *vec, unsigned int vlen,
 long uwg_sendmmsg(int fd, struct mmsghdr *vec, unsigned int vlen, int flags) {
     struct tracked_fd state = uwg_state_lookup(fd);
 
+    if (vec && vlen > 0) {
+        const struct sockaddr *first_dest =
+            (const struct sockaddr *)vec[0].msg_hdr.msg_name;
+        long lz = maybe_lazy_udp_listener_send(fd, &state, first_dest);
+        if (lz < 0) return lz;
+    }
+
+    if (state.proxied && (state.kind == KIND_UDP_CONNECTED ||
+                          state.kind == KIND_UDP_LISTENER)) {
+        if (!vec || vlen == 0) return -22;
+        unsigned int sent = 0;
+        for (unsigned int i = 0; i < vlen; i++) {
+            const struct sockaddr *dest =
+                (const struct sockaddr *)vec[i].msg_hdr.msg_name;
+            long rc = udp_send_fd(fd, state.kind,
+                                  vec[i].msg_hdr.msg_iov,
+                                  (int)vec[i].msg_hdr.msg_iovlen,
+                                  dest);
+            if (rc < 0) {
+                if (sent > 0) return (long)sent;
+                return rc;
+            }
+            vec[i].msg_len = (unsigned int)rc;
+            sent++;
+        }
+        return (long)sent;
+    }
+
     if (state.proxied && state.kind == KIND_TCP_STREAM) {
         return uwg_passthrough_syscall4(SYS_sendmmsg, fd, (long)vec,
                                         (long)vlen, flags);
-    }
-    if (state.proxied) {
-        return -38L;
     }
     return uwg_passthrough_syscall4(SYS_sendmmsg, fd, (long)vec,
                                     (long)vlen, flags);

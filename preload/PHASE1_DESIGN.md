@@ -278,15 +278,25 @@ falls into one of the three layers above. The migration is mechanical:
 
 ### Phase 1 followup (still TODO)
 
-- ⏳ uwg_listen / uwg_accept / uwg_accept4 for tunnel fds — needs
-  start_tcp_listener + UDP-listener flow lifted from legacy
-  uwgpreload.c. Includes the 0.0.0.0-bind-multiplexes-real-loopback-
-  AND-tunnel behavior (fdproxy multiplex, preload sees only the
-  manager fd).
-- ⏳ Read/write on UDP-connected fds — needs framed datagram helpers
-  (4-byte big-endian length prefix per packet on manager-stream side).
-- ⏳ Send/recv*msg on UDP-listener fds — needs sockaddr-tagged
-  datagram framing.
+- ✅ uwg_listen / uwg_accept / uwg_accept4 for tunnel fds —
+  listener_ops.c (commits 05f0012, c84699e). Includes the
+  0.0.0.0-bind-multiplexes-real-loopback-AND-tunnel behavior
+  (fdproxy multiplex, preload sees only the manager fd).
+- ✅ Read/write on UDP-connected fds — framed datagram helpers in
+  udp_frame.c with 4-byte big-endian length prefix per packet on
+  manager-stream side.
+- ✅ Send/recv*msg on UDP-listener fds — sockaddr-tagged datagram
+  framing via uwg_encode_udp_datagram / uwg_decode_udp_datagram.
+- ⏳ Unconnected-UDP unconditional fdproxy ownership: the current
+  lazy-listener heuristic (skip fdproxy on first sendto-to-loopback)
+  inherits a real flaw from legacy uwgpreload.c. An unconnected
+  UDP socket can legitimately interleave loopback and tunnel
+  destinations per-datagram; deciding "this socket is loopback"
+  on the first send is wrong. Correct design: bind() on a
+  not-yet-connected DGRAM fd should ALWAYS register a fdproxy
+  listener that owns BOTH the userspace tunnel side AND the real
+  loopback bind, then per-datagram routing happens inside fdproxy.
+  Same logic enables clean DNS-on-:53 redirection.
 - ⏳ DNS-on-:53 forcing (force_dns_stream_fd / force_dns_dgram_fd
   legacy paths) for connected UDP/TCP sockets to port 53 when DNS
   interception enabled.
