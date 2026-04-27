@@ -87,19 +87,25 @@ long uwg_bind(int fd, const struct sockaddr *addr, uint32_t alen) {
     return 0;
 }
 
-/* TODO Phase 1 followup: lift start_tcp_listener from
- * legacy uwgpreload.c and write the freestanding-safe equivalent.
- * Requires "LISTEN tcp ..." to fdproxy + the multi-fd-per-listener
- * book-keeping for SO_REUSEPORT. */
+/* Implemented in listener_ops.c. */
+long uwg_start_tcp_listener(int fd);
+long uwg_managed_accept(int listener_fd, struct sockaddr *addr,
+                        uint32_t *addrlen);
+
 long uwg_listen(int fd, int backlog) {
-    /* Fall back to passthrough for non-tunnel fds — preserves
-     * behavior for sockets we don't track. */
     struct tracked_fd state = uwg_state_lookup(fd);
+    /* Non-tunnel fd: passthrough. */
     if (!state.active && !state.proxied) {
         return uwg_passthrough_syscall2(SYS_listen, fd, backlog);
     }
-    /* Tunnel listener: not implemented yet. */
-    return -38L; /* -ENOSYS */
+    /* If already a tunnel listener, idempotent success. */
+    if (state.proxied && state.kind == KIND_TCP_LISTENER) return 0;
+    /* TCP stream → set up via fdproxy. */
+    if ((state.type & SOCK_TYPE_MASK) == SOCK_STREAM) {
+        return uwg_start_tcp_listener(fd);
+    }
+    /* UDP doesn't use listen(); pass through (kernel will reject). */
+    return uwg_passthrough_syscall2(SYS_listen, fd, backlog);
 }
 
 long uwg_accept(int fd, struct sockaddr *addr, uint32_t *alen) {
@@ -107,7 +113,7 @@ long uwg_accept(int fd, struct sockaddr *addr, uint32_t *alen) {
     if (!state.proxied) {
         return uwg_passthrough_syscall3(SYS_accept, fd, (long)addr, (long)alen);
     }
-    return -38L; /* -ENOSYS — Phase 1 followup */
+    return uwg_managed_accept(fd, addr, alen);
 }
 
 long uwg_accept4(int fd, struct sockaddr *addr, uint32_t *alen, int flags) {
@@ -116,5 +122,18 @@ long uwg_accept4(int fd, struct sockaddr *addr, uint32_t *alen, int flags) {
         return uwg_passthrough_syscall4(SYS_accept4, fd, (long)addr,
                                         (long)alen, flags);
     }
-    return -38L; /* -ENOSYS — Phase 1 followup */
+    long rc = uwg_managed_accept(fd, addr, alen);
+    if (rc < 0) return rc;
+    /* Apply SOCK_NONBLOCK / SOCK_CLOEXEC requested via flags. */
+    if (flags & 04000 /* SOCK_NONBLOCK */) {
+        long fl = uwg_passthrough_syscall3(SYS_fcntl, (int)rc, 3 /* F_GETFL */, 0);
+        if (fl >= 0) {
+            (void)uwg_passthrough_syscall3(SYS_fcntl, (int)rc, 4 /* F_SETFL */,
+                                            fl | 04000);
+        }
+    }
+    if (flags & 02000000 /* SOCK_CLOEXEC */) {
+        (void)uwg_passthrough_syscall3(SYS_fcntl, (int)rc, 2 /* F_SETFD */, 1);
+    }
+    return rc;
 }
