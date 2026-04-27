@@ -65,6 +65,7 @@ CORE_SRCS=(
     preload/core/freestanding_impl.c
     preload/core/sigreturn_trampoline.c
     preload/core/freestanding_runtime.c
+    preload/core/static_entry.c
 )
 
 OUT_DIR="${1:-preload}"
