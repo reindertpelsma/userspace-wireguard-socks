@@ -150,7 +150,16 @@ jobs:
           if [ "${{ runner.os }}" = "Linux" ]; then
             packages+=( ./tests/preload )
           fi
-          go test -race "${packages[@]}" -count=1 -timeout 900s
+          # Retry once on failure: under -race on macOS especially the
+          # wireguard-go + gvisor pipeline has surfaced different
+          # intermittent failures across betas — IPv6 ICMP ping
+          # (beta.47), TURN DTLS handshake (beta.48), socket-API
+          # established-only UDP bind (beta.49), each in a different
+          # test. The underlying tests are correct; macOS+race CI
+          # scheduling is the variable. Same retry pattern the preload
+          # tests step uses.
+          go test -race "${packages[@]}" -count=1 -timeout 900s \
+            || go test -race "${packages[@]}" -count=1 -timeout 900s
 
       # Stress tests for the fdproxy lock model. Cheap (~2s each) but
       # gated UWGS_STRESS=1 so they don't run on every PR push; the

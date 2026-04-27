@@ -261,14 +261,13 @@ func TestUWGWrapperReuseAcrossTransports(t *testing.T) {
 			// 64 listening sockets per wrapper; we need at least one
 			// reply from each wrapper (udp-a + udp-b). The kernel's
 			// hash distribution can starve one wrapper for many
-			// attempts, and any single listener can be momentarily
-			// slow under -race / lite-build CI load. Use an inline
-			// non-fatal probe so a single 5s timeout doesn't kill
-			// the whole test — the outer 40-iteration budget is
-			// what bounds liveness here.
+			// attempts (beta.49 saw 40 attempts all land on udp-a
+			// under -race scheduling on linux-amd64). Bump to 200
+			// attempts — at ~50/50 expected the probability of all
+			// 200 landing on one side is essentially zero.
 			seenUDP := map[string]bool{}
 			addr := fmt.Sprintf("127.0.0.1:%d", udpPort)
-			for i := 0; i < 40 && !(seenUDP["udp-a"] && seenUDP["udp-b"]); i++ {
+			for i := 0; i < 200 && !(seenUDP["udp-a"] && seenUDP["udp-b"]); i++ {
 				reply, ok := tryRoundTripHostUDP(addr, "ping", 5*time.Second)
 				if ok {
 					seenUDP[reply] = true

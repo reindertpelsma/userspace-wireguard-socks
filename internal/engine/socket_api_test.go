@@ -723,13 +723,13 @@ func socketAPIConn(t *testing.T, api, token string) net.Conn {
 
 func readSocketFrame(t *testing.T, conn net.Conn) socketproto.Frame {
 	t.Helper()
-	// 10s normally is plenty for a localhost UDP echo. Under -race
-	// on Windows GH runners the wireguard-go + gvisor pipeline takes
-	// noticeably longer per packet (TestSocketAPIUDPBindWithoutBind-
-	// PrivilegeIsEstablishedOnly hit i/o timeout at exactly 10s in
-	// v0.1.0-beta.41). Scale by testDeadlineScale (10× under -race)
-	// to match the rest of the integration suite.
-	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second * testDeadlineScale))
+	// 10s normally; on macOS+race the wireguard-go + gvisor pipeline
+	// repeatedly hit the 100s-scaled deadline (beta.41 on Windows, then
+	// beta.49 on macOS — the test ran 103.92s, exactly at the limit).
+	// 30s base × 10×race = 300s budget gives macOS+race much more
+	// headroom for the established-only UDP bind path which involves
+	// per-fd kernel-cap checks that are unusually slow under TSan.
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second * testDeadlineScale))
 	frame, err := socketproto.ReadFrame(conn, socketproto.DefaultMaxPayload)
 	if err != nil {
 		t.Fatal(err)
