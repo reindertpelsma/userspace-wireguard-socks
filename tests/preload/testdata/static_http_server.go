@@ -71,12 +71,12 @@ func main() {
 	time.Sleep(100 * time.Millisecond)
 	fmt.Fprintf(os.Stderr, "served=%d\n", served.Load())
 	// Explicit os.Exit instead of falling out of main: the deferred
-	// ln.Close() only stops the listener, but the 100 keep-alive
-	// connections held by the test client are still parked in Go's
-	// netpoll on tunnel fds. Go's natural defer→runtime-exit path
-	// stalls the m0 thread on a futex in that state under preload-
-	// static. exit_group(0) here is a clean kill and matches the
-	// "served the requested count, we're done" semantics of this
-	// stress harness.
+	// ln.Close() only stops the listener, but the Server.Serve
+	// goroutine is parked inside our SIGSYS handler's accept4 path
+	// (in fdproxy_sock.c uwg_read_line). close(listenerFd) is not
+	// trapped, so the preload can't abort that in-flight accept; the
+	// fdproxy control read never returns. From Go's runtime view the
+	// M is still "running user code" so runtime.exit's bookkeeping
+	// can't drain. exit_group(0) directly side-steps both.
 	os.Exit(0)
 }
