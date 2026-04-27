@@ -14,6 +14,15 @@ import (
 	"time"
 )
 
+// Note: UDP-listener server-side tests aren't viable in this harness:
+// fdproxy's udpListenerGroup.dispatchDatagram drops upstream datagrams
+// that arrive before the wrapped member has sent at least once
+// (recordPeerOwner is what populates ownerFor). The same limitation
+// applies to the legacy preload — it's architectural in fdproxy, not
+// a phase1 bug. The unconnected-UDP client side (stub sends first,
+// then recvfrom) is covered by TestPhase1SeccompPreload/udp_unconnected
+// in phase1_smoke_test.go and exercises the same encode/decode paths.
+
 // TestPhase1SeccompPreloadTCPListener exercises the TCP listener flow
 // (bind + listen + accept) under the SIGSYS+seccomp preload. Mirrors
 // TestUWGWrapperPreloadAccept4Listener exactly except for the .so swap
