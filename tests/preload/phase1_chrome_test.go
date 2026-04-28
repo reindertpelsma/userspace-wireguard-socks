@@ -54,7 +54,7 @@ func TestPhase1HeadlessChromeSmoke(t *testing.T) {
 	pair := setupWrapperHTTPPair(t)
 	transport := strings.TrimSpace(os.Getenv("UWGS_BROWSER_SMOKE_TRANSPORT"))
 	if transport == "" {
-		transport = "preload"
+		transport = "systrap"
 	}
 	serverScript := filepath.Join(repo, "tests/preload/testdata/node_http_server.js")
 	markFile := filepath.Join(t.TempDir(), "phase1-chrome-post.txt")

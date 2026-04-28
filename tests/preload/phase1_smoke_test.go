@@ -165,7 +165,7 @@ func TestPhase1SeccompPreload(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			args := append([]string{"100.64.94.1", tc.port, tc.sentry}, tc.modes...)
-			base := wrappedCommand(t, art, httpSock, "preload", art.stub, args, wrapperRunOptions{})
+			base := wrappedCommand(t, art, httpSock, "systrap", art.stub, args, wrapperRunOptions{})
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, base.Path, base.Args[1:]...)

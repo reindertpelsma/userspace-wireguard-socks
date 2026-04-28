@@ -122,16 +122,20 @@ int uwg_core_init(void) {
     const char *secret_env = uwg_getenv("UWGS_TRACE_SECRET");
     uwg_bypass_secret = parse_u64(secret_env);
 
-    /* UWGS_DISABLE_SECCOMP=1 forces shim-only mode even when a
-     * secret is provided. Useful for workloads that fork+exec a lot
-     * (chromium-class apps) — the kernel-side filter is preserved
-     * across exec, but the SIGSYS handler is process-local and
-     * gets reset, so child processes die on the first trapped
-     * syscall before our constructor can re-install the handler.
-     * The shim_libc layer alone covers libc-routed calls, which
-     * is what these apps use almost exclusively. Phase 2's
-     * bootstrap supervisor closes the exec gap. */
-    const char *disable = uwg_getenv("UWGS_DISABLE_SECCOMP");
+    /* UWGS_DISABLE_SYSTRAP=1 (preferred name, set by transport=preload)
+     * or its legacy alias UWGS_DISABLE_SECCOMP=1 forces libc-only
+     * shim mode: no SIGSYS handler, no seccomp filter, no kernel
+     * trap. The shim_libc layer alone covers libc-routed calls.
+     *
+     * The wrapper sets this env when:
+     *   - transport=preload (libc-only, the new default for hosts
+     *     without seccomp support — restricted containers etc.)
+     *   - the user opts out via env in any other mode.
+     *
+     * "systrap" is the kernel-trap path (seccomp + SIGSYS handler);
+     * disabling it here strips us back to the libc-fast-path only. */
+    const char *disable = uwg_getenv("UWGS_DISABLE_SYSTRAP");
+    if (!disable) disable = uwg_getenv("UWGS_DISABLE_SECCOMP");
     int seccomp_disabled = disable && (*disable == '1');
 
     if (uwg_bypass_secret == 0 && !seccomp_disabled) {

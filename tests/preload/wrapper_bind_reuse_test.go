@@ -25,7 +25,7 @@ func TestUWGWrapperSourceBindAcrossTransports(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	serverEng, httpSock := setupWrapperNetwork(t)
 
-	for index, transport := range []string{"preload", "preload-and-ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for index, transport := range []string{"preload", "systrap", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			fdSock := startSharedWrapperFDProxy(t, httpSock, true, false)
 			tcpListenPort := 18210 + index
@@ -124,7 +124,7 @@ func TestUWGWrapperBindDisabledFallbacks(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	serverEng, httpSock := setupWrapperNetwork(t)
 
-	for index, transport := range []string{"preload", "preload-and-ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for index, transport := range []string{"preload", "systrap", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			fdSock := startSharedWrapperFDProxy(t, httpSock, false, false)
 			localPort := 19310 + index*10
@@ -192,7 +192,7 @@ func TestUWGWrapperReuseAcrossTransports(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	serverEng, httpSock := setupWrapperNetwork(t)
 
-	for index, transport := range []string{"preload", "preload-and-ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for index, transport := range []string{"preload", "systrap", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			fdSock := startSharedWrapperFDProxy(t, httpSock, true, false)
 			tcpPort := 19410 + index*10

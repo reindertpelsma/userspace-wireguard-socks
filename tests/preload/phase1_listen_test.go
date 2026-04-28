@@ -44,7 +44,7 @@ func TestPhase1SeccompPreloadTCPListener(t *testing.T) {
 
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		cmd, stderr, done := startWrappedListenerProcess(t, art, httpSock, "preload", art.stub,
+		cmd, stderr, done := startWrappedListenerProcess(t, art, httpSock, "systrap", art.stub,
 			[]string{"100.64.94.2", "19196", "phase1-listener", "listen-tcp"}, wrapperRunOptions{})
 
 		runErr := func() error {

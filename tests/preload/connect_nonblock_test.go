@@ -47,7 +47,7 @@ func TestPtraceNonblockConnectFlow(t *testing.T) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build connect_repro: %v\n%s", err, out)
 	}
-	for _, transport := range []string{"preload", "preload-and-ptrace", "ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for _, transport := range []string{"preload", "systrap", "ptrace", "ptrace-seccomp", "ptrace-only"} {
 		for _, mode := range []string{"sock-nonblock", "fcntl", "blocking"} {
 			t.Run(transport+"/"+mode, func(t *testing.T) {
 				// Bumped from 30s — ptrace-only mode on GH runners

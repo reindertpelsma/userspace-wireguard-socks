@@ -27,7 +27,7 @@ func TestUWGWrapperICMPAcrossTransports(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
 
-	for _, transport := range []string{"preload", "preload-and-ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for _, transport := range []string{"preload", "systrap", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			out := runWrappedTargetWithOptions(t, art, httpSock, transport, art.stub,
 				[]string{"100.64.94.1", "0", "icmp-wrapper", "icmp"},
@@ -44,7 +44,7 @@ func TestUWGWrapperIPv6RejectsImmediatelyAcrossTransports(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
 
-	for _, transport := range []string{"preload", "preload-and-ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for _, transport := range []string{"preload", "systrap", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			start := time.Now()
 			out, err := runWrappedTargetExpectFailure(t, art, httpSock, transport, art.stub,
@@ -68,7 +68,7 @@ func TestUWGWrapperIPv6LinkLocalTCPAcrossTransports(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	httpSock := setupWrapperIPv6LinkLocalNetwork(t)
 
-	for _, transport := range []string{"preload", "preload-and-ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for _, transport := range []string{"preload", "systrap", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			out := runWrappedTargetWithOptions(t, art, httpSock, transport, art.stub,
 				[]string{"fe80::1", "18080", "ipv6-linklocal", "tcp-no-poll"},

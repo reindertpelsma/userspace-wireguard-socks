@@ -48,7 +48,7 @@ func TestPhase1SeccompPreloadConcurrent(t *testing.T) {
 			defer wg.Done()
 			sentry := "phase1-stress-" + itoa(idx)
 			args := []string{"100.64.94.1", "18080", sentry, "tcp"}
-			base := wrappedCommand(t, art, httpSock, "preload", art.stub, args, wrapperRunOptions{})
+			base := wrappedCommand(t, art, httpSock, "systrap", art.stub, args, wrapperRunOptions{})
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, base.Path, base.Args[1:]...)

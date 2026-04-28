@@ -60,7 +60,7 @@ func main() {
 	flag.StringVar(&preloadPath, "preload", os.Getenv("UWGS_PRELOAD"), "path to preload shared library; defaults to embedded copy extracted to /tmp")
 	flag.StringVar(&listenPath, "listen", getenv("UWGS_FDPROXY", ""), "Unix socket path exposed to the preload wrapper")
 	flag.StringVar(&dnsMode, "dns-mode", getenv("UWGS_DNS_MODE", "full"), "DNS handling mode: full, libc, none")
-	flag.StringVar(&transport, "transport", getenv("UWGS_WRAPPER_TRANSPORT", "auto"), "transport mode: auto, preload-and-ptrace, preload, ptrace, ptrace-seccomp, ptrace-only, preload-with-optional-ptrace")
+	flag.StringVar(&transport, "transport", getenv("UWGS_WRAPPER_TRANSPORT", "auto"), "transport mode: auto, systrap, systrap-static, preload, preload-and-ptrace (deprecated), ptrace-seccomp, ptrace-only, ptrace")
 	flag.BoolVar(&forceLoopbackDNS, "force-loopback-dns", getenv("UWGS_DISABLE_LOOPBACK_DNS53", "") == "", "force loopback TCP/UDP port 53 to DNS proxy (default true)")
 	flag.BoolVar(&spawnFDProxy, "spawn-fdproxy", getenv("UWGS_WRAPPER_SPAWN_FDPROXY", "") != "0", "launch built-in fdproxy daemon automatically in launch mode")
 	flag.BoolVar(&noNewPrivileges, "no-new-privileges", getenv("UWGS_WRAPPER_NO_NEW_PRIVILEGES", "1") != "0", "set PR_SET_NO_NEW_PRIVS before launching the wrapped program (default true)")
@@ -203,11 +203,21 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 		return nil
 	}
 
-	preloadRun := func() {
+	// systrapRun = LD_PRELOAD with the .so constructor installing
+	// the seccomp filter + SIGSYS handler (kernel-trap fast path
+	// for raw-asm syscalls + libc hooks for the hot path).
+	//
+	// libcOnlyPreloadRun = LD_PRELOAD with the .so constructor
+	// configured to skip seccomp + SIGSYS install; libc hooks only.
+	// For hosts without seccomp/ptrace support (some containers).
+	preloadInner := func(disableSystrap bool) {
 		if preloadPath == "" {
 			log.Fatal("no preload library configured")
 		}
 		envPreload := prependEnvPath(append([]string{}, env...), "LD_PRELOAD", preloadPath)
+		if disableSystrap {
+			envPreload = appendEnv(envPreload, "UWGS_DISABLE_SYSTRAP=1")
+		}
 		_ = shared.Close(false)
 		cmdArgs := append([]string{"--mode=exec-helper", "--", target}, progArgs...)
 		cmd := exec.Command(os.Args[0], cmdArgs...)
@@ -233,12 +243,9 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 		os.Exit(0)
 	}
 
-	combo := func() error {
-		if preloadPath == "" {
-			return errors.New("preload-and-ptrace transport requires preload")
-		}
-		return traceRun(uwgtrace.SeccompSecret, true)
-	}
+	systrapRun := func() { preloadInner(false) }
+	libcOnlyRun := func() { preloadInner(true) }
+
 	traceSimple := func() error {
 		return traceRun(uwgtrace.SeccompSimple, false)
 	}
@@ -246,37 +253,72 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 		return traceRun(uwgtrace.SeccompNone, false)
 	}
 
-	staticPreloadRun := func() {
+	systrapStaticRun := func() {
 		blob := os.Getenv("UWGS_STATIC_BLOB")
 		if blob == "" {
 			blob = staticBlobPath()
 		}
 		if blob == "" {
-			log.Fatal("preload-static: UWGS_STATIC_BLOB unset and no sibling uwgpreload-static-${arch}.so found")
+			log.Fatal("systrap-static: UWGS_STATIC_BLOB unset and no sibling uwgpreload-static-${arch}.so found")
 		}
 		_ = shared.Close(false)
 		if err := runStaticPreload(target, progArgs, env, blob); err != nil {
-			log.Fatalf("preload-static failed: %v", err)
+			log.Fatalf("systrap-static failed: %v", err)
 		}
 		os.Exit(0)
 	}
 
+	// Mode dispatch.
+	//
+	// The naming (v0.1.0-beta.56+):
+	//   - preload          libc-only LD_PRELOAD (no seccomp, no SIGSYS, no
+	//                      ptrace). For hosts without seccomp/ptrace
+	//                      support (e.g. restricted containers).
+	//   - systrap          LD_PRELOAD + seccomp + SIGSYS handler (the
+	//                      kernel-trap fast path for raw-asm syscalls,
+	//                      libc hooks for the hot path). Default.
+	//   - systrap-static   freestanding-blob ptrace-injection for static
+	//                      binaries. Same kernel-trap path as systrap;
+	//                      no libc hooks.
+	//   - ptrace-seccomp   per-syscall ptrace + seccomp filter (filter
+	//                      skips uninteresting syscalls).
+	//   - ptrace-only      per-syscall ptrace, no seccomp at all.
+	//   - ptrace           ptrace-seccomp first, fall back to ptrace-only.
+	//
+	// Removed (deprecation aliases — emit a warning + run the
+	// nearest-equivalent mode for one release, then delete):
+	//   - "preload-and-ptrace" → "systrap"      (replaces SIGSYS-less
+	//       libc+seccomp+ptrace, which had cross-process per-fd cache
+	//       coherence subtleties; systrap supersedes the use case via
+	//       a single in-process trap path)
+	//   - "preload-static"     → "systrap-static"
+	//
+	// auto ordering favors correctness then speed:
+	//   systrap → ptrace-seccomp → ptrace-only → preload (libc-only)
+	//
+	// preload (libc-only) is last because raw-asm syscalls leak past
+	// the libc hooks; it's a fallback for hosts where nothing else
+	// works at all.
 	switch transport {
 	case "preload":
-		preloadRun()
+		libcOnlyRun()
+	case "systrap":
+		systrapRun()
+	case "systrap-static":
+		systrapStaticRun()
 	case "preload-static":
-		staticPreloadRun()
+		log.Printf("uwgwrapper: 'preload-static' is a deprecated alias for 'systrap-static'; please update your config")
+		systrapStaticRun()
 	case "preload-and-ptrace":
-		if err := combo(); err != nil {
-			log.Fatalf("both mode failed: %v", err)
-		}
+		log.Printf("uwgwrapper: 'preload-and-ptrace' is removed; running 'systrap' instead. Update your config to use systrap (or preload for libc-only).")
+		systrapRun()
 	case "ptrace-seccomp":
 		if err := traceSimple(); err != nil {
-			log.Fatalf("ptrace+seccomp mode failed: %v", err)
+			log.Fatalf("ptrace-seccomp mode failed: %v", err)
 		}
 	case "ptrace-only":
 		if err := traceNoSeccomp(); err != nil {
-			log.Fatalf("ptrace mode failed: %v", err)
+			log.Fatalf("ptrace-only mode failed: %v", err)
 		}
 	case "ptrace":
 		if err := traceSimple(); err == nil {
@@ -285,13 +327,25 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 		if err := traceNoSeccomp(); err != nil {
 			log.Fatalf("ptrace mode failed: %v", err)
 		}
-	case "preload-with-optional-ptrace":
-		if err := combo(); err == nil {
-			return
-		}
-		preloadRun()
 	case "auto":
-		if err := combo(); err == nil {
+		// Auto cascade — correctness first, performance second.
+		//
+		// We start with preload+seccomp+ptrace (traceRun with
+		// SeccompSecret) because today's `systrap` (LD_PRELOAD
+		// constructor only) does not yet have the execve
+		// supervisor, so fork+exec workloads (chromium-class)
+		// would lose interception in child processes. Once the
+		// adaptive systrap supervisor (Phase 1.5+2 fusion) lands,
+		// this cascade gets reordered to start with `systrap`.
+		//
+		// Cascade order (each falls through only if mode setup
+		// itself failed — e.g. seccomp unavailable, ptrace
+		// blocked):
+		//   1. preload + seccomp + ptrace  (ptrace re-arms at exec)
+		//   2. ptrace + seccomp            (skip uninteresting syscalls)
+		//   3. ptrace                      (universal slow path)
+		//   4. preload (libc-only)         (last resort, raw-asm leaks)
+		if err := traceRun(uwgtrace.SeccompSecret, true); err == nil {
 			return
 		}
 		if err := traceSimple(); err == nil {
@@ -300,10 +354,26 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 		if err := traceNoSeccomp(); err == nil {
 			return
 		}
-		preloadRun()
+		libcOnlyRun()
 	default:
-		log.Fatalf("unsupported transport %q, supported auto, preload, preload-and-ptrace, ptrace-seccomp, ptrace-only, ptrace, preload-with-optional-ptrace", transport)
+		log.Fatalf("unsupported transport %q (supported: auto, systrap, systrap-static, preload, ptrace-seccomp, ptrace-only, ptrace)", transport)
 	}
+}
+
+func appendEnv(env []string, kv string) []string {
+	// kv = "KEY=VALUE". If KEY already in env, replace; else append.
+	idx := strings.IndexByte(kv, '=')
+	if idx < 0 {
+		return append(env, kv)
+	}
+	prefix := kv[:idx+1]
+	for i, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			env[i] = kv
+			return env
+		}
+	}
+	return append(env, kv)
 }
 
 func fdproxySpawnArgs(listenPath, api, socketPath string, allowBind, allowLowBind bool, apiToken string, debug bool) []string {

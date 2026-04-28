@@ -42,7 +42,7 @@ func TestUWGWrapperNodeHeadlessChromeSmoke(t *testing.T) {
 	pair := setupWrapperHTTPPair(t)
 	transport := strings.TrimSpace(os.Getenv("UWGS_BROWSER_SMOKE_TRANSPORT"))
 	if transport == "" {
-		transport = "preload"
+		transport = "systrap"
 	}
 	repo := filepath.Clean(filepath.Join("..", ".."))
 	serverScript := filepath.Join(repo, "tests/preload/testdata/node_http_server.js")
