@@ -208,22 +208,46 @@ trusted network.
 - Filter the carrier transport (HTTP/QUIC/etc.). Use the carrier's
   own auth + TLS for transport-layer integrity.
 
-### Hardening checklist for an open TURN relay
+### Why the guard makes a public-internet relay safe
 
-- `wireguard_guard.enabled: true` (otherwise it's a free-for-all).
+The TURN protocol is, by design, an open relay — any
+authenticated client can ask it to forward UDP to anywhere on
+your trusted network. That's fine when you control every client
+(P2P fallback for known users), but for a public ingress relay
+fronting a hidden WireGuard server, you'd be handing every TURN
+credential a "send arbitrary UDP into the LAN" capability.
+
+The WG-guard inverts this: the relay still accepts arbitrary
+TURN clients (the whole point — anyone with credentials can
+connect to your hidden WG server), but **only valid WireGuard
+traffic destined for one of your configured server keys passes
+through**. Random UDP, malformed packets, and floods get dropped
+at the parser stage before they reach the WG server.
+
+This is what makes it safe to put the relay's listen port on
+0.0.0.0 and publish the URL — the relay is a full ingress server
+for the WG protocol, not a generic UDP forwarder.
+
+### Hardening checklist for a public WG-guard relay
+
+- `wireguard_guard.enabled: true` (otherwise it's a free-for-all
+  — every authenticated TURN client can relay arbitrary UDP).
 - Set `wireguard_guard.public_keys` to exactly the WG server keys
-  you want to relay; never leave it empty.
+  you intend to ingress; never leave it empty. Random WG bytes
+  with the wrong server key fail mac1 verification.
 - Set `max_sessions` to bound the session table. Default 1000
   handles thousands of simultaneous WG peers; raise only if you
   have evidence you need more.
-- Use `wireguard_guard.policy: reject-unless-permitted` when the
-  relay is open to the public internet — the more permissive
-  modes assume a trusted client base.
 - Run the relay in an unprivileged container or systemd unit with
   the smallest capability set. `NoNewPrivileges`, no capabilities
   beyond what binding the listen ports needs.
 - Monitor the `Sessions evicted` log line — sustained eviction
-  means the cap is too low or someone is flooding.
+  means the cap is too low or someone is flooding (still bounded
+  memory, but a flooder is using up the slots fresh peers would
+  use).
+- TURN credentials themselves can stay loose (or even open, with
+  the right `permission_policy` — see "permission policy" below).
+  The guard is doing the real work, not the credentials.
 
 The fuzz target `FuzzWireguardGuardProcessInbound` runs in tier-3
 release CI for 30 seconds per release, throwing random bytes at
