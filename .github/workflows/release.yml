@@ -550,17 +550,41 @@ jobs:
         if: matrix.libc == 'gnu'
         run: |
           set -euo pipefail
+          # Build the published uwgpreload.so against the OLDEST
+          # glibc we want to support (2.27, Ubuntu 18.04). This
+          # produces an artifact that runs on every glibc-based
+          # Linux from 2018-onwards (Ubuntu 18.04+, Debian 10+,
+          # RHEL 8+, ~99% of stable LTS deployments).
+          #
+          # Build container is ubuntu:18.04 (glibc 2.27); the GCC
+          # 7.5 it ships with is fine — we don't currently use any
+          # GCC 9+ flags in the dynamic preload .so build (the
+          # static blob's -mno-outline-atomics arm64-only flag is
+          # gated separately in build_static.sh).
+          #
+          # The link flags we use (-Wl,-Bsymbolic, -Wl,-z,relro,
+          # -Wl,-z,now) all predate binutils 2.18 so they're safe
+          # on 2.27. No feature drop.
           mkdir -p cmd/uwgwrapper/assets dist
           docker run --rm \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            golang:1.24-bullseye \
-            bash -lc 'export PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto && \
-                     apt-get update >/dev/null && \
-                     apt-get install -y gcc libc6-dev >/dev/null && \
+            ubuntu:18.04 \
+            bash -lc 'set -euo pipefail; \
+                     export DEBIAN_FRONTEND=noninteractive; \
+                     apt-get update -qq >/dev/null && \
+                     apt-get install -y -qq gcc libc6-dev >/dev/null && \
+                     gcc --version | head -1 && \
                      gcc -shared -fPIC -O2 -Wall -Wextra \
                        -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c -ldl -pthread -lpthread'
           sudo chown -R "$(id -u):$(id -g)" cmd/uwgwrapper/assets
+          # Confirm the resulting .so doesn't reference any glibc
+          # symbol newer than our target floor (GLIBC_2.27).
+          if command -v objdump >/dev/null; then
+            echo "=== glibc symbol versions referenced by uwgpreload.so ==="
+            objdump -T cmd/uwgwrapper/assets/uwgpreload.so 2>/dev/null \
+              | awk '$5 ~ /^GLIBC_/ {print $5}' | sort -u
+          fi
 
       - name: Build uwgwrapper preload asset (musl)
         if: matrix.libc == 'musl'
