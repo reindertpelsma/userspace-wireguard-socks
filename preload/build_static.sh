@@ -47,8 +47,17 @@ CFLAGS_WARN="-Wall -Wextra -Wno-unused-parameter -Wno-stringop-overflow"
 # arm64 (aarch64) GCC defaults to outline-atomics — generates calls to
 # __aarch64_ldadd4_rel etc. from libgcc.a. The freestanding link can't
 # satisfy those, so disable outline atomics and let GCC inline LL/SC.
+#
+# -mno-outline-atomics was added in GCC 9. Older GCC (e.g. GCC 7 on
+# Ubuntu 18.04 / glibc 2.27 hosts) doesn't recognize it; check before
+# adding so the older-libc build doesn't fail with "unrecognized
+# option". Older GCC also didn't default to outline-atomics, so
+# omitting the flag there is correct behavior.
+CC="${CC:-gcc}"
 if [ "$ARCH" = "arm64" ]; then
-    CFLAGS_BASE="$CFLAGS_BASE -mno-outline-atomics"
+    if echo 'int main(void){return 0;}' | "$CC" -x c -mno-outline-atomics - -o /dev/null 2>/dev/null; then
+        CFLAGS_BASE="$CFLAGS_BASE -mno-outline-atomics"
+    fi
 fi
 
 CORE_SRCS=(
