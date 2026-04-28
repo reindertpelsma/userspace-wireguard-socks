@@ -243,13 +243,26 @@ static inline int uwg_fxlock_try_wrlock(struct uwg_fxlock *lk) {
             memory_order_acq_rel, memory_order_acquire)) {
         return UWG_FXLOCK_TRYFAIL;
     }
-    /* Re-check readers post-CAS. */
+    /* Re-check readers post-CAS. If a reader slipped in between
+     * our pre-CAS check and the CAS, we must release the writer
+     * slot and report TRYFAIL. */
     r = atomic_load_explicit(&lk->readers, memory_order_acquire);
     if (r > 0) {
         int32_t still = my_tid;
         atomic_compare_exchange_strong_explicit(
             &lk->writer_tid, &still, 0,
             memory_order_acq_rel, memory_order_acquire);
+        /* User-spotted bug fix (matching uwg_fxlock_wrunlock): any
+         * other thread that was parked in FUTEX_WAIT on
+         * writer_tid (i.e. another wrlock attempt) needs a wake-
+         * up. Without this they'd sleep on a value that won't
+         * change again until some unrelated wrlock+release cycle
+         * happens to bump writer_tid. */
+        if (atomic_load_explicit(&lk->futex_waiters_write,
+                                 memory_order_acquire) > 0) {
+            uwg_fxlock_futex((_Atomic uint32_t *)&lk->writer_tid,
+                             FUTEX_WAKE, 0x7fffffff);
+        }
         return UWG_FXLOCK_TRYFAIL;
     }
     return UWG_FXLOCK_OK;
