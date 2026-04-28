@@ -96,6 +96,30 @@ and either picks a ptrace-using mode or fails fast.
 - **`ptrace-only`**: debugging or hosts that block seccomp entirely
   but allow ptrace. Slow.
 
+## Performance — relative cost per intercepted syscall
+
+`preload` is the floor. Every other mode adds overhead that
+falls into two buckets: kernel trap (cheap, in-process SIGSYS
+delivery) vs ptrace round-trip (expensive, context-switch to a
+tracer process and back).
+
+| Mode | Per-libc-call cost | Per-raw-asm-call cost | Notes |
+|---|---|---|---|
+| `preload` | **blazing fast** — one indirect call into our libc shim, then a normal kernel syscall (~10 ns of overhead vs. an unwrapped syscall) | full kernel cost; **no interception** — raw asm goes direct to the kernel | The fastest mode, but raw-asm callers (parts of the Go runtime, some C++/Rust net code) bypass interception silently. |
+| `systrap` | ~same as `preload` (libc shim is identical) | a few hundred ns — one SIGSYS delivery + in-process handler dispatch + the kernel syscall the handler issues | The libc hot path is identical to `preload`; raw-asm pays a SIGSYS round-trip *within the same process*. **No context switch to a tracer**, so even the "slow" path here is much faster than ptrace. |
+| `systrap-supervised` | ~same as `systrap` | ~same as `systrap` | Hot-path cost is identical to `systrap`. The ptrace supervisor is dormant except at execve boundaries — there's no per-syscall ptrace cost. |
+| `systrap-static` | n/a (no libc hooks) | ~same as `systrap` | Static targets can't use libc hooks, so every intercepted syscall pays the SIGSYS cost. Still fast in absolute terms; the SIGSYS handler runs in-process with no tracer involved. |
+| `ptrace-seccomp` | **~10–100× the cost of `systrap`** for any traced syscall | same as libc-call cost | Each traced syscall is a full ptrace round-trip: tracee stops, kernel context-switches to the tracer process, the tracer runs Go code, kernel context-switches back, syscall continues. The seccomp pre-filter limits the cost to traced syscalls only. |
+| `ptrace-only` | **~100–1000× the cost of `preload`** for *every* syscall | same | Universal slow path. Every `read`/`write`/etc. wakes the tracer; double context-switch per syscall. Use only when seccomp is unavailable. |
+
+Practical implication: dynamic apps that go through libc (Go,
+Rust, chromium, JVM, anything linking libc) see effectively
+**`preload` performance** under any of `preload` /
+`systrap` / `systrap-supervised`. The kernel-trap modes
+(`systrap*`) only add the SIGSYS overhead for syscalls that
+bypass libc; that overhead is **at least an order of magnitude
+cheaper** than the ptrace round-trip the `ptrace*` modes pay.
+
 ## Removed modes (deprecation aliases)
 
 For one release window, the wrapper accepts and translates these:

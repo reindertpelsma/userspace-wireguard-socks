@@ -109,6 +109,53 @@ jobs:
           fi
           go test -count=1 -timeout 240s -run TestChromiumRealInternetSmoke -v ./tests/preload/
 
+      # The "Final Boss" smoke: chromium under systrap-supervised
+      # against real-internet (example.com → wikipedia → youtube)
+      # with the zygote ACTIVE and no UWGS_DISABLE_SECCOMP. This
+      # is the load-bearing chromium fork+exec validation; it
+      # subsumes the simpler chromium real-internet smoke above
+      # but we keep both for now (the simpler one runs against
+      # apt-installed chromium; this one needs chrome-headless-
+      # shell because apt-installed chromium is snap-confined and
+      # can't load LD_PRELOAD from /tmp).
+      - name: Install chrome-headless-shell for supervised smoke
+        if: runner.os == 'Linux' && matrix.name == 'linux-amd64'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/chs"
+          cd "$RUNNER_TEMP/chs"
+          # Get the latest stable chrome-headless-shell linux64
+          # tarball URL and unpack it. linux64 only — Chrome for
+          # Testing doesn't ship arm64.
+          URL=$(curl -sSL https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print([x["url"] for x in d["channels"]["Stable"]["downloads"]["chrome-headless-shell"] if x["platform"]=="linux64"][0])')
+          curl -sSL "$URL" -o chs.zip
+          unzip -q chs.zip
+          BIN=$(find . -name chrome-headless-shell -executable | head -1)
+          echo "UWGS_CHROME_BIN_SUPERVISED=$BIN" >> "$GITHUB_ENV"
+          echo "got chrome-headless-shell at $BIN"
+
+      - name: Run chromium-supervised real-internet smoke (final boss)
+        if: runner.os == 'Linux' && matrix.name == 'linux-amd64'
+        # Chrome-for-testing download flakes + GH-runner network
+        # to youtube can be intermittent; continue-on-error so
+        # CI signal stays clean. Self-hosted + dev runs surface
+        # real regressions in this path.
+        continue-on-error: true
+        env:
+          UWGS_RUN_CHROMIUM_SUPERVISED: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${UWGS_CHROME_BIN_SUPERVISED:-}" ]; then
+            echo "chrome-headless-shell not installed; skipping supervised smoke"
+            exit 0
+          fi
+          UWGS_CHROME_BIN="$UWGS_CHROME_BIN_SUPERVISED" \
+            go test -count=1 -timeout 360s -run TestChromiumSystrapSupervisedRealInternet -v ./tests/preload/
+
       - name: Run standalone TURN tests
         shell: bash
         run: |
