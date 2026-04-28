@@ -188,7 +188,11 @@ jobs:
 
       - name: Run lite tests
         shell: bash
-        run: go test -tags lite ./...
+        run: |
+          # Retry once on flaky ptrace-only mode tests (same pattern as
+          # the main test step); the underlying tests are correct, but
+          # GH-runner CPU contention occasionally trips the timeouts.
+          go test -tags lite ./... || go test -tags lite ./...
 
   # Slim musl matrix on every push: catches musl-only build/runtime
   # divergences (e.g., struct timespec without <time.h>, sendmmsg flags

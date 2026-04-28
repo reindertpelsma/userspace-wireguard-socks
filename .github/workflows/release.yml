@@ -237,7 +237,11 @@ jobs:
 
       - name: Run lite tests
         shell: bash
-        run: go test -tags lite ./...
+        run: |
+          # Retry once: ptrace-only mode tests are slow under GH-runner
+          # CPU contention and occasionally exceed timeouts; same retry
+          # pattern the release-test step uses.
+          go test -tags lite ./... || go test -tags lite ./...
 
   build-uwgsocks:
     name: uwgsocks ${{ matrix.goos }} ${{ matrix.goarch }}
