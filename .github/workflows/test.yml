@@ -72,6 +72,43 @@ jobs:
           set -euo pipefail
           go test ./tests/preload/... || go test ./tests/preload/...
 
+      - name: Install chromium for real-internet smoke
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Headless chromium-style binary; chromium-browser pulls in
+          # the snap on some runners, so we use the apt package.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends chromium chromium-driver \
+            || sudo apt-get install -y --no-install-recommends chromium-browser \
+            || true
+          if command -v chromium >/dev/null 2>&1; then
+            echo "UWGS_CHROME_BIN=$(command -v chromium)" >> "$GITHUB_ENV"
+          elif command -v chromium-browser >/dev/null 2>&1; then
+            echo "UWGS_CHROME_BIN=$(command -v chromium-browser)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run chromium real-internet smoke
+        if: runner.os == 'Linux'
+        # GH-runner-environment quirks (snap-confined chromium, dbus,
+        # GCM probes hitting deprecated Google endpoints) historically
+        # produce flakes unrelated to the wrapper. Continue-on-error so
+        # CI signal stays useful even when the runner env misbehaves;
+        # local + self-hosted runs surface real regressions.
+        continue-on-error: true
+        env:
+          UWGS_RUN_CHROMIUM_REAL_INTERNET: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${UWGS_CHROME_BIN:-}" ]; then
+            echo "no chromium binary detected; skipping smoke"
+            exit 0
+          fi
+          go test -count=1 -timeout 240s -run TestChromiumRealInternetSmoke -v ./tests/preload/
+
       - name: Run standalone TURN tests
         shell: bash
         run: |
@@ -152,6 +189,48 @@ jobs:
       - name: Run lite tests
         shell: bash
         run: go test -tags lite ./...
+
+  # Slim musl matrix on every push: catches musl-only build/runtime
+  # divergences (e.g., struct timespec without <time.h>, sendmmsg flags
+  # arg type) before they compound. The full glibc 2.27/2.31/2.36 +
+  # musl current/older × amd64+arm64 matrix lives in release.yml's
+  # preload-libc-matrix and runs on tag pushes only.
+  preload-musl:
+    name: preload musl ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: amd64
+            runner: ubuntu-latest
+          - name: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run a representative preload subset under golang:alpine (musl)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD":/src \
+            -w /src \
+            --cap-add SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            golang:1.24-alpine \
+            sh -c '
+              apk add --no-cache gcc musl-dev linux-headers git bash file >/dev/null
+              export PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=auto
+              git init -q . 2>/dev/null || true
+              # Slim test set: lock primitives + Phase 2 Go-static (the
+              # paths we know work under musl). The arm64+musl+static-PIE
+              # +C corner case is documented as a known limitation in
+              # preload/PHASE2_DESIGN.md and excluded from this CI subset.
+              go test -buildvcs=false -count=1 -timeout 480s \
+                -run "TestPhase1Fxlock|TestPhase1CacheRace|TestPhase2StaticGo" \
+                ./tests/preload/
+            '
 
   cross-build:
     name: cross-build ${{ matrix.goos }} ${{ matrix.goarch }}

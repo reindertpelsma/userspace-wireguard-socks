@@ -246,9 +246,26 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 		return traceRun(uwgtrace.SeccompNone, false)
 	}
 
+	staticPreloadRun := func() {
+		blob := os.Getenv("UWGS_STATIC_BLOB")
+		if blob == "" {
+			blob = staticBlobPath()
+		}
+		if blob == "" {
+			log.Fatal("preload-static: UWGS_STATIC_BLOB unset and no sibling uwgpreload-static-${arch}.so found")
+		}
+		_ = shared.Close(false)
+		if err := runStaticPreload(target, progArgs, env, blob); err != nil {
+			log.Fatalf("preload-static failed: %v", err)
+		}
+		os.Exit(0)
+	}
+
 	switch transport {
 	case "preload":
 		preloadRun()
+	case "preload-static":
+		staticPreloadRun()
 	case "preload-and-ptrace":
 		if err := combo(); err != nil {
 			log.Fatalf("both mode failed: %v", err)

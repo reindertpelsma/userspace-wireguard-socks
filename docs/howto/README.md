@@ -39,6 +39,7 @@ root [README.md](../../README.md).
 7. [07 TURN Relay Ingress](07-turn-relay-ingress.md)
 8. [08 Reference Map](08-reference-map.md)
 9. [09 Unix Socket Forwards](09-unix-socket-forwards.md)
+10. [10 Minecraft Soak (Paper + uwgwrapper)](10-minecraft-soak.md)
 
 ## Demo Notes
 
