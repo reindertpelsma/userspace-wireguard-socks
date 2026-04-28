@@ -54,20 +54,23 @@ func TestPhase1HeadlessChromeSmoke(t *testing.T) {
 	pair := setupWrapperHTTPPair(t)
 	transport := strings.TrimSpace(os.Getenv("UWGS_BROWSER_SMOKE_TRANSPORT"))
 	if transport == "" {
-		transport = "systrap"
+		// Default to systrap-supervised: the supervisor handles
+		// chromium's zygote + renderer fork+exec model, which
+		// means we no longer need --no-zygote or
+		// UWGS_DISABLE_SECCOMP=1 for chromium-class workloads.
+		// The previous default `systrap` (no ptrace) relied on
+		// --no-zygote to avoid the static-child interception gap;
+		// supervised eliminates that gap.
+		transport = "systrap-supervised"
 	}
 	serverScript := filepath.Join(repo, "tests/preload/testdata/node_http_server.js")
 	markFile := filepath.Join(t.TempDir(), "phase1-chrome-post.txt")
 
-	// The trimmed trap list (network syscalls only — no read/write/
-	// close/dup/fcntl) makes the post-execve window safe: libc-init
-	// only uses non-network syscalls so the SIGSYS-handler-reset
-	// problem doesn't fire. seccomp can stay enabled.
-	//
-	// UWGS_DNS_MODE=libc still preferred — our DNS forcing has a
-	// timing race under chromium's parallel DNS load; libc resolver
-	// gives consistent passes. Test URL is an IP literal anyway.
-	disableSeccomp := wrapperRunOptions{
+	// UWGS_DNS_MODE=libc keeps the DNS path simple — chromium's
+	// parallel DNS bursts can race our forced-DNS path; libc
+	// resolver gives consistent passes. The test URL is an IP
+	// literal anyway, so DNS isn't load-bearing here.
+	wrapperEnv := wrapperRunOptions{
 		timeout: 360 * time.Second,
 		env: map[string]string{
 			"UWGS_DNS_MODE": "libc",
@@ -75,25 +78,33 @@ func TestPhase1HeadlessChromeSmoke(t *testing.T) {
 	}
 	serverCmd, serverStderr, serverDone := startWrappedListenerProcess(t, art, pair.serverHTTPSock, transport, "node",
 		[]string{serverScript, "100.64.94.1", "18090", markFile},
-		disableSeccomp)
+		wrapperEnv)
 	defer func() {
 		killProcessGroup(serverCmd)
 		<-serverDone
 	}()
 
+	// Minimum chromium flag set under systrap-supervised. The
+	// supervisor lets us drop --no-zygote (chromium's zygote IS
+	// the fork+exec model the supervisor handles), and the
+	// chromium-supervised real-internet test (TestChromiumSystrap
+	// SupervisedRealInternet) confirmed --disable-features=DBus,
+	// VizDisplayCompositor and --disable-software-rasterizer are
+	// also unnecessary. --no-sandbox stays (setuid sandbox
+	// conflicts with ptrace; future hardening pass for
+	// fdproxy/sandbox-cooperation tackles this); --disable-gpu
+	// stays (no GPU on test hosts); --disable-dev-shm-usage stays
+	// defensively for stripped containers.
 	browserArgs := []string{
 		"--headless",
 		"--no-sandbox",
 		"--disable-gpu",
-		"--disable-features=DBus,VizDisplayCompositor",
-		"--disable-software-rasterizer",
 		"--disable-dev-shm-usage",
-		"--no-zygote",
 		"--virtual-time-budget=5000",
 		"--dump-dom",
 		"http://100.64.94.1:18090/",
 	}
-	out, stderr := runPhase1WrappedBrowser(t, art, pair.clientHTTPSock, transport, chromeBin, browserArgs, disableSeccomp)
+	out, stderr := runPhase1WrappedBrowser(t, art, pair.clientHTTPSock, transport, chromeBin, browserArgs, wrapperEnv)
 	if !strings.Contains(string(out), "script-ok:204") {
 		t.Fatalf("phase1 headless chrome smoke failed\nout=%s\nbrowser stderr=%s\nserver stderr=%s", out, stderr, serverStderr.String())
 	}
