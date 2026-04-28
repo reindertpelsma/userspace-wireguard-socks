@@ -154,6 +154,82 @@ TURN itself can also ride over:
 That is useful when even TURN needs to hide inside something more firewall
 friendly than plain UDP.
 
+## WireGuard guard — threat model
+
+The standalone TURN daemon can run with `wireguard_guard.enabled`,
+which inspects every packet a TURN client sends and drops
+non-WireGuard traffic before it reaches the relay back-end. This
+is the load-bearing security feature when you run an open TURN
+relay that's intended to carry only WG traffic — without it, any
+TURN credential can relay arbitrary UDP to anywhere on your
+trusted network.
+
+### What is trusted
+
+- The standalone daemon itself (you operate it).
+- The WireGuard server behind the relay (you operate it).
+
+### What is NOT trusted
+
+- TURN clients with valid credentials. Even an authenticated
+  client can be malicious — credentials don't imply intent.
+- TURN message contents. The TURN protocol itself isn't encrypted;
+  any on-path attacker can mangle messages.
+- Inbound packet bytes from any source. The guard's parser is the
+  primary attack surface — every TURN client can send arbitrary
+  bytes that reach `ProcessInbound`.
+
+### What the guard enforces
+
+- Packet length bounds (handshake-init = 148 bytes, handshake-resp
+  = 92, cookie-reply = 64, data ≥ 32). Out-of-spec sizes drop.
+- mac1 verification on handshake initiation against the server's
+  configured public key. Random bytes won't pass.
+- Cookie/mac2 verification when the server is overloaded (cookie
+  reply path).
+- Per-IP handshake rate limiting (default 10/s sustained). Hostile
+  IPs trying to flood don't get through.
+- Roaming sustained-rate detection — abnormally fast endpoint
+  changes from the same session get throttled.
+- Session table cap at `max_sessions` (default 1000). Beyond the
+  cap, the oldest session is evicted; the table can't grow
+  without bound.
+
+### What the guard does NOT do
+
+- Encrypt TURN messages (TURN itself doesn't; TURNS over TLS
+  does). An on-path attacker who can MITM the TURN carrier can
+  disrupt connections by mangling ICMP or TURN-control messages —
+  but they can't decrypt the WG payload, and they can't make the
+  guard forward arbitrary traffic.
+- Validate the source-IP claim on data packets. WireGuard's own
+  cryptographic envelope authenticates the data; the guard relies
+  on that.
+- Filter the carrier transport (HTTP/QUIC/etc.). Use the carrier's
+  own auth + TLS for transport-layer integrity.
+
+### Hardening checklist for an open TURN relay
+
+- `wireguard_guard.enabled: true` (otherwise it's a free-for-all).
+- Set `wireguard_guard.public_keys` to exactly the WG server keys
+  you want to relay; never leave it empty.
+- Set `max_sessions` to bound the session table. Default 1000
+  handles thousands of simultaneous WG peers; raise only if you
+  have evidence you need more.
+- Use `wireguard_guard.policy: reject-unless-permitted` when the
+  relay is open to the public internet — the more permissive
+  modes assume a trusted client base.
+- Run the relay in an unprivileged container or systemd unit with
+  the smallest capability set. `NoNewPrivileges`, no capabilities
+  beyond what binding the listen ports needs.
+- Monitor the `Sessions evicted` log line — sustained eviction
+  means the cap is too low or someone is flooding.
+
+The fuzz target `FuzzWireguardGuardProcessInbound` runs in tier-3
+release CI for 30 seconds per release, throwing random bytes at
+the parser. Local 15-second runs at 20k execs/sec have not
+discovered any panics.
+
 ## When To Reach For TURN
 
 Use TURN when the real problem is reachability, not selective local routing.
