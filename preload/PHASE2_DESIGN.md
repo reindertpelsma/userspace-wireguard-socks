@@ -209,15 +209,18 @@ See `tests/preload/phase2_natural_exit_diag_test.go` for the
 diagnostic + per-thread `/proc` dumper (gated by
 `UWG_PHASE2_DIAG=1`).
 
-**TestPhase2StaticBinaryEchoTCP fails on the (arm64 × musl ×
-glibc-style static-PIE C binary) corner of the matrix.** First
-`send()` after `connect()` returns `ENOBUFS` (errno 105). The
-amd64 musl path, the arm64 glibc path, and both arches' Go-static
-paths are all green; only this 4-way intersection fails. Likely a
-syscall-arg or errno-translation bug specific to arm64-musl-PIE;
-worth a focused investigation but not blocking the Phase 2
-v0.1.x release as Go-static (the dominant real-world target) is
-fully validated. Tracked in the soak-test-matrix follow-up.
+**~~TestPhase2StaticBinaryEchoTCP fails on the (arm64 × musl ×
+glibc-style static-PIE C binary) corner of the matrix.~~ FIXED in
+v0.1.0-beta.52.** Root cause: musl declares `struct
+msghdr.msg_iovlen` as `int` (32-bit) with `__pad1` after it on
+64-bit little-endian; the Linux kernel reads `msg_iovlen` as
+`__kernel_size_t` (64-bit). When `uwg_sendto` and `uwg_recvfrom`
+built the msghdr field-by-field without zeroing the struct first,
+`__pad1` carried stack garbage, the kernel saw garbage in the high
+32 bits of iovlen, and `sendmsg(2)` rejected the call with
+`-ENOBUFS`. Fix: `memset(&msg, 0, sizeof(msg))` before assigning
+fields. Glibc's `struct msghdr` uses `size_t msg_iovlen` directly
+so the bug never manifested there.
 
 **Minecraft soak (validated 2026-04-28):** Paper 1.21.11 server
 running under `uwgwrapper --transport=preload`, binding

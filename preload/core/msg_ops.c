@@ -266,16 +266,16 @@ long uwg_recvfrom(int fd, void *buf, size_t len, int flags,
                            &iov, 1, src, slen);
     }
 
-    /* TCP-stream / non-tunnel: build msghdr and use recvmsg. */
+    /* TCP-stream / non-tunnel: build msghdr and use recvmsg.
+     * Zero the whole struct first — see uwg_sendto comment for the
+     * musl-vs-kernel msghdr layout hazard (32-bit msg_iovlen + pad). */
     struct iovec iov = { .iov_base = buf, .iov_len = len };
     struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
     msg.msg_name = src;
     msg.msg_namelen = src ? (slen ? *slen : 0) : 0;
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = 0;
-    msg.msg_controllen = 0;
-    msg.msg_flags = 0;
 
     int eff_flags = (state.proxied && state.kind == KIND_TCP_STREAM)
                         ? effective_recv_flags(&state, flags)
@@ -302,15 +302,22 @@ long uwg_sendto(int fd, const void *buf, size_t len, int flags,
     /* dest=NULL with nonzero dlen is the awkward case — punt. */
     if (dest == NULL && dlen != 0) return -22;
 
+    /* IMPORTANT: zero the entire msghdr. musl declares msg_iovlen as
+     * int (32-bit) with __pad1 after it on 64-bit little-endian; the
+     * kernel reads msg_iovlen as __kernel_size_t (64-bit). If we
+     * leave __pad1 uninitialized, the kernel sees garbage in the
+     * high 32 bits of iovlen and rejects with -ENOBUFS (or similar).
+     * Same hazard for msg_controllen / __pad2. Glibc's struct has
+     * size_t fields directly so the bug is musl-only. */
     struct iovec iov = { .iov_base = (void *)buf, .iov_len = len };
     struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
     msg.msg_name = (void *)dest;
     msg.msg_namelen = dest ? dlen : 0;
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = 0;
-    msg.msg_controllen = 0;
-    msg.msg_flags = 0;
+    /* msg_control / msg_controllen / msg_flags / any libc padding
+     * are already zeroed by the memset above. */
 
     return uwg_passthrough_syscall3(SYS_sendmsg, fd, (long)&msg, flags);
 }
