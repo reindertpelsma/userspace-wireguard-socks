@@ -2525,6 +2525,9 @@ func TestStressImpairedNetworkAndAPIMutation(t *testing.T) {
 
 func mustStart(t *testing.T, cfg config.Config) *engine.Engine {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("full-engine integration tests skipped in -short mode (run without -short or in release CI)")
+	}
 	if err := cfg.Normalize(); err != nil {
 		t.Fatal(err)
 	}

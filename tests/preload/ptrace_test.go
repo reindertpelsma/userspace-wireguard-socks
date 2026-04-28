@@ -978,6 +978,9 @@ func TestUWGWrapperNoNewPrivilegesDefaultAndOverride(t *testing.T) {
 
 func requireWrapperToolchain(t *testing.T) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("wrapper integration tests skipped in -short mode (run without -short or in release CI)")
+	}
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Skip("wrapper tests are linux/amd64 only")
 	}

@@ -27,6 +27,9 @@ import (
 )
 
 func TestLDPreloadManagedTCPUDPConnect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("LD_PRELOAD integration test skipped in -short mode")
+	}
 	if runtime.GOOS != "linux" {
 		t.Skip("LD_PRELOAD wrapper is Linux-only")
 	}

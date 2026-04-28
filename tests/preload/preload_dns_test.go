@@ -245,6 +245,9 @@ func runClient(t *testing.T, b built, s *dnsTestServer, mode string, args ...str
 }
 
 func TestPreloadDNS(t *testing.T) {
+	if testing.Short() {
+		t.Skip("preload DNS integration test skipped in -short mode")
+	}
 	b := buildArtifacts(t)
 	t.Run("happy", func(t *testing.T) {
 		s := newDNSTestServer(t)

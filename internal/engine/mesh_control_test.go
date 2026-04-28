@@ -719,6 +719,14 @@ func TestMeshACLsForRequesterProjectsDestinationsToRequesterSpace(t *testing.T) 
 
 func mustStartMeshEngine(t *testing.T, cfg config.Config) *Engine {
 	t.Helper()
+	if testing.Short() {
+		// Mesh-integration tests stand up a full wireguard-go
+		// runtime + handshake pumps + a mesh-control http
+		// server. That's well above the 10-second pre-commit /
+		// -short budget. Skip the entire mesh integration
+		// surface in -short mode.
+		t.Skip("mesh integration tests skipped in -short mode")
+	}
 	if err := cfg.Normalize(); err != nil {
 		t.Fatal(err)
 	}

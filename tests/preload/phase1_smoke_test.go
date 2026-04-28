@@ -23,6 +23,14 @@ import (
 // and aarch64), so the test should exercise both.
 func requirePhase1Toolchain(t *testing.T) {
 	t.Helper()
+	if testing.Short() {
+		// Wrapper integration tests build the .so + wrapper
+		// binary + spawn child processes; that's well above the
+		// 10-second budget the pre-commit hook (and -short
+		// callers in general) rely on. Skip the entire
+		// integration surface in -short mode.
+		t.Skip("preload integration tests skipped in -short mode (run without -short or in release CI)")
+	}
 	if runtime.GOOS != "linux" {
 		t.Skip("phase1 wrapper tests are linux-only")
 	}
