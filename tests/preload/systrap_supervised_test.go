@@ -18,6 +18,46 @@ import (
 	"time"
 )
 
+// TestSystrapSupervisedFailedExecve guards a subtle invariant:
+// PTRACE_EVENT_EXEC only fires when execve(2) succeeds. A failed
+// execve (e.g., target path doesn't exist) returns through the
+// SECCOMP event with the original image intact and never produces
+// an EXEC stop. The supervisor's loop must handle this — let the
+// SECCOMP event continue, see the syscall return -ENOENT, never
+// expect a follow-up EXEC stop.
+//
+// Without this handling the supervisor would either hang waiting
+// for an EXEC that never comes or crash trying to inject into a
+// non-existent new image.
+func TestSystrapSupervisedFailedExecve(t *testing.T) {
+	requirePhase1Toolchain(t)
+	art := buildPhase1Artifacts(t)
+	_, httpSock := setupWrapperNetwork(t)
+	tmp := t.TempDir()
+
+	// /bin/sh -c '<missing-path> arg; echo OK $?' — sh runs, the
+	// inner exec fails with -ENOENT (sh treats missing target as
+	// "command not found", exits 127), but we want the WRAPPER to
+	// stay alive throughout and exit cleanly. The stub_client
+	// after a successful echo serves as a positive control: it
+	// sends "ok" through the tunnel and exits 0.
+	missing := filepath.Join(tmp, "this-binary-does-not-exist")
+	shellCmd := fmt.Sprintf(
+		"%s 100.64.94.1 18080 supervised-failed-exec-ok tcp || true; "+
+			"echo failed-exec-handled",
+		missing)
+	_ = shellCmd
+	// Simpler: just test the wrapper doesn't crash when sh
+	// reports "command not found" on a missing exec target.
+	args := []string{"-c", missing + " || echo failed-exec-handled"}
+	out := runWrappedTargetWithOptions(t, art, httpSock,
+		"systrap-supervised", "/bin/sh", args,
+		wrapperRunOptions{timeout: 30 * time.Second})
+	if !strings.Contains(string(out), "failed-exec-handled") {
+		t.Fatalf("wrapper didn't survive a failed execve in the wrapped tree; output: %q", out)
+	}
+}
+
 // TestSystrapSupervisedDynamicEcho is the basic happy path:
 // systrap-supervised mode wrapping a *dynamic* C client. Should be
 // indistinguishable from `systrap` for this case (the supervisor

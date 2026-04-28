@@ -94,12 +94,16 @@ func TestUWGWrapperBothMixedInterop(t *testing.T) {
 	// handler is the trap). The tracer-side counter assertions
 	// therefore can't measure what they were designed to measure.
 	//
-	// Keep the test as a placeholder pinned to the removed mode;
-	// when systrap-supervised lands (Phase 1.5+2 fusion, with an
-	// execve-only ptrace), the equivalent assertions move to a new
-	// systrap-supervised-specific test that counts execve hooks
-	// rather than per-syscall traps.
-	t.Skip("preload-and-ptrace removed in favour of systrap; cross-tracer-cache assertion no longer applies. Equivalent invariants will be verified by a systrap-supervised test once the supervisor lands.")
+	// systrap-supervised shipped in v0.1.0-beta.57; its
+	// dynamic↔static execve invariants are now exercised by
+	// TestSystrapSupervisedDynamicExecsStatic and friends in
+	// systrap_supervised_test.go. This test (preload-and-ptrace's
+	// cross-tracer-cache deltas) is permanently skipped — the
+	// removed mode is no longer reachable via any transport name
+	// or alias, and the per-fd-cache cross-process invariants it
+	// asserted on don't apply to systrap-supervised (whose tracer
+	// only fires at execve, not on every traced syscall).
+	t.Skip("preload-and-ptrace removed; cross-tracer-cache assertion no longer applies. systrap-supervised's invariants are tested in systrap_supervised_test.go.")
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)

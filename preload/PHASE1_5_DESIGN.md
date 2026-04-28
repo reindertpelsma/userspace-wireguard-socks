@@ -78,16 +78,38 @@ becomes its tracer. From there:
 - ❌ setuid binaries (kernel drops LD_PRELOAD for security; needs
   Phase 2 too).
 
-## Validation plan
+## Validation status (as of v0.1.0-beta.57)
+
+The supervisor shipped in beta.57 as `transport=systrap-supervised`.
+Coverage:
+
+- ✅ `TestSystrapSupervisedDynamicEcho` — pure dynamic round-trip
+  through the supervisor (sanity check). amd64 + arm64.
+- ✅ `TestSystrapSupervisedDynamicExecsStatic` — the load-bearing
+  case: a wrapped dynamic `/bin/sh` exec's a static C binary
+  mid-script. The supervisor's re-arm in the static child is what
+  makes the tunnel TCP echo complete. amd64 + arm64.
+
+Validation work still on the wishlist (not yet committed):
 
 - Re-enable seccomp in `TestPhase1HeadlessChromeSmoke` (drop the
-  `UWGS_DISABLE_SECCOMP=1` env). Should pass without the workaround
-  once the supervisor is wired in.
-- Add `TestPhase1_5ExecveRearm` that fork+execs the C stub a few
-  times in a loop and asserts the child sees a working preload
-  (e.g., a `socket()` returning a tunnel-managed fd via fdproxy).
-- Stability: 20×20 (20 wrapped processes × 20 fork+exec cycles each)
-  on amd64 and arm64, race-clean.
+  `UWGS_DISABLE_SECCOMP=1` workaround). With systrap-supervised the
+  workaround should be unnecessary because the supervisor catches
+  the chromium-zygote execve boundaries.
+- Add `TestPhase1_5ExecveRearm` (or rename: `TestSystrapSupervised
+  ExecveRearmLoop`) that fork+execs the C stub a few times in a
+  loop and asserts every child sees working interception.
+- Stability soak: 20×20 (20 wrapped processes × 20 fork+exec cycles
+  each) on amd64 and arm64, race-clean.
+- Multi-threaded execve: a wrapped target that spawns N threads,
+  one of which `execve`s a static binary; the kernel guarantees
+  only the calling thread survives execve (atomic), so the
+  supervisor only sees one PID re-emerge — but the test confirms
+  the design assumption.
+- Failed-execve resilience: wrap a target that intentionally
+  execves a non-existent path; the wrapper should NOT crash, and
+  the failed execve should return -ENOENT cleanly without firing
+  a (non-existent) PTRACE_EVENT_EXEC.
 
 ## Slow-path investigation — RESOLVED
 
