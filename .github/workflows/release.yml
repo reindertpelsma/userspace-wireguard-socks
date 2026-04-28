@@ -191,7 +191,7 @@ jobs:
         run: |
           set -euo pipefail
           go test -count=1 -timeout 900s \
-            -run 'TestMeshChaosResume_(Foundation|LossyDirectPath|AdvertisedEndpointThroughNAT|RelayFailoverOn100PercentDrop|SourcePortRebind|TCPOuterMidStreamDrop)' \
+            -run 'TestMeshChaosResume_(Foundation|LossyDirectPath|AdvertisedEndpointThroughNAT|RelayFailoverOn100PercentDrop|SourcePortRebind|TCPOuterMidStreamDrop|HubProcessRestart|MultiInstanceHost|RuntimeMutationsUnderLoad)' \
             ./internal/engine/
 
       # gVisor smoke: uwgwrapper is precisely the tool you'd reach
