@@ -60,7 +60,7 @@ func main() {
 	flag.StringVar(&preloadPath, "preload", os.Getenv("UWGS_PRELOAD"), "path to preload shared library; defaults to embedded copy extracted to /tmp")
 	flag.StringVar(&listenPath, "listen", getenv("UWGS_FDPROXY", ""), "Unix socket path exposed to the preload wrapper")
 	flag.StringVar(&dnsMode, "dns-mode", getenv("UWGS_DNS_MODE", "full"), "DNS handling mode: full, libc, none")
-	flag.StringVar(&transport, "transport", getenv("UWGS_WRAPPER_TRANSPORT", "auto"), "transport mode: auto, systrap, systrap-static, preload, preload-and-ptrace (deprecated), ptrace-seccomp, ptrace-only, ptrace")
+	flag.StringVar(&transport, "transport", getenv("UWGS_WRAPPER_TRANSPORT", "auto"), "transport mode: auto, systrap-supervised, systrap, systrap-static, preload, ptrace, ptrace-seccomp, ptrace-only")
 	flag.BoolVar(&forceLoopbackDNS, "force-loopback-dns", getenv("UWGS_DISABLE_LOOPBACK_DNS53", "") == "", "force loopback TCP/UDP port 53 to DNS proxy (default true)")
 	flag.BoolVar(&spawnFDProxy, "spawn-fdproxy", getenv("UWGS_WRAPPER_SPAWN_FDPROXY", "") != "0", "launch built-in fdproxy daemon automatically in launch mode")
 	flag.BoolVar(&noNewPrivileges, "no-new-privileges", getenv("UWGS_WRAPPER_NO_NEW_PRIVILEGES", "1") != "0", "set PR_SET_NO_NEW_PRIVS before launching the wrapped program (default true)")
@@ -97,8 +97,12 @@ func main() {
 		if err := uwgtrace.RunTraceeHelper(flag.Args()); err != nil {
 			log.Fatal(err)
 		}
+	case "probe-seccomp":
+		runProbeSeccomp()
+	case "probe-ptrace":
+		runProbePtrace()
 	default:
-		log.Fatalf("unsupported mode %q, expected launch, fdproxy, stdio, exec-helper, or tracee-helper", mode)
+		log.Fatalf("unsupported mode %q, expected launch, fdproxy, stdio, exec-helper, tracee-helper, probe-seccomp, or probe-ptrace", mode)
 	}
 }
 
@@ -243,7 +247,26 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 		os.Exit(0)
 	}
 
+	// systrapRun: LD_PRELOAD with seccomp + SIGSYS, no ptrace. The
+	// .so constructor installs both. Static-binary descendants of
+	// fork+exec lose interception (no LD_PRELOAD path on static).
 	systrapRun := func() { preloadInner(false) }
+	// systrapSupervisedRun: same as systrapRun today, but
+	// semantically the slot for the Phase 1.5+2 fusion (an execve-
+	// only ptrace supervisor that re-arms across dynamic↔static
+	// boundaries). Until the supervisor lands, this is identical
+	// to systrapRun. The mode name is reserved so users can opt in
+	// once it ships.
+	systrapSupervisedRun := func() {
+		// TODO(phase1.5): attach an execve supervisor here that
+		// catches SECCOMP_RET_TRACE on execve/execveat and
+		// re-arms the appropriate injection (LD_PRELOAD for
+		// dynamic, blob inject for static). For now, runs as
+		// plain systrap; ptrace probe was already done by auto
+		// (or by an explicit user pick — log a hint).
+		log.Println("uwgwrapper: systrap-supervised: execve supervisor not yet implemented; running plain systrap. dynamic↔static execve transitions not yet handled. Track the systrap-supervised feature in PHASE1_5_DESIGN.md.")
+		preloadInner(false)
+	}
 	libcOnlyRun := func() { preloadInner(true) }
 
 	traceSimple := func() error {
@@ -254,6 +277,16 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 	}
 
 	systrapStaticRun := func() {
+		// Pre-flight: ptrace MUST be available. systrap-static
+		// injects the freestanding blob into the target's address
+		// space via PTRACE_TRACEME + remote mmap + POKEDATA at the
+		// post-exec stop. There is no other way to reach a static
+		// binary's address space — LD_PRELOAD is meaningless on a
+		// static binary. If a container blocks ptrace, this mode
+		// is unreachable on that host.
+		if !probePtraceAvailable() {
+			log.Fatal("systrap-static: ptrace(2) is blocked on this host (typical of restricted containers — Docker default seccomp, K8s pods without SYS_PTRACE). systrap-static fundamentally requires ptrace for blob injection. Use --transport=systrap (dynamic targets only) or --transport=ptrace if seccomp is also blocked.")
+		}
 		blob := os.Getenv("UWGS_STATIC_BLOB")
 		if blob == "" {
 			blob = staticBlobPath()
@@ -271,19 +304,37 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 	// Mode dispatch.
 	//
 	// The naming (v0.1.0-beta.56+):
-	//   - preload          libc-only LD_PRELOAD (no seccomp, no SIGSYS, no
-	//                      ptrace). For hosts without seccomp/ptrace
-	//                      support (e.g. restricted containers).
-	//   - systrap          LD_PRELOAD + seccomp + SIGSYS handler (the
-	//                      kernel-trap fast path for raw-asm syscalls,
-	//                      libc hooks for the hot path). Default.
-	//   - systrap-static   freestanding-blob ptrace-injection for static
-	//                      binaries. Same kernel-trap path as systrap;
-	//                      no libc hooks.
-	//   - ptrace-seccomp   per-syscall ptrace + seccomp filter (filter
-	//                      skips uninteresting syscalls).
-	//   - ptrace-only      per-syscall ptrace, no seccomp at all.
-	//   - ptrace           ptrace-seccomp first, fall back to ptrace-only.
+	//   - preload              libc-only LD_PRELOAD. No seccomp, no
+	//                          SIGSYS, no ptrace. For hosts that
+	//                          block both seccomp and ptrace.
+	//   - systrap              LD_PRELOAD + seccomp + in-process
+	//                          SIGSYS handler. NO ptrace. Hot path
+	//                          stays in libc; raw-asm traps in
+	//                          process. Dynamic targets only;
+	//                          static-binary descendants of
+	//                          fork+exec lose interception (kernel
+	//                          inherits filter but not handler).
+	//   - systrap-supervised   systrap + an execve-only ptrace
+	//                          supervisor that catches
+	//                          SECCOMP_RET_TRACE on execve/execveat
+	//                          and re-arms across dynamic↔static
+	//                          boundaries. Requires ptrace. Today
+	//                          runs as plain systrap with a
+	//                          deprecation/forward-compat warning;
+	//                          the supervisor is the Phase 1.5+2
+	//                          follow-up.
+	//   - systrap-static       Freestanding-blob ptrace-injection
+	//                          for statically-linked targets and
+	//                          their static descendants. Assumes
+	//                          everything is static (no libc
+	//                          hooks). Requires ptrace.
+	//   - ptrace-seccomp       Per-syscall ptrace with a seccomp
+	//                          pre-filter. User-selectable; auto
+	//                          skips it (when seccomp+ptrace are
+	//                          both available, systrap-supervised
+	//                          is preferred).
+	//   - ptrace-only          Per-syscall ptrace, no seccomp.
+	//   - ptrace               ptrace-seccomp → ptrace-only fallback.
 	//
 	// Removed (deprecation aliases — emit a warning + run the
 	// nearest-equivalent mode for one release, then delete):
@@ -304,6 +355,13 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 		libcOnlyRun()
 	case "systrap":
 		systrapRun()
+	case "systrap-supervised":
+		// Pre-flight: systrap-supervised requires ptrace for the
+		// execve supervisor. Fail fast if blocked.
+		if !probePtraceAvailable() {
+			log.Fatal("systrap-supervised: ptrace(2) is blocked on this host. systrap-supervised needs ptrace for the execve hook. Use --transport=systrap (dynamic-only, no execve supervisor) instead.")
+		}
+		systrapSupervisedRun()
 	case "systrap-static":
 		systrapStaticRun()
 	case "preload-static":
@@ -328,33 +386,68 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 			log.Fatalf("ptrace mode failed: %v", err)
 		}
 	case "auto":
-		// Auto cascade — correctness first, performance second.
+		// Auto cascade — try each mode in this order; pick the
+		// first one whose host requirements are met.
 		//
-		// We start with preload+seccomp+ptrace (traceRun with
-		// SeccompSecret) because today's `systrap` (LD_PRELOAD
-		// constructor only) does not yet have the execve
-		// supervisor, so fork+exec workloads (chromium-class)
-		// would lose interception in child processes. Once the
-		// adaptive systrap supervisor (Phase 1.5+2 fusion) lands,
-		// this cascade gets reordered to start with `systrap`.
+		//   1. systrap-supervised   seccomp ✅ + ptrace ✅
+		//      LD_PRELOAD + seccomp + in-process SIGSYS + an
+		//      execve-only ptrace supervisor that re-arms across
+		//      dynamic↔static boundaries. Best correctness +
+		//      performance combination. Today the supervisor is
+		//      a TODO (Phase 1.5+2); this path runs plain systrap
+		//      + a heads-up log line.
 		//
-		// Cascade order (each falls through only if mode setup
-		// itself failed — e.g. seccomp unavailable, ptrace
-		// blocked):
-		//   1. preload + seccomp + ptrace  (ptrace re-arms at exec)
-		//   2. ptrace + seccomp            (skip uninteresting syscalls)
-		//   3. ptrace                      (universal slow path)
-		//   4. preload (libc-only)         (last resort, raw-asm leaks)
-		if err := traceRun(uwgtrace.SeccompSecret, true); err == nil {
-			return
+		//   2. systrap              seccomp ✅ + ptrace ❌
+		//      The common container case (Docker default seccomp
+		//      profile, K8s pods without SYS_PTRACE). Dynamic
+		//      targets work fully; static-binary descendants of
+		//      fork+exec lose interception (caveat documented in
+		//      wrapper-modes.md).
+		//
+		//   3. systrap-static       fallback when libc linkage to
+		//      our .so is broken on this host (rare). Treats
+		//      every binary as static; never uses libc hooks.
+		//      Requires ptrace; auto only reaches here if ptrace
+		//      is available and the systrap libc-link probe
+		//      failed. Currently we don't probe libc-link, so
+		//      auto skips this slot for now — it's left as a
+		//      reserved cascade entry for future use.
+		//
+		//   4. ptrace               seccomp ❌ + ptrace ✅
+		//      Universal slow path: every syscall round-trips
+		//      through the supervisor.
+		//
+		//   5. preload              seccomp ❌ + ptrace ❌
+		//      Libc-only. Raw-asm syscalls bypass interception.
+		//
+		// Note: ptrace-seccomp is intentionally NOT in the auto
+		// cascade. When seccomp+ptrace are both available we
+		// always prefer systrap-supervised (better hot-path
+		// performance — no per-syscall ptrace round-trip).
+		// ptrace-seccomp remains as a user-selectable mode.
+		seccompOK := probeSeccompAvailable()
+		ptraceOK := probePtraceAvailable()
+		switch {
+		case seccompOK && ptraceOK:
+			// Slot for systrap-supervised. Today this is plain
+			// systrap with a heads-up log line.
+			systrapSupervisedRun()
+		case seccompOK:
+			systrapRun()
+		case ptraceOK:
+			// Try ptrace-seccomp first (it tries with-seccomp,
+			// which fails-fast if seccomp is blocked, then
+			// falls back to ptrace-only). Then plain ptrace-only.
+			if err := traceSimple(); err == nil {
+				return
+			}
+			if err := traceNoSeccomp(); err == nil {
+				return
+			}
+			libcOnlyRun()
+		default:
+			libcOnlyRun()
 		}
-		if err := traceSimple(); err == nil {
-			return
-		}
-		if err := traceNoSeccomp(); err == nil {
-			return
-		}
-		libcOnlyRun()
 	default:
 		log.Fatalf("unsupported transport %q (supported: auto, systrap, systrap-static, preload, ptrace-seccomp, ptrace-only, ptrace)", transport)
 	}

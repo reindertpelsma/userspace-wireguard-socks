@@ -107,20 +107,59 @@ through `uwgsocks`; it does not change the process' Unix privileges.
 
 ## Why It Still Works On Static Go Or Rust Binaries
 
-- `LD_PRELOAD` catches the easy libc path on dynamic binaries.
-- `seccomp-bpf` reduces ptrace overhead on supported Linux systems.
-- `transport=preload-static` (added in v0.1.0-beta.51) is the fast
-  path for static binaries: the wrapper `ptrace`-injects a tiny
-  freestanding blob into the static target's address space at
-  `exec` time and lets it run in-process from there — no per-
-  syscall PTRACE round-trip after detach.
-- Per-syscall `ptrace` remains as the universal fallback for
-  static binaries on platforms or kernels where the blob injection
-  doesn't apply (or where `transport=ptrace-only` is explicitly
-  requested, e.g. inside a container that doesn't allow seccomp).
+- `transport=systrap` (the default for dynamic binaries): `LD_PRELOAD`
+  catches the easy libc path; a `seccomp-bpf` filter + in-process
+  SIGSYS handler catches raw-asm syscalls that bypass libc.
+- `transport=systrap-static` (for statically-linked targets):
+  the wrapper `ptrace`-injects a small freestanding blob into the
+  target's address space at `exec` time. The blob installs the
+  same seccomp+SIGSYS path as `systrap` and runs in-process from
+  there — no per-syscall PTRACE round-trip after detach.
+- `transport=ptrace`/`ptrace-seccomp`/`ptrace-only`: per-syscall
+  ptrace as the universal fallback, for hosts where SIGSYS isn't
+  available (some restricted containers).
+- `transport=preload`: libc-only fallback for hosts where neither
+  seccomp nor ptrace is available — the most permissive mode but
+  also the leakiest (raw-asm syscalls bypass interception).
 
 That combination is why `uwgwrapper` is closer to "socksify for any
 Linux binary" than to a normal proxy helper. See
 [10 Minecraft Soak](10-minecraft-soak.md) for a concrete walkthrough
-of `transport=preload-static` with a Java/JVM workload binding via
-`/uwg/socket` (Paper Minecraft 1.21.11 inside `uwgwrapper`).
+of `transport=systrap` with a Java/JVM workload binding via
+`/uwg/socket` (Paper Minecraft 1.21.11 inside `uwgwrapper`), and
+[`docs/reference/wrapper-modes.md`](../reference/wrapper-modes.md)
+for the full mode comparison + per-host-shape `auto` cascade.
+
+## Caveat: static binaries on hosts that block ptrace
+
+Some container runtimes (Docker default seccomp profile, Kubernetes
+pods without the `SYS_PTRACE` capability, gVisor, Firecracker)
+block `ptrace(2)` even when they allow `seccomp(2)`. On those hosts
+`systrap` still works for **dynamically-linked** targets — and for
+their dynamically-linked descendants of `fork+exec` — because the
+`.so` constructor re-arms via `LD_PRELOAD` propagation through the
+dynamic linker.
+
+But **static binaries cannot be wrapped without ptrace**, on first
+exec or on any subsequent exec. There is no `LD_PRELOAD` path for a
+static binary; the only way to get our blob into its address space
+is via `PTRACE_TRACEME` + remote `mmap` + `POKEDATA` at the
+post-exec stop. That's a Linux ABI fact, not a library limitation.
+
+Concretely:
+
+- `--transport=systrap-static` does a pre-flight `ptrace` probe and
+  fails fast with a clear error if ptrace is blocked on this host.
+  Pick a different mode (`systrap` for dynamic targets) or run on
+  a host that allows ptrace.
+- Under `--transport=systrap` (no ptrace), if your wrapped tree
+  ever `execve`s into a static binary, that descendant child will
+  inherit the seccomp filter but no SIGSYS handler — the kernel's
+  default disposition for SIGSYS terminates it. The wrapped parent
+  keeps working; only the static descendant dies. If your workload
+  needs static-binary support inside an exec tree, you need a host
+  that allows ptrace.
+
+Both situations are documented in
+[`docs/reference/wrapper-modes.md`](../reference/wrapper-modes.md)'s
+host-shape compatibility table.

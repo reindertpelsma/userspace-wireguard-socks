@@ -85,6 +85,21 @@ func TestUWGWrapperPtraceOnlyRawGoTCPUDP(t *testing.T) {
 }
 
 func TestUWGWrapperBothMixedInterop(t *testing.T) {
+	// This test was written for the (now-removed) preload-and-ptrace
+	// transport: it asserted that libc-routed syscalls did NOT bump
+	// the ptracer's per-syscall counters (proving the libc-fast-path
+	// bypassed the tracer) while raw-asm syscalls DID. Under the
+	// post-rename surface, "preload-and-ptrace" aliases to "systrap",
+	// which has NO tracer attached at all (the in-process SIGSYS
+	// handler is the trap). The tracer-side counter assertions
+	// therefore can't measure what they were designed to measure.
+	//
+	// Keep the test as a placeholder pinned to the removed mode;
+	// when systrap-supervised lands (Phase 1.5+2 fusion, with an
+	// execve-only ptrace), the equivalent assertions move to a new
+	// systrap-supervised-specific test that counts execve hooks
+	// rather than per-syscall traps.
+	t.Skip("preload-and-ptrace removed in favour of systrap; cross-tracer-cache assertion no longer applies. Equivalent invariants will be verified by a systrap-supervised test once the supervisor lands.")
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
