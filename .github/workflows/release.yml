@@ -328,6 +328,26 @@ jobs:
           go test ./tests/malicious -run '^$' -fuzz '^FuzzACLParseRule$' -fuzztime 30s
           go test ./tests/malicious -run '^$' -fuzz '^FuzzConfigParsers$' -fuzztime 30s
 
+      # Fuzz the TURN guard packet parser. The guard is the primary
+      # adversary-facing parser when the standalone TURN daemon runs
+      # with WG-aware filtering — every TURN client can send
+      # arbitrary bytes, the relay forwards them, the guard inspects.
+      # 30s each on the inbound + outbound paths surfaces panics or
+      # unbounded allocations the unit tests don't.
+      #
+      # Plus an adversarial-flood test that doesn't fuzz randomly
+      # but pounds the guard with many concurrent attackers from
+      # distinct source IPs. Verifies the session table cap holds.
+      - name: TURN hardening — guard fuzz + adversarial flood
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd turn
+          go test -count=1 -timeout 60s -run TestWireguardGuardAdversarialFlood ./...
+          go test -run '^$' -fuzz '^FuzzWireguardGuardProcessInbound$' -fuzztime 30s ./...
+          go test -run '^$' -fuzz '^FuzzWireguardGuardProcessOutbound$' -fuzztime 30s ./...
+
   release-test-lite:
     name: release lite ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
