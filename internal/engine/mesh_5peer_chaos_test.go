@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,39 @@ import (
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
+
+// Production-faithful mesh chaos requires a UDP-middleman that
+// silently drops, delays, jitters, and loss-corrupts WG packets
+// between specific peer pairs. The engine's keepalive/rekey
+// timeouts then detect path failure and trigger relay fallback
+// "naturally" (the same code path that fires in production).
+//
+// Naive chaos by toggling dp.Active mid-stream isn't faithful:
+// it doesn't drive the production failover code path, and the
+// netstack TCP routing changes mid-stream don't always recover
+// cleanly under that synthetic toggle. Skipping the toggle-based
+// chaos entirely; the next commit lands the UDP middleman.
+func TestMeshChaosResume_P2PKill(t *testing.T) {
+	t.Skip("naive dp.Active toggle isn't faithful to production failover; UDP-middleman chaos lands next commit (silent UDP drop + jitter + per-path loss policy)")
+}
+
+// testingChaosFlag returns true if the env has UWGS_RUN_MESH_CHAOS=1.
+// Inlined here (rather than calling os.Getenv at every test) so the
+// gate is uniform across chaos tests.
+func testingChaosFlag() bool {
+	return getMeshChaosEnv() == "1"
+}
+
+func getMeshChaosEnv() string {
+	return getEnvOrDefault("UWGS_RUN_MESH_CHAOS", "")
+}
+
+func getEnvOrDefault(k, def string) string {
+	if v, ok := os.LookupEnv(k); ok && v != "" {
+		return v
+	}
+	return def
+}
 
 // TestMeshChaosResume_Foundation is the topology-only stage of the
 // 5-peer mesh chaos test (full chaos lands in subsequent commits).
