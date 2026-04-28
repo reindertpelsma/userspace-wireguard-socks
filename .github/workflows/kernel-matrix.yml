@@ -1,0 +1,102 @@
+name: Multi-kernel uwgwrapper matrix
+
+# Runs the uwgwrapper smoke suite inside QEMU against several Linux
+# kernel versions. Catches ABI / seccomp / ptrace / signal-handling
+# drift that the host-kernel CI doesn't surface.
+#
+# Scaffold status (kernel-matrix branch): single-kernel scaffold via
+# virtme-ng; expansion to a real multi-kernel matrix is the project
+# work behind this branch. Do NOT merge to main until the matrix
+# actually exercises ≥3 distinct kernel versions and at least one
+# real wrapper-mode test in each.
+#
+# Triggered on tag push only — multi-kernel boot + test cycle is
+# minutes per kernel, way too slow for per-PR feedback.
+
+on:
+  push:
+    tags:
+      - '*'
+      - '*/*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kernel-matrix:
+    name: kernel ${{ matrix.kernel }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Kernels chosen as Ubuntu/Debian LTS shapes commonly seen in
+        # production deployments. Add 5.4 once the scaffold is proven
+        # — older kernels may need an older toolchain inside the VM.
+        kernel:
+          - "5.15"
+          - "6.1"
+          - "6.6"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install virtme-ng + QEMU + build deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          # virtme-ng is the modern fork; it's packaged on Ubuntu 24.04
+          # and pulls in QEMU as a dependency. The fallback path uses
+          # `pip install virtme-ng` if apt doesn't carry it yet.
+          if ! sudo apt-get install -y virtme-ng; then
+            sudo apt-get install -y python3-pip qemu-system-x86 build-essential
+            pip3 install --user virtme-ng
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+          # gcc + libc headers for compiling the LD_PRELOAD .so inside
+          # the VM.
+          sudo apt-get install -y gcc libc6-dev
+
+      - name: Build uwgwrapper artifacts on the host
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Build everything on the host so the VM only has to run the
+          # smoke. The wrapper + preload .so are then mounted into the
+          # VM via virtme-ng's --pwd.
+          mkdir -p cmd/uwgwrapper/assets
+          gcc -shared -fPIC -O2 -Wall -Wextra \
+            -o cmd/uwgwrapper/assets/uwgpreload.so preload/uwgpreload.c \
+            -ldl -pthread -lpthread
+          go build -o uwgsocks   ./cmd/uwgsocks
+          go build -o uwgwrapper ./cmd/uwgwrapper
+          chmod +x uwgsocks uwgwrapper
+
+      - name: Run wrapper smoke under kernel ${{ matrix.kernel }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # vng with --kimg points at a downloaded vmlinuz. virtme-ng's
+          # `--build` mode fetches and builds a kernel from upstream
+          # by version tag — slow first run, cached subsequently.
+          # For the scaffold, we trust virtme-ng's --kver shorthand.
+          # If that flag is unavailable in the installed virtme-ng,
+          # the fallback is to download a prebuilt vmlinuz from a
+          # public mirror; that's a follow-up.
+          KVER="${{ matrix.kernel }}"
+          export KVER
+          # The smoke script runs inside the VM; --pwd mounts the
+          # current working directory so the test can run prebuilt
+          # binaries directly.
+          vng --kver "$KVER" --pwd -- ./scripts/kernel-matrix-smoke.sh \
+            || {
+              echo "::warning::kernel-${KVER} smoke failed — see logs above"
+              echo "Scaffold expectation: matrix runs are EXPECTED to fail until the smoke script is fully fleshed out."
+              # Don't fail the job during scaffold phase. Flip this
+              # to `exit 1` once the smoke is reliably passing.
+              exit 0
+            }
