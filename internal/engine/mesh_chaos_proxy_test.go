@@ -1,6 +1,8 @@
 // Copyright (c) 2026 Reindert Pelsma
 // SPDX-License-Identifier: ISC
 
+//go:build !lite
+
 package engine
 
 import (
@@ -25,20 +27,28 @@ import (
 // the engine's relay-fallback path kicks in "naturally" — same
 // code path that fires in real-world incidents.
 //
-// Bidirectional: every datagram reverse-flows from B back to the
-// last-seen src on the listening side. The proxy doesn't know the
-// inner WG protocol; it just shuffles bytes.
+// Single-socket design: the proxy uses ONE UDP socket for both
+// directions. Outbound packets to upstream are sent FROM that
+// same listening socket, so the upstream sees the proxy's listen
+// port as the source — matching real-world NAT semantics where a
+// peer behind NAT is reachable at the NAT's public mapping. This
+// makes the proxy address mesh-control-advertisable: when the hub
+// learns the source of A's WG packets (= proxy.Addr), it can
+// advertise that to B and B can dial it back to reach A.
+//
+// Demux by source: src == upstream → forward to last-seen client;
+// otherwise → record src as client, forward to upstream.
 //
 // Concurrent-safe: policy can be updated mid-flight.
 type chaosProxy struct {
-	listen   *net.UDPConn // the side peers send TO
+	sock     *net.UDPConn // single bidirectional UDP socket
 	upstream *net.UDPAddr // the side we forward TO
 
 	mu     sync.RWMutex
 	policy chaosPolicy
 
-	// Last src seen on the listening side, used to route reverse-
-	// direction replies.
+	// Last src seen that wasn't upstream — used to route reverse-
+	// direction replies back to whichever client most recently sent.
 	lastSrc atomic.Pointer[net.UDPAddr]
 
 	// Stats for assertions / logging.
@@ -66,31 +76,25 @@ type chaosPolicy struct {
 // startChaosProxy listens on a free local port, returns the
 // listening UDPAddr (so peers can be configured to send there),
 // and forwards every received datagram to upstream applying the
-// current policy. The proxy runs in two goroutines (one per
-// direction) until Close() is called.
+// current policy. The proxy runs in a single recv-demux goroutine
+// until Close() is called.
 func startChaosProxy(upstream *net.UDPAddr, initial chaosPolicy) (*chaosProxy, error) {
-	listen, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	sock, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
-		return nil, err
-	}
-	upConn, err := net.DialUDP("udp", nil, upstream)
-	if err != nil {
-		_ = listen.Close()
 		return nil, err
 	}
 	p := &chaosProxy{
-		listen:   listen,
+		sock:     sock,
 		upstream: upstream,
 		policy:   initial,
 		closed:   make(chan struct{}),
 	}
-	go p.forwardLoop(upConn) // listen → upstream
-	go p.reverseLoop(upConn) // upstream → last-seen-src on listen
+	go p.recvLoop()
 	return p, nil
 }
 
 func (p *chaosProxy) Addr() *net.UDPAddr {
-	return p.listen.LocalAddr().(*net.UDPAddr)
+	return p.sock.LocalAddr().(*net.UDPAddr)
 }
 
 func (p *chaosProxy) SetPolicy(pol chaosPolicy) {
@@ -106,71 +110,69 @@ func (p *chaosProxy) Stats() (forwarded, dropped, delayed int64) {
 func (p *chaosProxy) Close() error {
 	p.closeOnce.Do(func() {
 		close(p.closed)
-		_ = p.listen.Close()
+		_ = p.sock.Close()
 	})
 	return nil
 }
 
-// forwardLoop reads datagrams from peers and writes them upstream
-// (subject to the current policy).
-func (p *chaosProxy) forwardLoop(up *net.UDPConn) {
+// recvLoop reads every datagram on the single socket and demuxes
+// by source: packets from upstream get forwarded to the last-seen
+// non-upstream src (the client we're fronting); packets from
+// anyone else get recorded as the new client and forwarded to
+// upstream. This makes the proxy a "full-cone NAT" for one local
+// peer: outsiders dialling proxy.Addr reach the client, and the
+// upstream sees proxy.Addr as the client's source.
+func (p *chaosProxy) recvLoop() {
 	buf := make([]byte, 65535)
 	for {
 		select {
 		case <-p.closed:
-			_ = up.Close()
 			return
 		default:
 		}
-		_ = p.listen.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		n, src, err := p.listen.ReadFromUDP(buf)
+		_ = p.sock.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		n, src, err := p.sock.ReadFromUDP(buf)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
-				_ = up.Close()
 				return
 			}
 			continue
 		}
-		// Remember the most recent source so reverse-direction
-		// packets get routed back to it.
 		srcCopy := *src
-		p.lastSrc.Store(&srcCopy)
 		// Copy the payload before launching the (possibly
 		// delayed) forward — the read buffer is reused next iter.
 		payload := append([]byte(nil), buf[:n]...)
-		p.applyAndForward(up.Write, payload)
+		if udpAddrEqual(&srcCopy, p.upstream) {
+			// Reply from upstream → forward to last-seen client.
+			dst := p.lastSrc.Load()
+			if dst == nil {
+				// No client has spoken first; nothing to route
+				// the reverse-direction datagram to. Drop.
+				continue
+			}
+			to := *dst
+			p.applyAndForward(func(b []byte) (int, error) {
+				return p.sock.WriteToUDP(b, &to)
+			}, payload)
+		} else {
+			// From client (or any outsider) → record + forward
+			// to upstream.
+			p.lastSrc.Store(&srcCopy)
+			p.applyAndForward(func(b []byte) (int, error) {
+				return p.sock.WriteToUDP(b, p.upstream)
+			}, payload)
+		}
 	}
 }
 
-// reverseLoop reads datagrams from upstream and writes them back
-// to the last-seen peer source.
-func (p *chaosProxy) reverseLoop(up *net.UDPConn) {
-	buf := make([]byte, 65535)
-	for {
-		select {
-		case <-p.closed:
-			return
-		default:
-		}
-		_ = up.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		n, err := up.Read(buf)
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return
-			}
-			continue
-		}
-		dst := p.lastSrc.Load()
-		if dst == nil {
-			// We haven't seen any inbound packet yet; nothing to
-			// route the reverse-direction datagram to. Drop.
-			continue
-		}
-		payload := append([]byte(nil), buf[:n]...)
-		p.applyAndForward(func(b []byte) (int, error) {
-			return p.listen.WriteToUDP(b, dst)
-		}, payload)
+// udpAddrEqual returns true if both UDPAddrs refer to the same
+// (IP, port) endpoint. We can't use *net.UDPAddr identity since
+// these come from different sources (config + read syscalls).
+func udpAddrEqual(a, b *net.UDPAddr) bool {
+	if a == nil || b == nil {
+		return false
 	}
+	return a.Port == b.Port && a.IP.Equal(b.IP)
 }
 
 // applyAndForward applies the current policy to a single packet:
