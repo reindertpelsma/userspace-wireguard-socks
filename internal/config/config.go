@@ -23,23 +23,71 @@ import (
 )
 
 type Config struct {
+	// WireGuard interface + peer settings: keys, addresses, peers,
+	// keepalives, hook scripts. See the wg-quick man page for the
+	// underlying field semantics.
 	WireGuard WireGuard `yaml:"wireguard"`
-	Proxy     Proxy     `yaml:"proxy"`
-	// Ordered inbound ACL rule list.
-	Inbound       Inbound       `yaml:"inbound"`
-	HostForward   HostForward   `yaml:"host_forward"`
-	MeshControl   MeshControl   `yaml:"mesh_control"`
-	Routing       Routing       `yaml:"routing"`
-	TUN           TUN           `yaml:"tun"`
-	Filtering     Filtering     `yaml:"filtering"`
+	// Proxy configures host-side SOCKS5 / HTTP proxy listeners that
+	// route client traffic into the tunnel. See the proxy.* fields
+	// for listener bind addrs, auth, fallback behaviour, and
+	// per-route outbound proxy chains.
+	Proxy Proxy `yaml:"proxy"`
+	// Inbound (a.k.a. "transparent inbound") accepts WireGuard peer
+	// traffic destined for host services. Off by default; turning
+	// on means tunnel-side peers can reach host loopback and the
+	// host network through redirected connections.
+	Inbound Inbound `yaml:"inbound"`
+	// HostForward controls whether proxy clients (and inbound
+	// tunnel peers) can reach host-local services. The two sub-
+	// blocks are independent and OFF by default for inbound.
+	HostForward HostForward `yaml:"host_forward"`
+	// MeshControl is the optional tunnel-only peer-discovery and
+	// dynamic-ACL synchronisation plane. See docs/howto/05-mesh-
+	// coordination.md for the full protocol.
+	MeshControl MeshControl `yaml:"mesh_control"`
+	// Routing chooses the order in which the engine resolves a
+	// destination IP across the available tunnel/peer/proxy paths
+	// (see docs/reference/proxy-routing.md).
+	Routing Routing `yaml:"routing"`
+	// TUN is the optional host-TUN backend. When `enabled: true`
+	// the engine creates a real TUN device and adds routes for
+	// the tunnel addresses; when off, traffic is reachable only
+	// through the proxy/socket-API/wrapper paths.
+	TUN TUN `yaml:"tun"`
+	// Filtering applies blanket ingress drops to the userspace
+	// netstack (e.g. drop IPv6 link-local multicast). Off-by-
+	// default safety nets, not a substitute for ACLs.
+	Filtering Filtering `yaml:"filtering"`
+	// TrafficShaper applies a global token-bucket rate limit to
+	// the tunnel. Per-peer shapers under wireguard.peers[]
+	// override the global value.
 	TrafficShaper TrafficShaper `yaml:"traffic_shaper"`
-	// Ordered relay ACL rule list.
-	Relay     Relay     `yaml:"relay"`
-	API       API       `yaml:"api"`
+	// Relay enables hub-mode peer-to-peer forwarding (one peer's
+	// traffic destined for another peer's AllowedIPs is forwarded
+	// rather than dropped). See the acl.relay rules for the
+	// matching policy.
+	Relay Relay `yaml:"relay"`
+	// API configures the management HTTP listener (status, peer
+	// add/remove, ACL replace). See docs/reference/api-reference.md
+	// for the full endpoint surface.
+	API API `yaml:"api"`
+	// SocketAPI configures the raw socket protocol exposed at
+	// `/v1/socket` and `/uwg/socket`. Used by the wrapper, by
+	// language SDKs, and by direct integrators. See
+	// docs/reference/socket-protocol.md.
 	SocketAPI SocketAPI `yaml:"socket_api"`
-	ACL       ACL       `yaml:"acl"`
-	Forwards  []Forward `yaml:"forwards"`
-	TURN      TURN      `yaml:"turn"`
+	// ACL holds the three policy planes — inbound, outbound, and
+	// relay — each with a default action plus an ordered rule
+	// list. First-match-wins.
+	ACL ACL `yaml:"acl"`
+	// Forwards are host listeners that forward host-side traffic
+	// into the tunnel. Per-listener proto + listen + target +
+	// optional PROXY-protocol framing.
+	Forwards []Forward `yaml:"forwards"`
+	// TURN is the legacy single-TURN-server config block, kept for
+	// wg-quick compatibility. New configs should use a transports[]
+	// entry with `base: turn` instead.
+	TURN TURN `yaml:"turn"`
 	// Transports defines the pluggable transport layer for WireGuard packets.
 	// Each entry names a transport (base protocol + optional proxy) that can
 	// be used in listen mode, client mode, or both.  Peers reference transports
@@ -52,10 +100,21 @@ type Config struct {
 	// forwarding because only explicitly configured tunnel IP:port pairs are
 	// exposed.
 	ReverseForwards []Forward `yaml:"reverse_forwards"`
-	DNSServer       DNSServer `yaml:"dns_server"`
-	Scripts         Scripts   `yaml:"scripts"`
-	Log             Log       `yaml:"log"`
-	Metrics         Metrics   `yaml:"metrics"`
+	// DNSServer is the optional DNS server hosted INSIDE the
+	// tunnel for peers/clients to query. Distinct from the
+	// runtime resolve API at /v1/resolve.
+	DNSServer DNSServer `yaml:"dns_server"`
+	// Scripts gates the wg-quick PreUp/PostUp/PreDown/PostDown
+	// hook execution. Off by default; turning on lets WG-quick
+	// configs run shell commands, so only enable for trusted
+	// local input.
+	Scripts Scripts `yaml:"scripts"`
+	// Log selects log verbosity and the destination format.
+	Log Log `yaml:"log"`
+	// Metrics configures the optional Prometheus-compatible
+	// /metrics endpoint. Bound on a separate listener from API
+	// so the scrape secret can differ.
+	Metrics Metrics `yaml:"metrics"`
 }
 
 // Metrics configures the optional Prometheus-compatible /metrics endpoint.
@@ -116,7 +175,11 @@ type WireGuard struct {
 	PreDown []string `yaml:"pre_down"`
 	// Script hooks after shutdown; require scripts.allow=true.
 	PostDown []string `yaml:"post_down"`
-	Peers    []Peer   `yaml:"peers"`
+	// Peers is the list of WireGuard peers known at startup.
+	// Each entry holds public-key, AllowedIPs, optional endpoint
+	// + transport, plus the mesh-control flags. Mirrors the
+	// [Peer] sections of a wg-quick config.
+	Peers []Peer `yaml:"peers"`
 
 	// DefaultTransport is the name of the transport used for peers that do not
 	// specify an explicit Transport field.  When empty the first NCO transport
@@ -156,6 +219,7 @@ type TURN struct {
 }
 
 type Peer struct {
+	// PublicKey is the peer's base64 WireGuard public key. Required.
 	PublicKey string `yaml:"public_key"`
 	// Optional base64 WireGuard preshared key.
 	PresharedKey string `yaml:"preshared_key"`
@@ -164,8 +228,11 @@ type Peer struct {
 	// Routed subnets/IPs for this peer.
 	AllowedIPs []string `yaml:"allowed_ips"`
 	// Keepalive interval in seconds; 0 disables it.
-	PersistentKeepalive int           `yaml:"persistent_keepalive"`
-	TrafficShaper       TrafficShaper `yaml:"traffic_shaper"`
+	PersistentKeepalive int `yaml:"persistent_keepalive"`
+	// TrafficShaper applies a per-peer rate limit / latency
+	// budget. Overrides the top-level traffic_shaper for this
+	// peer's flows. Zero values inherit from the global shaper.
+	TrafficShaper TrafficShaper `yaml:"traffic_shaper"`
 	// Mesh control URL for this parent peer.
 	ControlURL string `yaml:"control_url,omitempty"`
 	// Allow dynamic mesh peers to be learned from this peer.
@@ -200,6 +267,8 @@ const (
 )
 
 type Proxy struct {
+	// SOCKS5 is the host SOCKS5 listen address (host:port or
+	// "unix:/path"). Empty disables the SOCKS5 listener.
 	SOCKS5 string `yaml:"socks5"`
 	// Host HTTP proxy listen address.
 	HTTP string `yaml:"http"`
@@ -212,9 +281,15 @@ type Proxy struct {
 	// Proxy auth password.
 	Password string `yaml:"password"`
 	// Allow direct host dials after routing misses.
-	FallbackDirect *bool  `yaml:"fallback_direct"`
+	FallbackDirect *bool `yaml:"fallback_direct"`
+	// FallbackSOCKS5 is an upstream SOCKS5 address used when no
+	// tunnel route matches (and FallbackDirect is off). Empty
+	// means no SOCKS5 fallback.
 	FallbackSOCKS5 string `yaml:"fallback_socks5"`
-	IPv6           *bool  `yaml:"ipv6"`
+	// IPv6 controls whether proxy listeners accept IPv6 client
+	// connections and whether outbound dials may use IPv6. Nil
+	// means default (true on dual-stack hosts).
+	IPv6 *bool `yaml:"ipv6"`
 	// Enable SOCKS5 UDP ASSOCIATE.
 	UDPAssociate *bool `yaml:"udp_associate"`
 	// Optional port or range for UDP ASSOCIATE.
@@ -228,11 +303,18 @@ type Proxy struct {
 	// Enable SOCKS5 BIND and listener-style raw sockets.
 	Bind *bool `yaml:"bind"`
 	// Allow ports below 1024 where supported.
-	LowBind                   *bool `yaml:"lowbind"`
+	LowBind *bool `yaml:"lowbind"`
+	// PreferIPv6ForUDPOverSOCKS routes SOCKS5-UDP through IPv6
+	// when both stacks are available. Off by default; turn on
+	// for environments where IPv4 UDP is heavily filtered.
 	PreferIPv6ForUDPOverSOCKS *bool `yaml:"prefer_ipv6_for_udp_over_socks"`
 	// Import ALL_PROXY/HTTP(S)_PROXY fallbacks.
-	HonorEnvironment *bool           `yaml:"honor_environment"`
-	OutboundProxies  []OutboundProxy `yaml:"outbound_proxies"`
+	HonorEnvironment *bool `yaml:"honor_environment"`
+	// OutboundProxies is the list of upstream proxies the engine
+	// can chain to for matched destinations. Per-entry roles +
+	// subnets select where each proxy applies. See the
+	// OutboundProxy fields for the shape.
+	OutboundProxies []OutboundProxy `yaml:"outbound_proxies"`
 }
 
 type OutboundProxy struct {
@@ -276,7 +358,11 @@ type Inbound struct {
 	// Netstack TCP receive window for inbound flows.
 	TCPReceiveWindowBytes int `yaml:"tcp_receive_window_bytes"`
 	// Global buffered TCP cap for inbound flows.
-	TCPMaxBufferedBytes int    `yaml:"tcp_max_buffered_bytes"`
+	TCPMaxBufferedBytes int `yaml:"tcp_max_buffered_bytes"`
+	// HostDialProxySOCKS5 is an optional upstream SOCKS5 to use
+	// when transparent inbound flows need to dial host services
+	// through a proxy rather than directly. Empty means dial
+	// directly.
 	HostDialProxySOCKS5 string `yaml:"host_dial_proxy_socks5"`
 	// Optional host source IP for transparent outbound dials.
 	HostDialBindAddress string `yaml:"host_dial_bind_address"`
@@ -348,8 +434,15 @@ type TUN struct {
 }
 
 type Filtering struct {
+	// DropIPv6LinkLocalMulticast drops IPv6 multicast packets in
+	// the fe80::/10 link-local range at netstack ingress. Off by
+	// default; turn on for environments where MLD/router-advert
+	// chatter pollutes the tunnel.
 	DropIPv6LinkLocalMulticast *bool `yaml:"drop_ipv6_link_local_multicast"`
-	DropIPv4Invalid            *bool `yaml:"drop_ipv4_invalid"`
+	// DropIPv4Invalid drops malformed IPv4 packets (invalid IHL,
+	// total-length mismatch, etc.) at netstack ingress. Default
+	// on — turning off is rarely needed.
+	DropIPv4Invalid *bool `yaml:"drop_ipv4_invalid"`
 }
 
 type TrafficShaper struct {
@@ -415,6 +508,9 @@ type ACL struct {
 }
 
 type Forward struct {
+	// Proto is the wire protocol of the forward: `tcp` or `udp`.
+	// For unix-socket listens, accept any of `tcp`, `udp`,
+	// `unix`, `unix+dgram`, `unix+seqpacket`.
 	Proto string `yaml:"proto"`
 	// Listen is the address to accept on. For forwards this is a host socket;
 	// for reverse_forwards it is a userspace WireGuard/netstack socket and may
@@ -453,8 +549,15 @@ type MeshControl struct {
 	// Rotate auth challenges on this interval.
 	ChallengeRotateSeconds int `yaml:"challenge_rotate_seconds"`
 	// Only advertise recently active peers.
-	ActivePeerWindowSeconds  int `yaml:"active_peer_window_seconds"`
-	NotifyWindowSeconds      int `yaml:"notify_window_seconds"`
+	ActivePeerWindowSeconds int `yaml:"active_peer_window_seconds"`
+	// NotifyWindowSeconds is how far in the future a mesh
+	// notification's deadline can extend. Caps long-poll
+	// subscriptions; clients reconnect after the window. Zero
+	// uses the default (300s).
+	NotifyWindowSeconds int `yaml:"notify_window_seconds"`
+	// NotifyMinIntervalSeconds is the minimum gap between two
+	// mesh notifications to the same client. Rate-limits
+	// chatty peer-event firehoses. Zero uses the default (45s).
 	NotifyMinIntervalSeconds int `yaml:"notify_min_interval_seconds"`
 	// Maximum lifetime for mesh event streams.
 	SubscribeMaxLifetimeSeconds int `yaml:"subscribe_max_lifetime_seconds"`

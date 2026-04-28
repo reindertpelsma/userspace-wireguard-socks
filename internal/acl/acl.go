@@ -29,22 +29,33 @@ func (r PortRange) Contains(port uint16) bool {
 }
 
 type Rule struct {
+	// Action is what to do when a connection matches this rule.
+	// One of `allow` or `deny`. First-match-wins ordering applies
+	// across the rule list.
 	Action Action `yaml:"action" json:"action"`
 
-	// Singular string fields are kept for backward-compatible YAML/JSON/API
-	// representations. Normalize parses them into the private fields below for
-	// fast per-connection checks.
-	//
-	// Sources / Destinations are the list variants: when non-empty they are
-	// used instead of (and merged with) the singular Source / Destination.
-	// This lets the UI push one rule with multiple CIDRs instead of many
-	// single-CIDR rules.
-	Source       string   `yaml:"source,omitempty" json:"source,omitempty"`
-	Destination  string   `yaml:"destination,omitempty" json:"destination,omitempty"`
-	Sources      []string `yaml:"sources,omitempty" json:"sources,omitempty"`
+	// Source is a single CIDR (or IP) the connection's source must
+	// match for this rule to fire. Empty means "any source".
+	// Singular form kept for back-compat with single-rule configs;
+	// for multiple sources use Sources instead.
+	Source string `yaml:"source,omitempty" json:"source,omitempty"`
+	// Destination is a single CIDR (or IP) the connection's
+	// destination must match. Empty means "any destination".
+	// Singular form; for multiple destinations use Destinations.
+	Destination string `yaml:"destination,omitempty" json:"destination,omitempty"`
+	// Sources is the list variant of Source. When non-empty it is
+	// used in addition to Source (the two are merged). Lets one
+	// rule cover many CIDRs rather than duplicating the rule.
+	Sources []string `yaml:"sources,omitempty" json:"sources,omitempty"`
+	// Destinations is the list variant of Destination. Same merge
+	// semantics as Sources.
 	Destinations []string `yaml:"destinations,omitempty" json:"destinations,omitempty"`
-	SourcePort   string   `yaml:"source_port,omitempty" json:"source_port,omitempty"`
-	DestPort     string   `yaml:"destination_port,omitempty" json:"destination_port,omitempty"`
+	// SourcePort is the source-port match: a single port "53" or
+	// a range "1024-65535". Empty means "any port".
+	SourcePort string `yaml:"source_port,omitempty" json:"source_port,omitempty"`
+	// DestPort is the destination-port match: single port or
+	// range. Empty means "any port".
+	DestPort string `yaml:"destination_port,omitempty" json:"destination_port,omitempty"`
 	// udp | tcp | tls | dtls | http | https | quic
 	Protocol string `yaml:"protocol,omitempty" json:"protocol,omitempty"`
 

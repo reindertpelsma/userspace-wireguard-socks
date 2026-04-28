@@ -97,7 +97,20 @@ broken_link_check() {
 }
 broken_link_check
 
-# 4. Fast Go unit tests. -short tells expensive tests to skip
+# 4. Config-reference drift check. Catches the case where someone
+# adds a config field but forgets to regenerate the reference (or
+# forgets to write a docstring on the field). Sub-second.
+if ! go run ./tools/genconfigref --check >/tmp/uwgs-precommit-cfgref.log 2>&1; then
+    fail "config-reference drift:"
+    cat /tmp/uwgs-precommit-cfgref.log >&2
+    echo "    fix with: go run ./tools/genconfigref" >&2
+fi
+if ! go run ./tools/genconfigref --audit >/tmp/uwgs-precommit-cfgaudit.log 2>&1; then
+    fail "config-field docstring audit failed:"
+    head -20 /tmp/uwgs-precommit-cfgaudit.log >&2
+fi
+
+# 5. Fast Go unit tests. -short tells expensive tests to skip
 # themselves via testing.Short(). The medium-expensive suite runs
 # under default `go test ./...`; the heavy chaos / soak / fuzz
 # tests run under the release.yml pipeline only (env-flag gated).
