@@ -205,7 +205,7 @@ Use mesh control when you want:
 - more than one relay site sharing the same peer inventory
 - projected ACLs enforced on clients as well as relays
 
-Full details: [mesh-control.md](mesh-control.md)
+Full details: [mesh-control.md](../features/mesh-coordination.md)
 
 ## 5. Host TUN
 
@@ -260,7 +260,7 @@ Use this section when:
 - the node is relaying traffic between peers
 - direct mesh paths and relay fallback should still obey the same projected policy
 
-The detailed policy model is in [acls.md](acls.md).
+The detailed policy model is in [acls.md](../features/relay-and-acls.md).
 
 ## 7. Transports
 
@@ -306,7 +306,7 @@ Common bases:
 - `quic`
 - `turn`
 
-For tradeoffs and recommended usage, read [transport-modes.md](transport-modes.md).
+For tradeoffs and recommended usage, read [transport-modes.md](../features/transports.md).
 
 ## 8. Traffic Shaping And Supporting Services
 
@@ -355,7 +355,7 @@ Operational controls:
 ## Preferred Reading Order
 
 - Want exact fields: [config-reference.md](config-reference.md)
-- Want policy details: [acls.md](acls.md)
-- Want mesh behavior: [mesh-control.md](mesh-control.md)
-- Want transport tradeoffs: [transport-modes.md](transport-modes.md)
-- Want TURN behavior: [turn.md](turn.md)
+- Want policy details: [acls.md](../features/relay-and-acls.md)
+- Want mesh behavior: [mesh-control.md](../features/mesh-coordination.md)
+- Want transport tradeoffs: [transport-modes.md](../features/transports.md)
+- Want TURN behavior: [turn.md](../features/turn-server.md)

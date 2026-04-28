@@ -265,4 +265,4 @@ Use TURN when the real problem is reachability, not selective local routing.
 - Need a rootless client proxy without exposing a server: use plain `uwgsocks`.
 - Need to publish a hidden server through a small public box: use TURN.
 - Need censorship or DPI evasion for a public edge: combine TURN or QUIC with
-  the transport modes in [transport-modes.md](transport-modes.md).
+  the transport modes in [transport-modes.md](transports.md).

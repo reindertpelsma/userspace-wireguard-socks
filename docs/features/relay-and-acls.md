@@ -139,4 +139,4 @@ Relevant endpoints:
 - `PUT /v1/acls`
 - `GET /v1/status`
 
-For the exact field names, see [config-reference.md](config-reference.md).
+For the exact field names, see [config-reference.md](../reference/config-reference.md).

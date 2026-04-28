@@ -4,7 +4,7 @@
 # Metrics
 
 `uwgsocks` exposes optional Prometheus-compatible metrics on a separate
-listener from the admin API. Read [security-model.md](security-model.md)
+listener from the admin API. Read [security-model.md](../contributing/security-conventions.md)
 first if you haven't — the trust boundary between the two listeners is
 the load-bearing reason the metrics endpoint is its own port.
 
