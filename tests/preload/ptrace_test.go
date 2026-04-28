@@ -842,8 +842,21 @@ func TestUWGWrapperPreloadOnlyTCPUDPAndListener(t *testing.T) {
 		t.Fatalf("unexpected preload udp output %q", out)
 	}
 
+	// `preload` is now libc-only (post-rename); the libc-shim
+	// listener path is more flake-prone under GH-runner CPU
+	// contention than it was when this transport name still
+	// included seccomp + SIGSYS as a fallback. Bumped from 3 to
+	// 6 attempts to absorb the runner-environment variance; the
+	// test passes reliably on self-hosted + dev hosts in the
+	// first attempt (~4s).
 	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 6; attempt++ {
+		// Small back-off between attempts to let the previous
+		// fdproxy + tunnel listener tear down cleanly before the
+		// next one races to bind the same tunnel address.
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+		}
 		cmd, stderr, done := startWrappedListenerProcess(t, art, httpSock, "preload", art.stub,
 			[]string{"100.64.94.2", "19191", "preload-listener", "listen-tcp"}, wrapperRunOptions{})
 
