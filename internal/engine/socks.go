@@ -59,19 +59,29 @@ var (
 var (
 	socksRequestDeadline = 30 * time.Second
 
+	// socksUDPSessionBufBytes is the per-UDP-relay-session receive buffer.
+	// 8 KiB comfortably holds one UDP datagram (1500-MTU paths, plus the
+	// 22-byte SOCKS5 UDP header) — there's no point sizing it for jumbo
+	// frames since gVisor's netstack rejects them above 1500 by default.
+	// The smaller buffer caps the worst-case memory amplification from
+	// hostile SOCKS5 clients (was 64 KiB before; lowered as part of the
+	// v1.0 security pass).
+	socksUDPSessionBufBytes = 8 * 1024
+
 	// maxSOCKSUDPSessionsPerConn caps the number of in-flight UDP-relay
-	// targets one SOCKS5 control connection can spawn. Each session keeps a
-	// goroutine and a 64 KiB receive buffer alive, so a permissive default
-	// multiplied by N hostile control connections used to be enough to chew
-	// through gigabytes of memory. 256 is comfortably above any realistic
-	// application's working set (browsers, BitTorrent clients).
-	maxSOCKSUDPSessionsPerConn = 256
+	// targets one SOCKS5 control connection can spawn. Each session keeps
+	// a goroutine and a `socksUDPSessionBufBytes` receive buffer alive,
+	// so a permissive default multiplied by N hostile control connections
+	// used to be enough to chew through gigabytes of memory. 64 covers
+	// the working set of every realistic SOCKS5-UDP application observed
+	// (game clients, BitTorrent torrents, video conferencing) with margin.
+	maxSOCKSUDPSessionsPerConn = 64
 
 	// maxConcurrentSOCKSConns caps the number of SOCKS5 control connections
-	// in flight per engine instance. Combined with the per-conn UDP cap above
-	// this gives a worst-case memory bound of ~16 GiB for SOCKS5 — high
-	// enough not to disturb legitimate use, low enough to keep an attacker
-	// from exhausting the host's address space.
+	// in flight per engine instance. Combined with the per-conn UDP cap
+	// above this gives a worst-case SOCKS5 memory bound of:
+	//   1024 conns × 64 sessions × 8 KiB = 512 MiB
+	// down from ~16 GiB before the v1.0 security pass.
 	maxConcurrentSOCKSConns = 1024
 )
 
@@ -498,7 +508,7 @@ func (e *Engine) serveSOCKSUDPRelay(pc net.PacketConn, src netip.AddrPort, done 
 			sess.timer.Reset(timeout)
 		}
 	}
-	buf := make([]byte, 64*1024)
+	buf := make([]byte, socksUDPSessionBufBytes)
 	for {
 		var (
 			n    int
@@ -607,7 +617,7 @@ func (e *Engine) readSOCKSUDPReplies(pc net.PacketConn, client net.Addr, clientC
 		}
 		mu.Unlock()
 	}()
-	buf := make([]byte, 64*1024)
+	buf := make([]byte, socksUDPSessionBufBytes)
 	for {
 		n, err := sess.conn.Read(buf)
 		if err != nil {

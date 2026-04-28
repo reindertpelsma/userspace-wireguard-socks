@@ -6,6 +6,7 @@ package transport
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -470,17 +471,31 @@ func (b *MultiTransportBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 		return b.sendNotConnOriented(bufs, ep.DstToString())
 	}
 
+	// Type assertions guarded by `, ok` rather than bare. Kind() is
+	// supposed to match the concrete type but we don't want a
+	// kind/type mismatch (from a future refactor or malicious input)
+	// to panic the engine — return an error and close the path so
+	// the WG state machine can recover.
 	switch te.Kind() {
 	case KindNotConnOriented:
-		nce := ep.(*NotConnOrientedEndpoint)
+		nce, ok := ep.(*NotConnOrientedEndpoint)
+		if !ok {
+			return fmt.Errorf("bind.Send: endpoint Kind=NotConnOriented but type=%T", ep)
+		}
 		return b.sendNCO(nce, bufs)
 
 	case KindDial:
-		de := ep.(*DialEndpoint)
+		de, ok := ep.(*DialEndpoint)
+		if !ok {
+			return fmt.Errorf("bind.Send: endpoint Kind=Dial but type=%T", ep)
+		}
 		return b.sendViaDial(bufs, de)
 
 	case KindConnEstablished:
-		cee := ep.(*ConnEstablishedEndpoint)
+		cee, ok := ep.(*ConnEstablishedEndpoint)
+		if !ok {
+			return fmt.Errorf("bind.Send: endpoint Kind=ConnEstablished but type=%T", ep)
+		}
 		sess := cee.Session()
 		err := sendAll(sess, bufs)
 		if err != nil {

@@ -381,6 +381,15 @@ long uwg_sendmsg(int fd, const struct msghdr *msg, int flags) {
  * datagram received, regardless of vlen. */
 #define UWG_MSG_WAITFORONE 0x10000
 
+/* Cap on the recv/sendmmsg vlen we'll actually process per call. The
+ * Linux kernel itself caps recvmmsg/sendmmsg at UIO_MAXIOV (1024) but
+ * our shim runs in userspace and a malicious or buggy caller passing
+ * vlen=UINT_MAX would otherwise spin our loop UINT_MAX times against
+ * proxied UDP fds. Match the kernel's cap so we never amplify what
+ * the kernel would have done anyway, and short-circuit the rest of
+ * the buffer. Real-world callers use vlen ≤ a few dozen. */
+#define UWG_MMSG_VLEN_CAP 1024
+
 long uwg_recvmmsg(int fd, struct mmsghdr *vec, unsigned int vlen,
                   int flags, struct timespec *to) {
     struct tracked_fd state = uwg_state_lookup(fd);
@@ -398,6 +407,7 @@ long uwg_recvmmsg(int fd, struct mmsghdr *vec, unsigned int vlen,
          * received. Stop on the first error and return either the
          * partial count or the -errno from the first recv. */
         if (!vec || vlen == 0) return -22;
+        if (vlen > UWG_MMSG_VLEN_CAP) vlen = UWG_MMSG_VLEN_CAP;
         int caller_nonblock = recv_is_nonblock(&state, flags);
         int wait_for_one = (flags & UWG_MSG_WAITFORONE) != 0;
         unsigned int got = 0;
@@ -444,6 +454,7 @@ long uwg_sendmmsg(int fd, struct mmsghdr *vec, unsigned int vlen, int flags) {
     if (state.proxied && (state.kind == KIND_UDP_CONNECTED ||
                           state.kind == KIND_UDP_LISTENER)) {
         if (!vec || vlen == 0) return -22;
+        if (vlen > UWG_MMSG_VLEN_CAP) vlen = UWG_MMSG_VLEN_CAP;
         unsigned int sent = 0;
         for (unsigned int i = 0; i < vlen; i++) {
             const struct sockaddr *dest =
