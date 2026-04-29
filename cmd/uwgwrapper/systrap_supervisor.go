@@ -230,24 +230,28 @@ func supervisorEventLoop(rootPID int, blobSpec *staticBlobSpec, traceeOptions in
 				}
 				continue
 			case ptraceEventSeccomp:
-				// RET_TRACE event — the only ones in the filter
-				// today are execve / execveat. Just let the
-				// syscall continue; the follow-up
-				// PTRACE_EVENT_EXEC stop is where we do the
-				// per-target re-arm work.
+				// RET_TRACE event — the filter routes execve /
+				// execveat here. Just let the syscall continue;
+				// the follow-up PTRACE_EVENT_EXEC stop is where
+				// handleExecveBoundary decides static vs dynamic
+				// and injects the freestanding blob for the
+				// static case.
 				//
-				// Force-preserve-UWGS_*-env across this boundary
-				// is scaffolded in cmd/uwgwrapper/exec_env_inject.go
-				// but not wired in here yet — at SECCOMP-event the
-				// tracee is in a stop where remoteSyscall can't
-				// allocate a fresh buffer (the kernel has the
-				// original syscall queued and PtraceSingleStep
-				// dispatches it instead of our substituted mmap).
-				// The full integration needs to either intercept
-				// at PTRACE_EVENT_EXEC and rewrite the new image's
-				// stack envp in place, or hijack the syscall by
-				// setting orig_rax to a no-op + replaying after
-				// allocation. Tracked as task #91 follow-up.
+				// Force-preserve UWGS_* / LD_PRELOAD env across
+				// this boundary is scaffolded in
+				// cmd/uwgwrapper/exec_env_inject.go (task #91)
+				// but not wired in: doing remoteSyscall(SYS_mmap)
+				// at this stop interferes with the kernel's
+				// queued execve — the original RET_TRACE state
+				// is lost when we single-step a different syscall
+				// in between, and the re-evaluated execve returns
+				// -ENOSYS. The full integration needs a syscall-
+				// hijack: cancel the queued execve via orig_rax=
+				// -1, run mmap, then re-issue execve with the
+				// rewritten envp arg. Plus the supervisor needs
+				// access to the spawn env (UWGS_* are set on the
+				// child, not the wrapper). Both are real
+				// ptrace-state engineering for a follow-up.
 				if err := unix.PtraceCont(pid, 0); err != nil {
 					return exitCode, fmt.Errorf("PtraceCont after SECCOMP event: %w", err)
 				}
