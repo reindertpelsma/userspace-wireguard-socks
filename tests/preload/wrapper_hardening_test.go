@@ -27,7 +27,7 @@ func TestUWGWrapperEpollNonblockConnectFlow(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
 
-	for _, transport := range []string{"preload", "systrap", "ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for _, transport := range []string{"preload", "systrap", "systrap-supervised", "ptrace", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			out := runWrappedTargetWithOptions(t, art, httpSock, transport, art.epollNB,
 				[]string{"100.64.94.1", "18080"},
@@ -114,7 +114,7 @@ func TestUWGWrapperIPv6DirectFallbackAcrossTransports(t *testing.T) {
 
 	art := buildWrapperArtifacts(t)
 	httpSock := setupWrapperIPv6DirectFallback(t)
-	for _, transport := range []string{"preload", "systrap", "ptrace-seccomp", "ptrace-only"} {
+	for _, transport := range []string{"preload", "systrap", "systrap-supervised", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			out := runWrappedTargetWithOptions(t, art, httpSock, transport, art.stub,
 				[]string{"::1", port, "ipv6-direct-fallback", "tcp-no-poll"},

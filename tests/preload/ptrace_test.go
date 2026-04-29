@@ -53,35 +53,28 @@ type wrapperRunOptions struct {
 	timeout     time.Duration
 }
 
-func TestUWGWrapperPtraceSeccompRawGoTCPUDP(t *testing.T) {
+// staticCapableModes is the set of wrapper transports that can intercept
+// statically-linked Go binaries (CGO_ENABLED=0). preload and systrap inject
+// only dynamic binaries; intercepting static binaries requires either a ptrace
+// layer (ptrace*, systrap-supervised) or a freestanding runtime (systrap-static).
+var staticCapableModes = []string{"systrap-supervised", "systrap-static", "ptrace", "ptrace-seccomp", "ptrace-only"}
+
+func TestUWGWrapperStaticCapableRawGoTCPUDP(t *testing.T) {
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
 
-	out := runWrappedTarget(t, art, httpSock, "ptrace-seccomp", art.raw, "tcp", "100.64.94.1", "18080", "ptrace-seccomp-tcp")
-	if normalizedOutput(out) != "ptrace-seccomp-tcp" {
-		t.Fatalf("unexpected ptrace+seccomp tcp output %q", out)
-	}
-
-	out = runWrappedTarget(t, art, httpSock, "ptrace-seccomp", art.raw, "udp", "100.64.94.1", "18081", "ptrace-seccomp-udp")
-	if normalizedOutput(out) != "ptrace-seccomp-udp" {
-		t.Fatalf("unexpected ptrace+seccomp udp output %q", out)
-	}
-}
-
-func TestUWGWrapperPtraceOnlyRawGoTCPUDP(t *testing.T) {
-	requireWrapperToolchain(t)
-	art := buildWrapperArtifacts(t)
-	_, httpSock := setupWrapperNetwork(t)
-
-	out := runWrappedTarget(t, art, httpSock, "ptrace-only", art.raw, "tcp", "100.64.94.1", "18080", "ptrace-only-tcp")
-	if normalizedOutput(out) != "ptrace-only-tcp" {
-		t.Fatalf("unexpected ptrace-only tcp output %q", out)
-	}
-
-	out = runWrappedTarget(t, art, httpSock, "ptrace-only", art.raw, "udp", "100.64.94.1", "18081", "ptrace-only-udp")
-	if normalizedOutput(out) != "ptrace-only-udp" {
-		t.Fatalf("unexpected ptrace-only udp output %q", out)
+	for _, transport := range staticCapableModes {
+		t.Run(transport, func(t *testing.T) {
+			out := runWrappedTarget(t, art, httpSock, transport, art.raw, "tcp", "100.64.94.1", "18080", transport+"-tcp")
+			if normalizedOutput(out) != transport+"-tcp" {
+				t.Fatalf("unexpected %s tcp output %q", transport, out)
+			}
+			out = runWrappedTarget(t, art, httpSock, transport, art.raw, "udp", "100.64.94.1", "18081", transport+"-udp")
+			if normalizedOutput(out) != transport+"-udp" {
+				t.Fatalf("unexpected %s udp output %q", transport, out)
+			}
+		})
 	}
 }
 
@@ -153,18 +146,24 @@ func TestUWGWrapperBothExecAndFork(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
 
-	out := runWrappedTarget(t, art, httpSock, "systrap", art.mixed, "100.64.94.1", "18080", "both-exec", "exec")
-	if normalizedOutput(out) != "both-exec" {
-		t.Fatalf("unexpected both exec output %q", out)
+	// exec variant: dynamic→dynamic execve. systrap re-arms across the exec
+	// boundary natively; systrap-supervised and ptrace modes also handle it.
+	for _, transport := range []string{"systrap", "systrap-supervised", "ptrace", "ptrace-only"} {
+		t.Run("exec/"+transport, func(t *testing.T) {
+			out := runWrappedTarget(t, art, httpSock, transport, art.mixed, "100.64.94.1", "18080", "both-exec", "exec")
+			if normalizedOutput(out) != "both-exec" {
+				t.Fatalf("unexpected both exec output under %s: %q", transport, out)
+			}
+		})
 	}
 
-	out = runWrappedTargetWithOptions(t, art, httpSock, "systrap", art.stub,
+	// fork variant: systrap handles fork() without any ptrace layer.
+	out := runWrappedTargetWithOptions(t, art, httpSock, "systrap", art.stub,
 		[]string{"100.64.94.1", "18080", "both-fork", "tcp", "fork"},
 		wrapperRunOptions{timeout: 60 * time.Second})
 	if normalizedOutput(out) != "both-fork" {
 		t.Fatalf("unexpected both fork output %q", out)
 	}
-
 }
 
 func TestUWGWrapperCurlAcrossTransports(t *testing.T) {
@@ -202,7 +201,7 @@ func TestUWGWrapperCurlAcrossTransports(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, transport := range []string{"preload", "systrap", "ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for _, transport := range []string{"preload", "systrap", "systrap-supervised", "ptrace", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			out := runWrappedTargetWithOptions(t, art, httpSock, transport, "curl",
 				[]string{"--max-time", "15", "-fsS", "http://100.64.94.1:18083/"},
@@ -292,7 +291,7 @@ func TestUWGWrapperMessageSyscallsAcrossTransports(t *testing.T) {
 			anyOfSyscalls: [][]string{{"sendmmsg", "sendmsg"}, {"recvmmsg", "recvmsg"}},
 		},
 	}
-	transports := []string{"preload", "systrap", "ptrace", "ptrace-seccomp", "ptrace-only"}
+	transports := []string{"preload", "systrap", "systrap-supervised", "ptrace", "ptrace-seccomp", "ptrace-only"}
 	for _, transport := range transports {
 		for _, tc := range cases {
 			t.Run(transport+"/"+tc.name, func(t *testing.T) {
@@ -334,7 +333,7 @@ func TestUWGWrapperPselectAcrossTransports(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
 
-	for _, transport := range []string{"preload", "systrap", "ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for _, transport := range []string{"preload", "systrap", "systrap-supervised", "ptrace", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			args := []string{"100.64.94.1", "18080", "tcp-pselect", "tcp", "pselect"}
 			if transportTracerCountsHotpathSyscalls(transport) {
@@ -360,7 +359,7 @@ func TestUWGWrapperSelectAcrossTransports(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
 
-	for _, transport := range []string{"preload", "systrap", "ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for _, transport := range []string{"preload", "systrap", "systrap-supervised", "ptrace", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			args := []string{"100.64.94.1", "18080", "tcp-select", "tcp", "select"}
 			if transportTracerCountsHotpathSyscalls(transport) {
@@ -440,7 +439,7 @@ func TestUWGWrapperSocketSyscallSurfaceExtra(t *testing.T) {
 	_, httpSock := setupWrapperNetwork(t)
 
 	args := []string{"100.64.94.1", "18080", "syscall-surface-extra", "tcp", "syscall-surface-extra"}
-	for _, transport := range []string{"preload", "systrap", "ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for _, transport := range []string{"preload", "systrap", "systrap-supervised", "ptrace", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			if transportTracerCountsHotpathSyscalls(transport) {
 				// Bumped from 60s — ptrace-only on GH runners occasion-
@@ -656,7 +655,7 @@ func TestUWGWrapperRecvPeekAcrossTransports(t *testing.T) {
 	_, httpSock := setupWrapperNetwork(t)
 
 	args := []string{"100.64.94.1", "18080", "recv-peek-msg", "tcp", "recv-peek"}
-	for _, transport := range []string{"preload", "systrap", "ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for _, transport := range []string{"preload", "systrap", "systrap-supervised", "ptrace", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			out := runWrappedTargetWithOptions(t, art, httpSock, transport, art.stub, args,
 				wrapperRunOptions{timeout: 120 * time.Second})
@@ -682,7 +681,7 @@ func TestUWGWrapperShortReadAcrossTransports(t *testing.T) {
 	// budgets of 4, 16, then full so the first read is genuinely
 	// shorter than the payload.
 	args := []string{"100.64.94.1", "18080", "short-read-payload-message", "tcp", "short-read"}
-	for _, transport := range []string{"preload", "systrap", "ptrace", "ptrace-seccomp", "ptrace-only"} {
+	for _, transport := range []string{"preload", "systrap", "systrap-supervised", "ptrace", "ptrace-seccomp", "ptrace-only"} {
 		t.Run(transport, func(t *testing.T) {
 			out := runWrappedTargetWithOptions(t, art, httpSock, transport, art.stub, args,
 				wrapperRunOptions{timeout: 120 * time.Second})
