@@ -121,17 +121,9 @@ func runSystrapSupervised(target string, args, env []string,
 	// PTRACE_EVENT_EXEC (rather than a SIGTRAP we'd have to guess
 	// the source of). PTRACE_O_TRACEFORK / TRACEVFORK / TRACECLONE
 	// auto-attach to children so we follow the whole process tree.
-	const (
-		ptraceOTraceSeccomp = 0x00000080 // PTRACE_O_TRACESECCOMP
-		ptraceOTraceExec    = 0x00000010 // PTRACE_O_TRACEEXEC
-		ptraceOTraceFork    = 0x00000004 // PTRACE_O_TRACEFORK
-		ptraceOTraceVfork   = 0x00000008 // PTRACE_O_TRACEVFORK
-		ptraceOTraceClone   = 0x00000020 // PTRACE_O_TRACECLONE
-		ptraceOTraceExit    = 0x00000040 // PTRACE_O_TRACEEXIT
-	)
-	options := uintptr(ptraceOTraceSeccomp | ptraceOTraceExec |
-		ptraceOTraceFork | ptraceOTraceVfork | ptraceOTraceClone |
-		ptraceOTraceExit)
+	options := unix.PTRACE_O_TRACESECCOMP | unix.PTRACE_O_TRACEEXEC |
+		unix.PTRACE_O_TRACEFORK | unix.PTRACE_O_TRACEVFORK |
+		unix.PTRACE_O_TRACECLONE | unix.PTRACE_O_TRACEEXIT
 	if err := unix.PtraceSetOptions(rootPID, int(options)); err != nil {
 		return fmt.Errorf("PTRACE_SETOPTIONS: %w", err)
 	}
@@ -141,7 +133,7 @@ func runSystrapSupervised(target string, args, env []string,
 		return fmt.Errorf("initial PTRACE_CONT: %w", err)
 	}
 
-	exitCode, err := supervisorEventLoop(rootPID, blobSpec)
+	exitCode, err := supervisorEventLoop(rootPID, blobSpec, options)
 	if err != nil {
 		return err
 	}
@@ -153,40 +145,21 @@ func runSystrapSupervised(target string, args, env []string,
 // Returns the wrapped target's exit code on clean termination
 // (when the root traced PID exits — we don't wait for non-traced
 // siblings like a co-running fdproxy daemon).
-func supervisorEventLoop(rootPID int, blobSpec *staticBlobSpec) (int, error) {
+func supervisorEventLoop(rootPID int, blobSpec *staticBlobSpec, traceeOptions int) (int, error) {
 	const (
-		ptraceEventFork    = 1 // PTRACE_EVENT_FORK
-		ptraceEventVfork   = 2 // PTRACE_EVENT_VFORK
-		ptraceEventClone   = 3 // PTRACE_EVENT_CLONE
-		ptraceEventExec    = 4 // PTRACE_EVENT_EXEC
-		ptraceEventSeccomp = 7 // PTRACE_EVENT_SECCOMP
+		ptraceEventFork    = unix.PTRACE_EVENT_FORK
+		ptraceEventVfork   = unix.PTRACE_EVENT_VFORK
+		ptraceEventClone   = unix.PTRACE_EVENT_CLONE
+		ptraceEventExec    = unix.PTRACE_EVENT_EXEC
+		ptraceEventSeccomp = unix.PTRACE_EVENT_SECCOMP
 	)
 	exitCode := 0
 
 	// seenTracees tracks which tracee PIDs we've already configured
-	// PTRACE_O_* options on. The kernel docs say options inherit
-	// across fork/clone, but ubuntu:18.04's 4.15 kernel + dash combo
-	// doesn't reliably inherit PTRACE_O_TRACESECCOMP — auto-attached
-	// fork children's execve hits RET_TRACE and the kernel returns
-	// -ENOSYS to the tracee because no PTRACE_EVENT_SECCOMP gets
-	// delivered to us. Set options explicitly on the first stop we
-	// see for each new pid as a defensive belt-and-braces. On
-	// fork/vfork/clone events we also set options on the child pid
-	// from PTRACE_GETEVENTMSG immediately, before waiting for the
-	// child's own stop; old kernels can otherwise let the child reach
-	// execve's RET_TRACE path first. Idempotent on kernels that DO
-	// inherit (newer glibc/musl matrix entries).
-	const (
-		ptraceOTraceSeccomp = 0x00000080
-		ptraceOTraceExec    = 0x00000010
-		ptraceOTraceFork    = 0x00000004
-		ptraceOTraceVfork   = 0x00000008
-		ptraceOTraceClone   = 0x00000020
-		ptraceOTraceExit    = 0x00000040
-	)
-	traceeOptions := uintptr(ptraceOTraceSeccomp | ptraceOTraceExec |
-		ptraceOTraceFork | ptraceOTraceVfork | ptraceOTraceClone |
-		ptraceOTraceExit)
+	// PTRACE_O_* options on. The kernel should inherit options across
+	// fork/clone, but explicitly setting them on child stops keeps old
+	// libc/kernel combinations from crossing an inherited RET_TRACE
+	// execve path before PTRACE_EVENT_SECCOMP is armed.
 	seenTracees := map[int]bool{rootPID: true}
 
 	for {
