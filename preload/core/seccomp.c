@@ -106,13 +106,21 @@ static const int uwg_trapped_syscalls[] = {
      * fds. Raw-asm uses leak — Phase 1.5 supervisor closes the
      * gap by re-arming the SIGSYS handler before libc-init runs. */
 
-    /* rt_sigaction trapped specifically to protect our SIGSYS handler
+    /* rt_sigaction was previously trapped to protect our SIGSYS handler
      * from being clobbered by application runtimes (Go's runtime
      * installs its own SIGSYS handler during M startup; chromium-style
-     * sandbox layers do similar). Our handler uwg_dispatch silently
-     * succeeds when the signum is SIGSYS, leaving our handler in place;
-     * other signums passthrough to the real kernel call. */
-    SYS_rt_sigaction,
+     * sandbox layers do similar). Removed because it makes the post-
+     * execve window in the child fatal: glibc-init calls rt_sigaction
+     * before LD_PRELOAD .so constructors run, the new process has no
+     * SIGSYS handler yet (signal handlers are reset on execve), and the
+     * inherited seccomp filter trapping rt_sigaction routes that call
+     * to SIGSYS → kernel default action (terminate). Trading off the
+     * rt_sigaction-trap defence-in-depth for the much more common
+     * dynamic-binary execve case. The shim_libc layer + handler-self-
+     * defense in dispatch.c (silently succeed on rt_sigaction(SIGSYS))
+     * still cover libc-routed callers. Raw asm rt_sigaction(SIGSYS)
+     * after init is now a known gap (mitigated by rt_sigaction-on-
+     * SIGSYS being a vanishingly rare workload). */
 };
 
 /* execve / execveat → RET_TRACE for the systrap-supervised mode.
