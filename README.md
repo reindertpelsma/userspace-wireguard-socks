@@ -71,14 +71,68 @@ host route changes.
 ## How It Fits Together
 
 ```mermaid
-flowchart LR
-    App[App / Browser / CLI] --> Entry[SOCKS5 / HTTP / Forward / uwgwrapper]
-    Entry --> Netstack[gVisor userspace TCP/IP stack]
-    Netstack --> Policy[Routing + ACLs + Relay + Reverse Forwards]
-    Policy --> WG[WireGuard in userspace]
-    WG --> Carrier[UDP / HTTPS / QUIC / TURN]
-    Carrier --> Peer[Peer / Relay / Hidden Server]
-    Mesh[mesh_control] --> Policy
+flowchart TB
+    subgraph Internet["Internet / outer network"]
+        direction LR
+        UDP["UDP"]
+        HTTPS["HTTPS / HTTP"]
+        QUIC["QUIC / WebTransport"]
+        TURN["TURN relay"]
+    end
+
+    subgraph uwgsocks["uwgsocks process"]
+        direction TB
+        WG["WireGuard\n(userspace)"]
+        Netstack["gVisor netstack\n(userspace TCP/IP stack)"]
+        Policy["Routing · ACLs\nRelay · Reverse Forwards\nTraffic Shaping"]
+        Mesh["mesh_control\n(peer sync · ACL projection)"]
+
+        WG --> Netstack
+        Netstack --> Policy
+        Mesh --> Policy
+    end
+
+    subgraph Entry["Entry paths"]
+        direction TB
+        SOCKS5["SOCKS5\n127.x:1080"]
+        HTTP["HTTP proxy\n127.x:8082"]
+        Forward["Local forwards\ntcp/udp://…=tunnel:port"]
+        RevFwd["Reverse forwards\ntunnel-ip:port=host:port"]
+        RawAPI["Raw socket API\n/v1/socket"]
+        TUN["Host TUN\n/dev/net/tun (optional)"]
+    end
+
+    subgraph Wrapper["Linux wrapper (uwgwrapper)"]
+        direction LR
+        Preload["preload / systrap\n(libc or syscall trap)"]
+        FDProxy["fdproxy\n(socket bridge)"]
+        Preload --> FDProxy
+    end
+
+    Internet -->|"outer WireGuard packets"| WG
+    WG -->|"outer WireGuard packets"| Internet
+
+    SOCKS5 --> Policy
+    HTTP --> Policy
+    Forward --> Policy
+    RevFwd --> Policy
+    RawAPI --> Policy
+    TUN --> Policy
+
+    FDProxy --> RawAPI
+
+    subgraph Apps["Applications"]
+        BrowserApp["Browser / CLI\n(SOCKS5 / HTTP)"]
+        ForwardApp["Any app\n(local forward)"]
+        WrapperApp["Linux app\n(uwgwrapper)"]
+        OSTraffic["OS traffic\n(host TUN)"]
+    end
+
+    BrowserApp --> SOCKS5
+    BrowserApp --> HTTP
+    ForwardApp --> Forward
+    WrapperApp --> Preload
+    OSTraffic --> TUN
 ```
 
 ## Main Binaries
@@ -105,6 +159,7 @@ flowchart LR
 Start with the guided flow:
 
 - [How-To Index](docs/howto/README.md)
+- [Deployment Topology Guide](docs/howto/deployment-topology.md)
 - [01 Simple Client Proxy](docs/howto/01-simple-client-proxy.md)
 - [02 Server And Ingress](docs/howto/02-server-and-ingress.md)
 - [03 Wrapper Interception](docs/howto/03-wrapper-interception.md)

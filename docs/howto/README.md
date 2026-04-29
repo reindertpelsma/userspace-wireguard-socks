@@ -30,6 +30,7 @@ root [README.md](../../README.md).
 
 ## Read In Order
 
+0. [Deployment Topology Guide](deployment-topology.md) — component overview and common deployment shapes
 1. [01 Simple Client Proxy](01-simple-client-proxy.md)
 2. [02 Server And Ingress](02-server-and-ingress.md)
 3. [03 Wrapper Interception](03-wrapper-interception.md)
