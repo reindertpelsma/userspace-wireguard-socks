@@ -442,7 +442,7 @@ func (e *Engine) runTCPForwardConn(src net.Conn, f config.Forward) {
 			bindSrc = pp.Source
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
 	defer cancel()
 	dst, err := e.dialTunnelOnlyWithBind(ctx, "tcp", f.Target, aclSrc, bindSrc)
 	if err != nil {
@@ -652,7 +652,7 @@ func (e *Engine) handleUDPUnixPacketForwardConn(local net.Conn, f config.Forward
 			bindSrc = pp.Source
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
 	remote, err := e.dialTunnelOnlyWithBind(ctx, "udp", f.Target, source, bindSrc)
 	cancel()
 	if err != nil {
@@ -709,7 +709,7 @@ func (e *Engine) startUDPUnixDgramForward(name string, f config.Forward, ep conf
 			mu.Lock()
 			sess := sessions[key]
 			if sess == nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
 				remote, err := e.dialTunnelOnlyWithBind(ctx, "udp", f.Target, source, bindSrc)
 				cancel()
 				if err != nil {

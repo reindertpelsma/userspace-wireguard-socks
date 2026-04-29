@@ -698,7 +698,7 @@ func (e *Engine) runMeshPolling() {
 		if !parent.MeshEnabled || !parent.MeshAcceptACLs || parent.ControlURL == "" {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
 		client, err := e.newMeshControlClient(ctx, parent)
 		if err == nil {
 			local := e.meshSourceAddr()

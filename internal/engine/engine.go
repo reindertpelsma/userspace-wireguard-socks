@@ -116,6 +116,8 @@ type Engine struct {
 	connRejectUntil time.Time
 	socketNext      uint64
 	closed          chan struct{}
+	ctx             context.Context
+	cancel          context.CancelFunc
 
 	fallbackDialer     proxy.Dialer
 	localAddrs         []netip.Addr
@@ -150,6 +152,14 @@ var (
 	proxyHTTPReadTimeout       = 15 * time.Second
 	proxyHTTPWriteTimeout      = 30 * time.Second
 	proxyHTTPIdleTimeout       = 30 * time.Second
+)
+
+// tcpDialTimeout / udpDialTimeout cap the initial connection-establishment
+// phase. After the dial succeeds the connection runs on its own idle-timeout
+// lifecycle. UDP bind is nearly instant; the 5s cap is a safety net.
+const (
+	tcpDialTimeout = 15 * time.Second
+	udpDialTimeout = 5 * time.Second
 )
 
 // tunnelDNSTCPDeadline is the per-message read+write deadline for the
@@ -207,6 +217,10 @@ func New(cfg config.Config, logger *log.Logger) (*Engine, error) {
 		localPrefixes:      localPrefixes,
 		icmpForwardLimiter: rate.NewLimiter(255, 255),
 	}
+	// ctx is cancelled by Close(); all dials derive from it so engine
+	// shutdown cancels in-flight connections rather than waiting for their
+	// individual timeouts to expire.
+	e.ctx, e.cancel = context.WithCancel(context.Background())
 	if _, err := cryptorand.Read(e.meshMasterKey[:]); err != nil {
 		return nil, err
 	}
@@ -542,6 +556,7 @@ func (e *Engine) Close() error {
 		return nil
 	default:
 		close(e.closed)
+		e.cancel()
 	}
 	if e.cfg.Scripts.Allow {
 		for _, cmd := range e.cfg.WireGuard.PreDown {
@@ -838,6 +853,8 @@ func (e *Engine) startSOCKS(name, addr string) error {
 		return err
 	}
 	e.addListener(name, ln)
+	// Goroutine terminates when e.Close() closes ln, causing Accept to return
+	// a non-nil error.
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -860,6 +877,8 @@ func (e *Engine) startHTTP(name, addr string) error {
 	}
 	e.addListener(name, ln)
 	server := e.proxyHTTPServer(e.httpProxyHandler())
+	// Goroutine terminates when e.Close() closes ln, causing server.Serve to
+	// return a non-nil error.
 	go func() {
 		if err := server.Serve(ln); err != nil && !isClosedErr(err) {
 			e.log.Printf("%s proxy stopped: %v", name, err)
@@ -1323,7 +1342,9 @@ func (e *Engine) handleTCPForward(req *gtcp.ForwarderRequest) {
 		return
 	}
 	defer e.releaseConn(connID)
-	host, err := e.dialHostForInbound(context.Background(), "tcp", dst, src.Port())
+	dialCtx, dialCancel := context.WithTimeout(e.ctx, tcpDialTimeout)
+	host, err := e.dialHostForInbound(dialCtx, "tcp", dst, src.Port())
+	dialCancel()
 	if err != nil {
 		e.log.Printf("tcp forward host dial %s failed: %v", dst, err)
 		req.Complete(true)
@@ -1370,7 +1391,9 @@ func (e *Engine) handleUDPForward(req *gudp.ForwarderRequest) {
 		return
 	}
 	var uconn net.Conn = e.wrapAcceptedPeerConn("udp", udpConn)
-	host, err := e.dialHostForInbound(context.Background(), "udp", dst, src.Port())
+	dialCtx, dialCancel := context.WithTimeout(e.ctx, udpDialTimeout)
+	host, err := e.dialHostForInbound(dialCtx, "udp", dst, src.Port())
+	dialCancel()
 	if err != nil {
 		e.sendUDPUnreachable(src, dst)
 		_ = uconn.Close()
@@ -1779,7 +1802,7 @@ func (e *Engine) serveUDPForward(pc net.PacketConn, f config.Forward) {
 		mu.Lock()
 		s := sessions[key]
 		if s == nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
 			c, err := e.dialTunnelOnlyWithBind(ctx, "udp", f.Target, source, bindSrc)
 			cancel()
 			if err != nil {
@@ -1857,7 +1880,7 @@ func (e *Engine) handleTCPReverseForwardConn(tunnel net.Conn, f config.Forward) 
 	if src.IsValid() && dst.IsValid() && !e.inboundAllowed(src, dst, "tcp") {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
 	defer cancel()
 	targetEP, err := config.ParseForwardEndpoint(f.Proto, f.Target)
 	if err != nil {
@@ -1953,7 +1976,7 @@ func (e *Engine) serveUDPReverseForward(pc net.PacketConn, f config.Forward, tar
 		mu.Lock()
 		s := sessions[key]
 		if s == nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(e.ctx, 5*time.Second)
 			var c net.Conn
 			if targetEP.IsUnix() {
 				c, err = dialUnixEndpoint(targetEP)
@@ -2575,34 +2598,32 @@ func (c *activityConn) Close() error {
 	return c.Conn.Close()
 }
 
-// proxyBothIdle copies bytes in both directions and resets a shared idle timer
-// on either read or write. TCP keepalive packets are not surfaced by net.Conn,
-// so this timer is based on userspace-visible activity.
+// proxyBothIdle copies bytes in both directions. When idle > 0 it uses two
+// independent per-direction timers: timerA fires if A stops sending, timerB
+// fires if B stops sending. Either timer firing closes both connections, so a
+// one-directional flood cannot keep the pair alive past the idle window.
 func proxyBothIdle(a, b net.Conn, idle time.Duration) {
-	var (
-		timer *time.Timer
-		mu    sync.Mutex
-	)
-	touch := func() {
-		if idle <= 0 {
-			return
-		}
-		mu.Lock()
-		if timer != nil {
-			timer.Reset(idle)
-		}
-		mu.Unlock()
+	if idle <= 0 {
+		errc := make(chan struct{}, 2)
+		go copyConn(a, b, func() {}, errc)
+		go copyConn(b, a, func() {}, errc)
+		<-errc
+		return
 	}
-	if idle > 0 {
-		timer = time.AfterFunc(idle, func() {
-			_ = a.Close()
-			_ = b.Close()
-		})
-		defer timer.Stop()
+	closeAll := func() {
+		_ = a.Close()
+		_ = b.Close()
 	}
+	// Two independent timers: timerA fires if A stops sending; timerB fires
+	// if B stops sending. Either firing closes both ends, so a one-directional
+	// flood cannot keep the connection alive past the idle window.
+	timerA := time.AfterFunc(idle, closeAll)
+	timerB := time.AfterFunc(idle, closeAll)
+	defer timerA.Stop()
+	defer timerB.Stop()
 	errc := make(chan struct{}, 2)
-	go copyConn(a, b, touch, errc)
-	go copyConn(b, a, touch, errc)
+	go copyConn(a, b, func() { timerA.Reset(idle) }, errc)
+	go copyConn(b, a, func() { timerB.Reset(idle) }, errc)
 	<-errc
 }
 
@@ -2647,30 +2668,22 @@ func writeFull(w net.Conn, p []byte) error {
 
 // proxyUDP is the UDP equivalent of proxyBothIdle. A zero-length UDP datagram
 // still resets the timer because it is a real packet at the UDP layer.
+// Like proxyBothIdle, two independent per-direction timers are used so that
+// a one-directional flood cannot keep the pair alive past the idle window.
 func proxyUDP(a, b net.Conn, idle time.Duration) {
-	var (
-		timer *time.Timer
-		mu    sync.Mutex
-	)
-	touch := func() {
-		if idle <= 0 {
-			return
-		}
-		mu.Lock()
-		if timer != nil {
-			timer.Reset(idle)
-		}
-		mu.Unlock()
+	closeAll := func() {
+		_ = a.Close()
+		_ = b.Close()
 	}
+	var timerA, timerB *time.Timer
 	if idle > 0 {
-		timer = time.AfterFunc(idle, func() {
-			_ = a.Close()
-			_ = b.Close()
-		})
-		defer timer.Stop()
+		timerA = time.AfterFunc(idle, closeAll)
+		timerB = time.AfterFunc(idle, closeAll)
+		defer timerA.Stop()
+		defer timerB.Stop()
 	}
 	done := make(chan struct{}, 2)
-	copyLoop := func(dst, src net.Conn) {
+	copyLoop := func(dst, src net.Conn, timer *time.Timer) {
 		buf := make([]byte, 64*1024)
 		for {
 			n, err := src.Read(buf)
@@ -2678,16 +2691,17 @@ func proxyUDP(a, b net.Conn, idle time.Duration) {
 				done <- struct{}{}
 				return
 			}
-			touch()
+			if idle > 0 && timer != nil {
+				timer.Reset(idle)
+			}
 			if _, err := dst.Write(buf[:n]); err != nil {
 				done <- struct{}{}
 				return
 			}
-			touch()
 		}
 	}
-	go copyLoop(a, b)
-	go copyLoop(b, a)
+	go copyLoop(a, b, timerA)
+	go copyLoop(b, a, timerB)
 	<-done
 }
 

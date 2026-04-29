@@ -199,7 +199,7 @@ func (s *socketServer) openTCPConn(id uint64, bind, dest netip.AddrPort, version
 	if !s.e.outboundAllowed(s.src, dest, "tcp") {
 		return errProxyACL
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(s.e.ctx, 30*time.Second)
 	defer cancel()
 	c, err := s.dialSocket(ctx, "tcp", bind, dest)
 	if err != nil {
@@ -219,7 +219,7 @@ func (s *socketServer) openUDPConn(id uint64, bind, dest netip.AddrPort, version
 	if !s.e.outboundAllowed(s.src, dest, "udp") {
 		return errProxyACL
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(s.e.ctx, 10*time.Second)
 	defer cancel()
 	c, err := s.dialSocket(ctx, "udp", bind, dest)
 	if err != nil {
@@ -415,6 +415,9 @@ func (s *socketServer) handleData(id uint64, payload []byte) error {
 	s.mu.Unlock()
 	if ss == nil {
 		return errors.New("unknown connection ID")
+	}
+	if ss.proto == socketproto.ProtoUDP && ss.packet == nil && ss.conn == nil {
+		return errors.New("malformed UDP socket session: no packet conn")
 	}
 	if ss.proto == socketproto.ProtoUDP && ss.packet != nil {
 		dst := ss.udpFixedDst()

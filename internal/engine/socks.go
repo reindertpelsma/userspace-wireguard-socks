@@ -94,6 +94,9 @@ func (e *Engine) acquireSOCKSConnSlot() bool {
 	if e.socksConnSem == nil {
 		e.socksConnSem = make(chan struct{}, maxConcurrentSOCKSConns)
 	}
+	// Capture a local copy before releasing the lock. Channel operations on
+	// sem are goroutine-safe; the local copy is immune to a future reload
+	// that replaces e.socksConnSem with a new channel.
 	sem := e.socksConnSem
 	e.cfgMu.Unlock()
 	select {
@@ -278,7 +281,7 @@ func (e *Engine) serveSOCKSConnect(client net.Conn, src netip.AddrPort, dst sock
 		_ = writeSOCKSReply(client, socksRepConnectionNotAllowed, netip.AddrPort{})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(e.ctx, 30*time.Second)
 	defer cancel()
 	target, err := e.proxyDialWithSource(ctx, "tcp", dst.string(), src, false)
 	if err != nil {
@@ -550,7 +553,7 @@ func (e *Engine) serveSOCKSUDPRelay(pc net.PacketConn, src netip.AddrPort, done 
 		if !ok {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(e.ctx, 5*time.Second)
 		c, target, key, err := e.socksUDPSession(ctx, sessions, &mu, src, dst, timeout, expire, touch, pc, client.addr, client.connected)
 		cancel()
 		if err != nil {

@@ -174,7 +174,9 @@ func (e *Engine) handleTUNTCPForward(req *gtcp.ForwarderRequest) {
 		req.Complete(true)
 		return
 	}
-	target, err := e.dialSocketOutbound(context.Background(), "tcp", src, src, dst)
+	dialCtx, dialCancel := context.WithTimeout(e.ctx, tcpDialTimeout)
+	target, err := e.dialSocketOutbound(dialCtx, "tcp", src, src, dst)
+	dialCancel()
 	if err != nil {
 		if e.cfg.Log.Verbose {
 			e.log.Printf("host TUN tcp %s -> %s failed: %v", src, dst, err)
@@ -204,7 +206,9 @@ func (e *Engine) handleTUNUDPForward(req *gudp.ForwarderRequest) {
 	if err != nil {
 		return
 	}
-	target, err := e.dialSocketOutbound(context.Background(), "udp", src, src, dst)
+	dialCtx, dialCancel := context.WithTimeout(e.ctx, udpDialTimeout)
+	target, err := e.dialSocketOutbound(dialCtx, "udp", src, src, dst)
+	dialCancel()
 	if err != nil {
 		if e.cfg.Log.Verbose {
 			e.log.Printf("host TUN udp %s -> %s failed: %v", src, dst, err)

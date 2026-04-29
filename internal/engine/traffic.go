@@ -173,7 +173,7 @@ func (e *Engine) wrapPeerConn(network string, c net.Conn, peerIP netip.Addr) net
 		if peer.stream == nil {
 			return c
 		}
-		return &peerTrafficConn{Conn: c, stream: peer.stream}
+		return &peerTrafficConn{Conn: c, stream: peer.stream, ctx: e.ctx}
 	case "udp":
 		return newPeerDatagramConn(c, peer.shaper)
 	default:
@@ -202,12 +202,13 @@ func (e *Engine) wrapPeerPacketConn(pc net.PacketConn) net.PacketConn {
 type peerTrafficConn struct {
 	net.Conn
 	stream *trafficshape.StreamShaper
+	ctx    context.Context
 }
 
 func (c *peerTrafficConn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
 	if n > 0 && c.stream != nil {
-		if waitErr := waitStreamBudget(c.stream.WaitDownload, n); waitErr != nil && err == nil {
+		if waitErr := waitStreamBudget(c.ctx, c.stream.WaitDownload, n); waitErr != nil && err == nil {
 			err = waitErr
 		}
 	}
@@ -235,7 +236,7 @@ func (c *peerTrafficConn) Write(p []byte) (int, error) {
 	written := 0
 	for written < len(p) {
 		chunk := minInt(len(p)-written, 1400)
-		if err := c.stream.WaitUpload(context.Background(), chunk); err != nil {
+		if err := c.stream.WaitUpload(c.ctx, chunk); err != nil {
 			return written, err
 		}
 		n, err := c.Conn.Write(p[written : written+chunk])
@@ -404,10 +405,10 @@ func ipv4HeaderChecksum(header []byte) uint16 {
 	return ^uint16(sum)
 }
 
-func waitStreamBudget(wait func(context.Context, int) error, size int) error {
+func waitStreamBudget(ctx context.Context, wait func(context.Context, int) error, size int) error {
 	for size > 0 {
 		chunk := minInt(size, 1400)
-		if err := wait(context.Background(), chunk); err != nil {
+		if err := wait(ctx, chunk); err != nil {
 			return err
 		}
 		size -= chunk

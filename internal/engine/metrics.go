@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"runtime/debug"
@@ -316,7 +317,9 @@ func netstackTCPRetransmits(e *Engine) uint64 {
 // duplicate-Desc detector.
 func mustRegisterCounterFunc(reg *prometheus.Registry, name, help string, labelNames, labelValues []string, fn func() float64) {
 	if labelNames != nil {
-		panic("metrics: use newEnumCounterCollector for label-shaped counters")
+		// Startup programming error: label-shaped counters must use
+		// newEnumCounterCollector to avoid duplicate-Desc registration.
+		log.Fatalf("metrics: use newEnumCounterCollector for label-shaped counters (name=%s)", name)
 	}
 	reg.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{Name: name, Help: help}, fn))
 }
