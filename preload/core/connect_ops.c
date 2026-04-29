@@ -18,11 +18,7 @@
  *   9. update shared state: kind = TCP_STREAM / UDP_CONNECTED, proxied=1
  *  10. return 0
  *
- * Phase 1 limitations (TODO):
- *   - DNS-on-:53 forcing not implemented (legacy preload routes :53
- *     through a special handler; carry over later).
- *   - ICMP is detected via state.protocol but we don't yet special-
- *     case the proto string — uses "tcp"/"udp" generically.
+ * Phase 1 limitations:
  *   - O_NONBLOCK semantics on connect (returning EINPROGRESS for
  *     non-blocking TCP connects on tunnel fds) are not yet
  *     implemented.
@@ -131,6 +127,18 @@ long uwg_connect(int fd, const struct sockaddr *addr, uint32_t alen) {
 
     int sock_type = state.type & SOCK_TYPE_MASK;
     const char *proto = (sock_type == SOCK_DGRAM) ? "udp" : "tcp";
+
+    /* ICMP path: SOCK_DGRAM + IPPROTO_ICMP/ICMPV6. The fdproxy manager
+     * dispatches "icmp" to the engine's ICMP path; ports are not
+     * meaningful for ICMP and the manager rejects nonzero ports here.
+     * Mirrors legacy uwgpreload.c::is_icmp_state. (IPPROTO_ICMP = 1,
+     * IPPROTO_ICMPV6 = 58 — same constants as msg_ops.c::is_icmp_state.) */
+    if (sock_type == SOCK_DGRAM &&
+        (state.protocol == 1 || state.protocol == 58)) {
+        proto = "icmp";
+        dest_port = 0;
+        bind_port = 0;
+    }
 
     /* Build CONNECT line. */
     char line[256];
