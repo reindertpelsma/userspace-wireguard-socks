@@ -160,6 +160,28 @@ func supervisorEventLoop(rootPID int, blobSpec *staticBlobSpec) (int, error) {
 	)
 	exitCode := 0
 
+	// seenTracees tracks which tracee PIDs we've already configured
+	// PTRACE_O_* options on. The kernel docs say options inherit
+	// across fork/clone, but ubuntu:18.04's 4.15 kernel + dash combo
+	// doesn't reliably inherit PTRACE_O_TRACESECCOMP — auto-attached
+	// fork children's execve hits RET_TRACE and the kernel returns
+	// -ENOSYS to the tracee because no PTRACE_EVENT_SECCOMP gets
+	// delivered to us. Set options explicitly on the first stop we
+	// see for each new pid as a defensive belt-and-braces. Idempotent
+	// on kernels that DO inherit (newer glibc/musl matrix entries).
+	const (
+		ptraceOTraceSeccomp = 0x00000080
+		ptraceOTraceExec    = 0x00000010
+		ptraceOTraceFork    = 0x00000004
+		ptraceOTraceVfork   = 0x00000008
+		ptraceOTraceClone   = 0x00000020
+		ptraceOTraceExit    = 0x00000040
+	)
+	traceeOptions := uintptr(ptraceOTraceSeccomp | ptraceOTraceExec |
+		ptraceOTraceFork | ptraceOTraceVfork | ptraceOTraceClone |
+		ptraceOTraceExit)
+	seenTracees := map[int]bool{rootPID: true}
+
 	for {
 		var ws syscall.WaitStatus
 		// Wait for any traced child. WALL = wait for any child,
@@ -174,6 +196,20 @@ func supervisorEventLoop(rootPID int, blobSpec *staticBlobSpec) (int, error) {
 				return exitCode, nil
 			}
 			return exitCode, fmt.Errorf("wait4: %w", err)
+		}
+
+		// First-stop hook: ensure PTRACE_O_* are set on this tracee
+		// before we hand control back. The kernel might have auto-
+		// inherited them but we don't trust that on older kernels.
+		if !seenTracees[pid] && ws.Stopped() {
+			if err := unix.PtraceSetOptions(pid, int(traceeOptions)); err == nil {
+				seenTracees[pid] = true
+			}
+			// If PtraceSetOptions failed (e.g. tracee already past
+			// the attach-stop) we leave seen=false and try again
+			// on the next stop. Soft-fail — the kernel may have
+			// inherited the options already, in which case
+			// everything works.
 		}
 
 		switch {
