@@ -52,6 +52,16 @@ long uwg_socket(int domain, int type, int protocol) {
         s.domain   = domain;
         s.type     = type;
         s.protocol = protocol;
+        /* SOCK_NONBLOCK in the type field tells the kernel to mark the
+         * fd O_NONBLOCK; mirror that into state.saved_fl so the rest of
+         * the dispatch path (recv_is_nonblock / effective_recv_flags
+         * in msg_ops.c, udp_is_nonblock in stream_ops.c) sees the
+         * same answer it gets in the fcntl(F_SETFL, O_NONBLOCK) path.
+         * SOCK_NONBLOCK and O_NONBLOCK share the same bit value (04000)
+         * by design — the kernel uses the same constant for both. */
+        if (type & 04000 /* SOCK_NONBLOCK */) {
+            s.saved_fl = 04000 /* O_NONBLOCK */;
+        }
         /* kind defaults to KIND_NONE; connect()/bind() will refine
          * to KIND_TCP_STREAM / KIND_UDP_CONNECTED / etc. */
         (void)uwg_state_store((int)fd, &s);
