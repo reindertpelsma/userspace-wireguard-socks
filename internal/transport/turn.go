@@ -40,6 +40,12 @@ const (
 	// turnKeepaliveTimeout is the maximum time to wait for a TURN keepalive
 	// response before considering the TURN connection dead.
 	turnKeepaliveTimeout = 5 * time.Second
+	// turnReconnectInitial / turnReconnectMax bound the auto-reconnect
+	// backoff after a carrier failure. The goroutine launched from
+	// handleCarrierFailure starts at the initial delay and doubles up to
+	// the cap until connectLocked succeeds or the transport is closed.
+	turnReconnectInitial = 1 * time.Second
+	turnReconnectMax     = 60 * time.Second
 )
 
 // TURNTransport is a NOT-connection-oriented transport that relays WireGuard
@@ -64,10 +70,13 @@ type TURNTransport struct {
 	carrierLocalAddr   string
 	carrierRemoteAddr  string
 	cancelKA           context.CancelFunc // keepalive goroutine cancel
+	cancelReconnect    context.CancelFunc // reconnect goroutine cancel
+	reconnecting       bool               // a reconnect goroutine is in flight
 	basePermissions    []string
 	dynamicPermissions []string
 	grantedPeers       map[string]bool // already granted
 	open               bool
+	closing            bool // Close was called; reject reconnects
 }
 
 // NewTURNTransport creates a TURNTransport from the given transport config.
@@ -419,13 +428,25 @@ func (t *TURNTransport) keepaliveLoop(ctx context.Context) {
 }
 
 // handleCarrierFailure is called when the TURN carrier appears to be dead.
-// It closes the current client so the next Listen call reconnects.
+// It closes the current client and launches a background reconnect goroutine
+// that retries connectLocked with exponential backoff until it succeeds or
+// the transport is closed. Without this loop, traffic stalls until something
+// actively calls Dial/Listen — by which time the application has likely
+// already given up.
 func (t *TURNTransport) handleCarrierFailure() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if !t.open {
 		return
 	}
+	t.teardownLocked()
+	t.startReconnectLocked()
+}
+
+// teardownLocked closes the live carrier+client+relay and zeroes the
+// associated state. Caller must hold t.mu. Used by both handleCarrierFailure
+// (followed by reconnect) and Close (no reconnect).
+func (t *TURNTransport) teardownLocked() {
 	if t.relayConn != nil {
 		t.relayConn.Close()
 	}
@@ -440,25 +461,70 @@ func (t *TURNTransport) handleCarrierFailure() {
 	t.open = false
 }
 
-// Close tears down the TURN allocation and the carrier.
+// startReconnectLocked spawns the reconnect goroutine if one isn't already
+// running and the transport hasn't been closed. Caller must hold t.mu.
+func (t *TURNTransport) startReconnectLocked() {
+	if t.closing || t.reconnecting {
+		return
+	}
+	t.reconnecting = true
+	ctx, cancel := context.WithCancel(context.Background())
+	t.cancelReconnect = cancel
+	go t.reconnectLoop(ctx)
+}
+
+// reconnectLoop retries connectLocked with exponential backoff (1s → 2s → ...
+// → 60s, then steady-state 60s) until it succeeds or ctx is cancelled. On
+// success the keepalive goroutine launched inside connectLocked owns the
+// next failure detection round; this goroutine exits.
+func (t *TURNTransport) reconnectLoop(ctx context.Context) {
+	defer func() {
+		t.mu.Lock()
+		t.reconnecting = false
+		t.mu.Unlock()
+	}()
+	delay := turnReconnectInitial
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+
+		t.mu.Lock()
+		if t.closing {
+			t.mu.Unlock()
+			return
+		}
+		// Use a per-attempt context derived from the loop ctx so a Close
+		// during a long handshake gets the dial path unstuck.
+		err := t.connectLocked(ctx)
+		alreadyOpen := t.open
+		t.mu.Unlock()
+		if err == nil && alreadyOpen {
+			return
+		}
+
+		delay *= 2
+		if delay > turnReconnectMax {
+			delay = turnReconnectMax
+		}
+	}
+}
+
+// Close tears down the TURN allocation and the carrier, and stops any
+// in-flight reconnect goroutine.
 func (t *TURNTransport) Close() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.closing = true
 	if t.cancelKA != nil {
 		t.cancelKA()
 	}
-	if t.relayConn != nil {
-		t.relayConn.Close()
+	if t.cancelReconnect != nil {
+		t.cancelReconnect()
 	}
-	if t.client != nil {
-		t.client.Close()
-	}
-	t.client = nil
-	t.relayConn = nil
-	t.relayAddr = nil
-	t.carrierLocalAddr = ""
-	t.carrierRemoteAddr = ""
-	t.open = false
+	t.teardownLocked()
 }
 
 // RelayAddr returns the TURN relay address (host:port) or empty string when
