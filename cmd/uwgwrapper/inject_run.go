@@ -19,15 +19,15 @@ import (
 
 // runStaticPreload is the transport=systrap-static entry point.
 //
-//   1. fork + exec the target with PTRACE_TRACEME so the parent
-//      becomes its tracer.
-//   2. Wait for the post-execve stop (signal-stop with SIGTRAP).
-//   3. Read the tracee's auxv to find AT_ENTRY (saved_start).
-//   4. Read the tracee's stack to find argc/argv/envp pointers.
-//   5. Load the blob into the tracee (loadBlobIntoTracee).
-//   6. Run uwg_static_init(0, NULL, envp) (runStaticInit overload).
-//   7. PTRACE_DETACH — the tracee resumes its original _start with
-//      our SIGSYS handler + seccomp filter installed.
+//  1. fork + exec the target with PTRACE_TRACEME so the parent
+//     becomes its tracer.
+//  2. Wait for the post-execve stop (signal-stop with SIGTRAP).
+//  3. Read the tracee's auxv to find AT_ENTRY (saved_start).
+//  4. Read the tracee's stack to find argc/argv/envp pointers.
+//  5. Load the blob into the tracee (loadBlobIntoTracee).
+//  6. Run uwg_static_init(0, NULL, envp) (runStaticInit overload).
+//  7. PTRACE_DETACH — the tracee resumes its original _start with
+//     our SIGSYS handler + seccomp filter installed.
 func runStaticPreload(target string, args []string, env []string,
 	blobPath string) error {
 
@@ -41,7 +41,7 @@ func runStaticPreload(target string, args []string, env []string,
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Ptrace:    true,             // PTRACE_TRACEME in child before exec
+		Ptrace:    true, // PTRACE_TRACEME in child before exec
 		Pdeathsig: syscall.SIGKILL,
 	}
 	if err := cmd.Start(); err != nil {
@@ -139,49 +139,5 @@ func readEnvpPointer(pid int) (uintptr, error) {
 // runStaticInitWithEnvp is the variant of runStaticInit that passes
 // a real envp pointer as the third arg.
 func runStaticInitWithEnvp(pid int, spec *staticBlobSpec, base, envp uintptr) (int64, error) {
-	var saved unix.PtraceRegs
-	if err := unix.PtraceGetRegs(pid, &saved); err != nil {
-		return 0, fmt.Errorf("PtraceGetRegs: %w", err)
-	}
-
-	regs := saved
-	sp := getSP(&regs)
-	sp -= 64
-	sp &^= 15
-	setSP(&regs, sp)
-
-	trapAddr := uintptr(base + uintptr(spec.TrapOffset-spec.LowVaddr))
-	entry := uint64(base + uintptr(spec.EntryOffset-spec.LowVaddr))
-	setupHandoffWithEnvp(&regs, entry, uint64(trapAddr), uint64(envp))
-
-	if getArchName() == "amd64" {
-		var retBytes [8]byte
-		binary.LittleEndian.PutUint64(retBytes[:], uint64(trapAddr))
-		if err := writeMem(pid, uintptr(getSP(&regs)), retBytes[:]); err != nil {
-			return 0, fmt.Errorf("write return addr: %w", err)
-		}
-	}
-
-	if err := unix.PtraceSetRegs(pid, &regs); err != nil {
-		return 0, fmt.Errorf("PtraceSetRegs handoff: %w", err)
-	}
-	if err := unix.PtraceCont(pid, 0); err != nil {
-		return 0, fmt.Errorf("PtraceCont: %w", err)
-	}
-	var ws unix.WaitStatus
-	if _, err := unix.Wait4(pid, &ws, 0, nil); err != nil {
-		return 0, fmt.Errorf("Wait4: %w", err)
-	}
-	if !ws.Stopped() || ws.StopSignal() != syscall.SIGTRAP {
-		return 0, fmt.Errorf("post-handoff: %v", ws)
-	}
-	var post unix.PtraceRegs
-	if err := unix.PtraceGetRegs(pid, &post); err != nil {
-		return 0, err
-	}
-	rc := int64(int32(readSyscallResult(&post)))
-	if err := unix.PtraceSetRegs(pid, &saved); err != nil {
-		return rc, fmt.Errorf("PtraceSetRegs restore: %w", err)
-	}
-	return rc, nil
+	return runStaticInitCommon(pid, spec, base, envp)
 }

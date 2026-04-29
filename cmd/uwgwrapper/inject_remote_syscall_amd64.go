@@ -26,26 +26,21 @@ func readSyscallResult(regs *unix.PtraceRegs) uintptr {
 	return uintptr(regs.Rax)
 }
 
-func getPC(regs *unix.PtraceRegs) uint64 { return regs.Rip }
-func getSP(regs *unix.PtraceRegs) uint64 { return regs.Rsp }
+func getPC(regs *unix.PtraceRegs) uint64     { return regs.Rip }
+func getSP(regs *unix.PtraceRegs) uint64     { return regs.Rsp }
 func setSP(regs *unix.PtraceRegs, sp uint64) { regs.Rsp = sp }
-func getArchName() string                { return "amd64" }
-
-// setupHandoff: set RIP=entry, push return_addr on stack, set arg regs
-// rdi/rsi/rdx = (0, 0, 0). amd64 calling convention: caller pushes
-// return address before call; we simulate that by writing return_addr
-// at *(rsp) and decrementing rsp by 8.
-func setupHandoff(regs *unix.PtraceRegs, entry, retAddr uint64) {
-	regs.Rsp -= 8
-	regs.Rip = entry
-	regs.Rdi = 0 // argc
-	regs.Rsi = 0 // argv
-	regs.Rdx = 0 // envp
-}
+func getArchName() string                    { return "amd64" }
 
 func setupHandoffWithEnvp(regs *unix.PtraceRegs, entry, retAddr, envp uint64) {
 	regs.Rsp -= 8
 	regs.Rip = entry
+	regs.Rdi = 0    // argc
+	regs.Rsi = 0    // argv
+	regs.Rdx = envp // envp
+}
+
+func setupCallStubHandoff(regs *unix.PtraceRegs, stub, envp uint64) {
+	regs.Rip = stub
 	regs.Rdi = 0    // argc
 	regs.Rsi = 0    // argv
 	regs.Rdx = envp // envp
