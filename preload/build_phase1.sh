@@ -41,6 +41,13 @@ SHIM_SRCS=(
 )
 
 OUT="${1:-preload/uwgpreload-phase1.so}"
+# Make sure the output directory exists. The CI workflows used to do
+# `mkdir -p cmd/uwgwrapper/assets` before invoking gcc directly; now
+# that they call this script we own that responsibility here.
+out_dir="$(dirname "$OUT")"
+if [ -n "$out_dir" ] && [ "$out_dir" != "." ]; then
+    mkdir -p "$out_dir"
+fi
 # Honour CC for cross-compilation (e.g. CC="zig cc -target aarch64-linux-musl"
 # from the release.yml exotic-arch matrix). Default to gcc on the host.
 CC="${CC:-gcc}"
