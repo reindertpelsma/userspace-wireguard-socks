@@ -223,6 +223,14 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 		if disableSystrap {
 			envPreload = appendEnv(envPreload, "UWGS_DISABLE_SYSTRAP=1")
 		}
+		// Capture the shared-state path BEFORE Close zeroes out the
+		// table — we want to unlink it after the child exits to avoid
+		// leaking shared-state-*.bin files into /tmp/uwgwrapper-$UID/
+		// across many wrapper invocations. Close(false) here doesn't
+		// remove the file because the spawned child still needs the
+		// inode (it mmap's the path); we defer the unlink to after
+		// cmd.Run() returns, by which point the child has exited.
+		statePath := shared.Path()
 		_ = shared.Close(false)
 		cmdArgs := append([]string{"--mode=exec-helper", "--", target}, progArgs...)
 		cmd := exec.Command(os.Args[0], cmdArgs...)
@@ -231,9 +239,13 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
-		if err := cmd.Run(); err != nil {
+		runErr := cmd.Run()
+		if statePath != "" {
+			_ = os.Remove(statePath)
+		}
+		if runErr != nil {
 			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
+			if errors.As(runErr, &exitErr) {
 				if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
 					if status.Exited() {
 						os.Exit(status.ExitStatus())
@@ -243,7 +255,7 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 					}
 				}
 			}
-			log.Fatalf("run %s: %v", target, err)
+			log.Fatalf("run %s: %v", target, runErr)
 		}
 		os.Exit(0)
 	}
@@ -269,8 +281,17 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 		if blob == "" {
 			blob = staticBlobPath()
 		}
+		// Same shared-state cleanup as preloadInner: capture the path
+		// pre-Close, unlink it post-supervisor-exit. The supervisor
+		// waits for its tracee tree internally, so the unlink is safe
+		// once runSystrapSupervised returns.
+		statePath := shared.Path()
 		_ = shared.Close(false)
-		if err := runSystrapSupervised(target, progArgs, env, preloadPath, blob); err != nil {
+		err := runSystrapSupervised(target, progArgs, env, preloadPath, blob)
+		if statePath != "" {
+			_ = os.Remove(statePath)
+		}
+		if err != nil {
 			log.Fatalf("systrap-supervised failed: %v", err)
 		}
 		os.Exit(0)
@@ -302,8 +323,16 @@ func runLaunch(api, apiToken, socketPath, preloadPath, listenPath, dnsMode, tran
 		if blob == "" {
 			log.Fatal("systrap-static: UWGS_STATIC_BLOB unset and no sibling uwgpreload-static-${arch}.so found")
 		}
+		// Same shared-state cleanup pattern as preloadInner: unlink
+		// after the static-blob runner returns. The runner waits for
+		// the static tracee internally.
+		statePath := shared.Path()
 		_ = shared.Close(false)
-		if err := runStaticPreload(target, progArgs, env, blob); err != nil {
+		err := runStaticPreload(target, progArgs, env, blob)
+		if statePath != "" {
+			_ = os.Remove(statePath)
+		}
+		if err != nil {
 			log.Fatalf("systrap-static failed: %v", err)
 		}
 		os.Exit(0)
