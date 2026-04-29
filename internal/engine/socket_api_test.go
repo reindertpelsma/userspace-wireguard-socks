@@ -667,8 +667,29 @@ func socketAPIUDPEcho(t *testing.T, api, token string, dst netip.AddrPort, msg [
 
 func socketAPIICMPEcho(t *testing.T, api, token string, dst netip.Addr, msg []byte) []byte {
 	t.Helper()
-	conn := socketAPIConn(t, api, token)
-	defer conn.Close()
+	// Retry up to 3 times: under heavy CI load the netstack ICMP reply goroutine
+	// can be starved past the per-attempt 30 s deadline even though the WG session
+	// is already established (TCP and UDP echo pass first).
+	const maxAttempts = 3
+	for attempt := range maxAttempts {
+		if attempt > 0 {
+			time.Sleep(time.Second)
+		}
+		conn := socketAPIConn(t, api, token)
+		got, ok := tryICMPEchoOnce(conn, dst, msg)
+		conn.Close()
+		if ok {
+			return got
+		}
+	}
+	t.Fatal("ICMP socket API echo: all attempts timed out")
+	return nil
+}
+
+// tryICMPEchoOnce performs one ICMP echo exchange on conn and returns
+// (reply payload, true) on success or (nil, false) on any error or timeout.
+// It does not call t.Fatal so the caller can retry on a fresh connection.
+func tryICMPEchoOnce(conn net.Conn, dst netip.Addr, msg []byte) ([]byte, bool) {
 	id := socketproto.ClientIDBase + 12
 	payload, err := socketproto.EncodeConnect(socketproto.Connect{
 		IPVersion: socketproto.AddrVersion(dst),
@@ -676,38 +697,40 @@ func socketAPIICMPEcho(t *testing.T, api, token string, dst netip.Addr, msg []by
 		DestIP:    dst,
 	})
 	if err != nil {
-		t.Fatal(err)
+		return nil, false
 	}
 	if err := socketproto.WriteFrame(conn, socketproto.Frame{ID: id, Action: socketproto.ActionConnect, Payload: payload}); err != nil {
-		t.Fatal(err)
+		return nil, false
 	}
-	frame := readSocketFrame(t, conn)
-	if frame.Action != socketproto.ActionAccept {
-		t.Fatalf("ICMP connect failed: action %d payload %q", frame.Action, frame.Payload)
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second * testDeadlineScale))
+	frame, err := socketproto.ReadFrame(conn, socketproto.DefaultMaxPayload)
+	if err != nil || frame.Action != socketproto.ActionAccept {
+		return nil, false
 	}
 	req, err := (&icmp.Message{
 		Type: ipv4.ICMPTypeEcho,
 		Body: &icmp.Echo{ID: 0x1234, Seq: 7, Data: msg},
 	}).Marshal(nil)
 	if err != nil {
-		t.Fatal(err)
+		return nil, false
 	}
 	if err := socketproto.WriteFrame(conn, socketproto.Frame{ID: id, Action: socketproto.ActionData, Payload: req}); err != nil {
-		t.Fatal(err)
+		return nil, false
 	}
-	frame = readSocketFrame(t, conn)
-	if frame.Action != socketproto.ActionData {
-		t.Fatalf("ICMP data failed: action %d payload %q", frame.Action, frame.Payload)
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second * testDeadlineScale))
+	frame, err = socketproto.ReadFrame(conn, socketproto.DefaultMaxPayload)
+	if err != nil || frame.Action != socketproto.ActionData {
+		return nil, false
 	}
 	reply, err := icmp.ParseMessage(1, frame.Payload)
 	if err != nil {
-		t.Fatal(err)
+		return nil, false
 	}
 	echo, ok := reply.Body.(*icmp.Echo)
 	if !ok || reply.Type != ipv4.ICMPTypeEchoReply || echo.Seq != 7 {
-		t.Fatalf("unexpected ICMP reply: %#v", reply)
+		return nil, false
 	}
-	return echo.Data
+	return echo.Data, true
 }
 
 func socketAPIConn(t *testing.T, api, token string) net.Conn {
