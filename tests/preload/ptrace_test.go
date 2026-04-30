@@ -60,9 +60,9 @@ type wrapperRunOptions struct {
 // layer (ptrace*, systrap-supervised) or a freestanding runtime (systrap-static).
 var staticCapableModes = []string{"systrap-supervised", "systrap-static", "ptrace", "ptrace-seccomp", "ptrace-only"}
 
-// staticBlobModes are the modes within staticCapableModes that additionally
-// require the freestanding static blob (UWGS_STATIC_BLOB) to intercept a
-// static binary. ptrace* modes work via ptrace alone; these two need the blob.
+// staticBlobModes are the modes within staticCapableModes that need the
+// freestanding static blob injected into a CGO_ENABLED=0 binary. ptrace*
+// modes work via ptrace alone; these two need the blob.
 var staticBlobModes = map[string]bool{"systrap-supervised": true, "systrap-static": true}
 
 func TestUWGWrapperStaticCapableRawGoTCPUDP(t *testing.T) {
@@ -70,16 +70,24 @@ func TestUWGWrapperStaticCapableRawGoTCPUDP(t *testing.T) {
 	art := buildWrapperArtifacts(t)
 	_, httpSock := setupWrapperNetwork(t)
 
+	// Build the freestanding static blob once; systrap-supervised and
+	// systrap-static need it to intercept CGO_ENABLED=0 binaries.
+	repo := filepath.Clean(filepath.Join("..", ".."))
+	blobDir := t.TempDir()
+	blobPath := filepath.Join(blobDir, "uwgpreload-static-"+runtime.GOARCH+".so")
+	run(t, repo, "bash", "preload/build_static.sh", blobDir)
+
 	for _, transport := range staticCapableModes {
 		t.Run(transport, func(t *testing.T) {
-			if staticBlobModes[transport] && os.Getenv("UWGS_STATIC_BLOB") == "" {
-				t.Skipf("%s wrapping a static binary requires UWGS_STATIC_BLOB (build preload/build_static.sh first)", transport)
+			opts := wrapperRunOptions{}
+			if staticBlobModes[transport] {
+				opts.env = map[string]string{"UWGS_STATIC_BLOB": blobPath}
 			}
-			out := runWrappedTarget(t, art, httpSock, transport, art.raw, "tcp", "100.64.94.1", "18080", transport+"-tcp")
+			out := runWrappedTargetWithOptions(t, art, httpSock, transport, art.raw, []string{"tcp", "100.64.94.1", "18080", transport + "-tcp"}, opts)
 			if normalizedOutput(out) != transport+"-tcp" {
 				t.Fatalf("unexpected %s tcp output %q", transport, out)
 			}
-			out = runWrappedTarget(t, art, httpSock, transport, art.raw, "udp", "100.64.94.1", "18081", transport+"-udp")
+			out = runWrappedTargetWithOptions(t, art, httpSock, transport, art.raw, []string{"udp", "100.64.94.1", "18081", transport + "-udp"}, opts)
 			if normalizedOutput(out) != transport+"-udp" {
 				t.Fatalf("unexpected %s udp output %q", transport, out)
 			}
