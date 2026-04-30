@@ -60,6 +60,11 @@ type wrapperRunOptions struct {
 // layer (ptrace*, systrap-supervised) or a freestanding runtime (systrap-static).
 var staticCapableModes = []string{"systrap-supervised", "systrap-static", "ptrace", "ptrace-seccomp", "ptrace-only"}
 
+// staticBlobModes are the modes within staticCapableModes that additionally
+// require the freestanding static blob (UWGS_STATIC_BLOB) to intercept a
+// static binary. ptrace* modes work via ptrace alone; these two need the blob.
+var staticBlobModes = map[string]bool{"systrap-supervised": true, "systrap-static": true}
+
 func TestUWGWrapperStaticCapableRawGoTCPUDP(t *testing.T) {
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)
@@ -67,6 +72,9 @@ func TestUWGWrapperStaticCapableRawGoTCPUDP(t *testing.T) {
 
 	for _, transport := range staticCapableModes {
 		t.Run(transport, func(t *testing.T) {
+			if staticBlobModes[transport] && os.Getenv("UWGS_STATIC_BLOB") == "" {
+				t.Skipf("%s wrapping a static binary requires UWGS_STATIC_BLOB (build preload/build_static.sh first)", transport)
+			}
 			out := runWrappedTarget(t, art, httpSock, transport, art.raw, "tcp", "100.64.94.1", "18080", transport+"-tcp")
 			if normalizedOutput(out) != transport+"-tcp" {
 				t.Fatalf("unexpected %s tcp output %q", transport, out)
