@@ -7,11 +7,12 @@ import (
 	"testing"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 )
 
 func TestExamplesNormalize(t *testing.T) {
-	if os.Getenv("UWG_TEST_EXAMPLES") == "" {
-		t.Skip("set UWG_TEST_EXAMPLES=1 to validate shipped example configs")
+	if !testconfig.Get().Examples {
+		t.Skip("set UWG_TEST_EXAMPLES=1 or -uwgs-examples to validate shipped example configs")
 	}
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	oldWD, err := os.Getwd()
@@ -53,8 +54,8 @@ func TestExamplesNormalize(t *testing.T) {
 }
 
 func TestExampleWGQuickFilesParse(t *testing.T) {
-	if os.Getenv("UWG_TEST_EXAMPLES") == "" {
-		t.Skip("set UWG_TEST_EXAMPLES=1 to validate shipped example configs")
+	if !testconfig.Get().Examples {
+		t.Skip("set UWG_TEST_EXAMPLES=1 or -uwgs-examples to validate shipped example configs")
 	}
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	oldWD, err := os.Getwd()

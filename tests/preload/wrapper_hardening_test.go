@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 )
 
 func TestUWGWrapperEpollNonblockConnectFlow(t *testing.T) {
@@ -70,8 +70,8 @@ func TestUWGWrapperThreadedTraceeDeathDoesNotHang(t *testing.T) {
 }
 
 func TestUWGWrapperThreadedTraceeDeathPtraceDiagnostic(t *testing.T) {
-	if testing.Short() || strings.TrimSpace(os.Getenv("UWGS_RUN_PTRACE_THREADED_DEATH")) == "" {
-		t.Skip("set UWGS_RUN_PTRACE_THREADED_DEATH=1 to run the ptrace threaded-death diagnostic")
+	if testing.Short() || !testconfig.Get().PtraceThreadedDeath {
+		t.Skip("set UWGS_RUN_PTRACE_THREADED_DEATH=1 or -uwgs-ptrace-threaded-death to run the ptrace threaded-death diagnostic")
 	}
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)

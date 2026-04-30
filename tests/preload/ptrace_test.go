@@ -27,6 +27,7 @@ import (
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/engine"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 )
 
 type wrapperArtifacts struct {
@@ -100,8 +101,8 @@ func TestUWGWrapperPtraceOnlyAccidentalPreloadUsesSecretPassthrough(t *testing.T
 }
 
 func TestUWGWrapperBothStdIOHeavyStaysOffPtrace(t *testing.T) {
-	if os.Getenv("UWGS_RUN_STDIO_HEAVY_DIAG") == "" {
-		t.Skip("set UWGS_RUN_STDIO_HEAVY_DIAG=1 to run the stdio-heavy combo diagnostic")
+	if !testconfig.Get().StdioHeavyDiag {
+		t.Skip("set UWGS_RUN_STDIO_HEAVY_DIAG=1 or -uwgs-stdio-heavy-diag to run the stdio-heavy combo diagnostic")
 	}
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)
@@ -120,14 +121,14 @@ func TestUWGWrapperBothStdIOHeavyStaysOffPtrace(t *testing.T) {
 	}
 	t.Logf("stdio-heavy baseline traced syscalls: %v", baseline.Syscalls)
 	t.Logf("stdio-heavy workload traced syscalls: %v", stats.Syscalls)
-	if os.Getenv("UWGS_STRICT_STDIO_HOTPATH") != "" && !mapsEqualUint64(stats.Syscalls, baseline.Syscalls) {
+	if testconfig.Get().StrictStdioHotpath && !mapsEqualUint64(stats.Syscalls, baseline.Syscalls) {
 		t.Fatalf("expected stdio-heavy workload to add no ptrace traffic beyond startup baseline, baseline=%v heavy=%v", baseline.Syscalls, stats.Syscalls)
 	}
 }
 
 func TestUWGWrapperBothStress(t *testing.T) {
-	if os.Getenv("UWGS_SOAK") == "" {
-		t.Skip("set UWGS_SOAK=1 to run long wrapper stress tests")
+	if !testconfig.Get().Soak {
+		t.Skip("set UWGS_SOAK=1 or -uwgs-soak to run long wrapper stress tests")
 	}
 	requireWrapperToolchain(t)
 	art := buildWrapperArtifacts(t)
@@ -998,10 +999,11 @@ func wrappedCommand(t *testing.T, art wrapperArtifacts, httpSock, transport, tar
 	t.Cleanup(func() { _ = os.RemoveAll(listenDir) })
 	listenSock := filepath.Join(listenDir, fmt.Sprintf("fdproxy-%s.sock", strings.ReplaceAll(transport, "/", "_")))
 	cmdArgs := []string{"--transport=" + transport, "--listen", listenSock, "--api", "unix:" + httpSock, "--socket-path", "/uwg/socket"}
-	if os.Getenv("UWGS_TEST_DEBUG") != "" {
+	tcfg := testconfig.Get()
+	if tcfg.Verbose {
 		cmdArgs = append([]string{"-v"}, cmdArgs...)
 	}
-	if os.Getenv("UWGS_TEST_DEBUG_STRESS") != "" && len(args) > 0 && args[0] == "stress" {
+	if tcfg.VerboseStress && len(args) > 0 && args[0] == "stress" {
 		cmdArgs = append([]string{"-v"}, cmdArgs...)
 	}
 	cmdArgs = append(cmdArgs, opts.wrapperArgs...)

@@ -12,30 +12,26 @@ import (
 	"math/rand"
 	"net"
 	"net/netip"
-	"os"
 	"runtime"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/engine"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 	"golang.org/x/net/proxy"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 func TestLoopbackSOCKSSoak(t *testing.T) {
-	if os.Getenv("UWGS_SOAK") == "" {
-		t.Skip("set UWGS_SOAK=1 to run long soak tests")
+	tcfg := testconfig.Get()
+	if !tcfg.Soak {
+		t.Skip("set UWGS_SOAK=1 or -uwgs-soak to run long soak tests")
 	}
 	duration := 2 * time.Minute
-	if raw := os.Getenv("UWGS_SOAK_SECONDS"); raw != "" {
-		seconds, err := strconv.Atoi(raw)
-		if err != nil || seconds <= 0 {
-			t.Fatalf("invalid UWGS_SOAK_SECONDS=%q", raw)
-		}
-		duration = time.Duration(seconds) * time.Second
+	if tcfg.SoakSeconds > 0 {
+		duration = time.Duration(tcfg.SoakSeconds) * time.Second
 	}
 
 	serverKey, clientKey := mustKey(t), mustKey(t)
@@ -138,16 +134,13 @@ func TestLoopbackSOCKSSoak(t *testing.T) {
 }
 
 func TestLoopbackImpairedChattySOCKSSoak(t *testing.T) {
-	if os.Getenv("UWGS_SOAK") == "" {
-		t.Skip("set UWGS_SOAK=1 to run long soak tests")
+	tcfg := testconfig.Get()
+	if !tcfg.Soak {
+		t.Skip("set UWGS_SOAK=1 or -uwgs-soak to run long soak tests")
 	}
 	duration := 2 * time.Minute
-	if raw := os.Getenv("UWGS_SOAK_SECONDS"); raw != "" {
-		seconds, err := strconv.Atoi(raw)
-		if err != nil || seconds <= 0 {
-			t.Fatalf("invalid UWGS_SOAK_SECONDS=%q", raw)
-		}
-		duration = time.Duration(seconds) * time.Second
+	if tcfg.SoakSeconds > 0 {
+		duration = time.Duration(tcfg.SoakSeconds) * time.Second
 	}
 
 	serverKey, clientKey := mustKey(t), mustKey(t)

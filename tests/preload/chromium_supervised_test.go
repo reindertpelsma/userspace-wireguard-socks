@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 )
 
 // TestChromiumSystrapSupervisedRealInternet is the "Final Boss"
@@ -41,12 +42,13 @@ import (
 //
 // Gated by UWGS_RUN_CHROMIUM_SUPERVISED=1.
 func TestChromiumSystrapSupervisedRealInternet(t *testing.T) {
-	if os.Getenv("UWGS_RUN_CHROMIUM_SUPERVISED") == "" {
-		t.Skip("set UWGS_RUN_CHROMIUM_SUPERVISED=1 to run the supervised-chromium real-internet smoke")
+	tcfg := testconfig.Get()
+	if !tcfg.ChromiumSupervised {
+		t.Skip("set UWGS_RUN_CHROMIUM_SUPERVISED=1 or -uwgs-chromium-supervised to run the supervised-chromium real-internet smoke")
 	}
 	requirePhase1Toolchain(t)
 
-	chromeBin := strings.TrimSpace(os.Getenv("UWGS_CHROME_BIN"))
+	chromeBin := tcfg.ChromeBin
 	if chromeBin == "" {
 		for _, candidate := range []string{
 			"chromium", "chromium-browser", "google-chrome", "headless_shell",

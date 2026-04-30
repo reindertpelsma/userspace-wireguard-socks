@@ -14,7 +14,6 @@ import (
 	"math/big"
 	"net"
 	"net/netip"
-	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -64,8 +64,8 @@ import (
 //     gVisor netstack, not SOCKS, but the transport bind layer
 //     still has to handle 200 concurrent reads/writes).
 func TestMeshConvergesUnderLossyDialerAndFlowsSurviveActiveFlip(t *testing.T) {
-	if os.Getenv("UWGS_STRESS") == "" {
-		t.Skip("set UWGS_STRESS=1 to run lossy-mesh + 200-flow survival test")
+	if !testconfig.Get().Stress {
+		t.Skip("set UWGS_STRESS=1 or -uwgs-stress to run lossy-mesh + 200-flow survival test")
 	}
 
 	keys := struct{ A, C, D wgtypes.Key }{

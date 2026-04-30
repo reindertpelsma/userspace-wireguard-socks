@@ -7,14 +7,15 @@ package tun
 
 import (
 	"net/netip"
-	"os"
 	"strings"
 	"testing"
+
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 )
 
 func TestRealWindowsTUNConfigureSmallRoute(t *testing.T) {
-	if os.Getenv("UWG_TEST_REAL_TUN") != "1" {
-		t.Skip("set UWG_TEST_REAL_TUN=1 to run real host TUN configuration test")
+	if !testconfig.Get().RealTUN {
+		t.Skip("set UWG_TEST_REAL_TUN=1 or -uwgs-real-tun to run real host TUN configuration test")
 	}
 	addr := netip.MustParsePrefix("198.19.0.3/32")
 	route := netip.MustParsePrefix("198.19.0.0/24")

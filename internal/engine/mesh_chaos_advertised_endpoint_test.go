@@ -69,7 +69,7 @@ func TestMeshChaosResume_AdvertisedEndpointThroughNAT(t *testing.T) {
 		t.Skip("mesh chaos test skipped in -short mode")
 	}
 	if !testingChaosFlag() {
-		t.Skip("set UWGS_RUN_MESH_CHAOS=1 to run advertised-endpoint chaos test")
+		t.Skip("set UWGS_RUN_MESH_CHAOS=1 or -uwgs-mesh-chaos to run advertised-endpoint chaos test")
 	}
 
 	hubKey := mustMeshKey(t)

@@ -39,7 +39,6 @@ import (
 	"log"
 	"net"
 	"net/netip"
-	"os"
 	"runtime"
 	"sort"
 	"sync/atomic"
@@ -48,17 +47,18 @@ import (
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/engine"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-// requirePerfEnv gates every test in this file behind UWGS_PERF=1.
+// requirePerfEnv gates every test in this file behind UWGS_PERF=1 / -uwgs-perf.
 // Without it, a test running under `-tags perf` still skips. This
 // keeps an accidental `go test -tags perf ./...` from spending real
 // time.
 func requirePerfEnv(t *testing.T) {
 	t.Helper()
-	if os.Getenv("UWGS_PERF") != "1" {
-		t.Skip("perf tests gated by UWGS_PERF=1; not set")
+	if !testconfig.Get().Perf {
+		t.Skip("perf tests gated by UWGS_PERF=1 or -uwgs-perf; not set")
 	}
 }
 

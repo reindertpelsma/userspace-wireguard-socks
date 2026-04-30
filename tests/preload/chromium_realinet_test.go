@@ -9,13 +9,13 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 )
 
 // TestChromiumRealInternetSmoke runs headless Chromium against real
@@ -38,10 +38,11 @@ import (
 // "Example Domain" title; api.github.com/zen returns a non-empty
 // plain-text quote so we can validate a second, non-HTML hostname.
 func TestChromiumRealInternetSmoke(t *testing.T) {
-	if os.Getenv("UWGS_RUN_CHROMIUM_REAL_INTERNET") == "" {
-		t.Skip("set UWGS_RUN_CHROMIUM_REAL_INTERNET=1 to run real-internet chromium smoke")
+	tcfg := testconfig.Get()
+	if !tcfg.ChromiumRealInet {
+		t.Skip("set UWGS_RUN_CHROMIUM_REAL_INTERNET=1 or -uwgs-chromium-real-inet to run real-internet chromium smoke")
 	}
-	chromeBin := strings.TrimSpace(os.Getenv("UWGS_CHROME_BIN"))
+	chromeBin := tcfg.ChromeBin
 	if chromeBin == "" {
 		for _, candidate := range []string{
 			"chromium", "chromium-browser", "google-chrome", "headless_shell",

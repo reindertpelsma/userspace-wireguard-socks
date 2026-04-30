@@ -13,7 +13,6 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -247,22 +247,10 @@ func sha256Sum(b []byte) [32]byte {
 	return sha256.Sum256(b)
 }
 
-// testingChaosFlag returns true if the env has UWGS_RUN_MESH_CHAOS=1.
-// Inlined here (rather than calling os.Getenv at every test) so the
-// gate is uniform across chaos tests.
+// testingChaosFlag returns true if the mesh-chaos gate is enabled via
+// UWGS_RUN_MESH_CHAOS=1 env var, -uwgs-mesh-chaos CLI flag, or -uwgs-all.
 func testingChaosFlag() bool {
-	return getMeshChaosEnv() == "1"
-}
-
-func getMeshChaosEnv() string {
-	return getEnvOrDefault("UWGS_RUN_MESH_CHAOS", "")
-}
-
-func getEnvOrDefault(k, def string) string {
-	if v, ok := os.LookupEnv(k); ok && v != "" {
-		return v
-	}
-	return def
+	return testconfig.Get().MeshChaos
 }
 
 // TestMeshChaosResume_Foundation is the topology-only stage of the

@@ -7,13 +7,14 @@ package tun
 
 import (
 	"net/netip"
-	"os"
 	"testing"
+
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 )
 
 func TestRealOpenBSDTUNConfigureSmallRoute(t *testing.T) {
-	if os.Getenv("UWG_TEST_REAL_TUN") != "1" {
-		t.Skip("set UWG_TEST_REAL_TUN=1 to run real host TUN configuration test")
+	if !testconfig.Get().RealTUN {
+		t.Skip("set UWG_TEST_REAL_TUN=1 or -uwgs-real-tun to run real host TUN configuration test")
 	}
 	if err := RequireRootForRealTUN(); err != nil {
 		t.Skip(err.Error())

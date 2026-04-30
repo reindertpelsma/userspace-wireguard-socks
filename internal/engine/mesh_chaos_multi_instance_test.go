@@ -52,7 +52,7 @@ func TestMeshChaosResume_MultiInstanceHost(t *testing.T) {
 		t.Skip("mesh chaos test skipped in -short mode")
 	}
 	if !testingChaosFlag() {
-		t.Skip("set UWGS_RUN_MESH_CHAOS=1 to run multi-instance chaos test")
+		t.Skip("set UWGS_RUN_MESH_CHAOS=1 or -uwgs-mesh-chaos to run multi-instance chaos test")
 	}
 
 	type instance struct {

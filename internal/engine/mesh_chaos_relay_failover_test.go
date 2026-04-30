@@ -79,7 +79,7 @@ func TestMeshChaosResume_RelayFailoverOn100PercentDrop(t *testing.T) {
 		t.Skip("mesh chaos test skipped in -short mode")
 	}
 	if !testingChaosFlag() {
-		t.Skip("set UWGS_RUN_MESH_CHAOS=1 to run relay-failover chaos test")
+		t.Skip("set UWGS_RUN_MESH_CHAOS=1 or -uwgs-mesh-chaos to run relay-failover chaos test")
 	}
 
 	hubKey := mustMeshKey(t)

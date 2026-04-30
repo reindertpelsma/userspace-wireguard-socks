@@ -70,7 +70,7 @@ func TestMeshChaosResume_SourcePortRebind(t *testing.T) {
 		t.Skip("mesh chaos test skipped in -short mode")
 	}
 	if !testingChaosFlag() {
-		t.Skip("set UWGS_RUN_MESH_CHAOS=1 to run source-port-rebind chaos test")
+		t.Skip("set UWGS_RUN_MESH_CHAOS=1 or -uwgs-mesh-chaos to run source-port-rebind chaos test")
 	}
 
 	hubKey := mustMeshKey(t)

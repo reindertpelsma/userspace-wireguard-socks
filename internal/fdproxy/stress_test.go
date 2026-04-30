@@ -8,10 +8,11 @@ package fdproxy
 import (
 	"fmt"
 	"net/netip"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 )
 
 // These stress tests exist to catch any race in the fdproxy lock model
@@ -40,8 +41,8 @@ const (
 
 func skipIfStressDisabled(t *testing.T) {
 	t.Helper()
-	if os.Getenv("UWGS_STRESS") == "" {
-		t.Skip("set UWGS_STRESS=1 to run lock-order stress tests")
+	if !testconfig.Get().Stress {
+		t.Skip("set UWGS_STRESS=1 or -uwgs-stress to run lock-order stress tests")
 	}
 }
 

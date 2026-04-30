@@ -12,7 +12,6 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"os"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/acl"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -57,8 +57,8 @@ import (
 // timing, much longer when something is broken. Doesn't belong on
 // every PR push; release.yml flips the flag on.
 func TestMesh4PeerDynamicACLAndFallback(t *testing.T) {
-	if os.Getenv("UWGS_STRESS") == "" {
-		t.Skip("set UWGS_STRESS=1 to run the multi-peer mesh stress test")
+	if !testconfig.Get().Stress {
+		t.Skip("set UWGS_STRESS=1 or -uwgs-stress to run the multi-peer mesh stress test")
 	}
 
 	keys := struct {

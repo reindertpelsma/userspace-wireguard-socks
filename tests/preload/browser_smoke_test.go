@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 )
 
 type wrapperHTTPPair struct {
@@ -26,21 +27,22 @@ type wrapperHTTPPair struct {
 }
 
 func TestUWGWrapperNodeHeadlessChromeSmoke(t *testing.T) {
-	if os.Getenv("UWGS_RUN_HEADLESS_CHROME_SMOKE") == "" {
-		t.Skip("set UWGS_RUN_HEADLESS_CHROME_SMOKE=1 to run the headless Chrome wrapper smoke")
+	tcfg := testconfig.Get()
+	if !tcfg.ChromeSmoke {
+		t.Skip("set UWGS_RUN_HEADLESS_CHROME_SMOKE=1 or -uwgs-chrome-smoke to run the headless Chrome wrapper smoke")
 	}
 	requireWrapperToolchain(t)
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node is required for the headless Chrome smoke test")
 	}
-	chromeBin := strings.TrimSpace(os.Getenv("UWGS_CHROME_BIN"))
+	chromeBin := tcfg.ChromeBin
 	if chromeBin == "" {
-		t.Skip("set UWGS_CHROME_BIN to a Chromium/headless_shell binary to run this smoke test")
+		t.Skip("set UWGS_CHROME_BIN or -uwgs-chrome-bin to a Chromium/headless_shell binary to run this smoke test")
 	}
 
 	art := buildWrapperArtifacts(t)
 	pair := setupWrapperHTTPPair(t)
-	transport := strings.TrimSpace(os.Getenv("UWGS_BROWSER_SMOKE_TRANSPORT"))
+	transport := tcfg.BrowserSmokeTransport
 	if transport == "" {
 		transport = "systrap"
 	}

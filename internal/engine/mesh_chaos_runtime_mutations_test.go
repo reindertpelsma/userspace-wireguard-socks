@@ -54,7 +54,7 @@ func TestMeshChaosResume_RuntimeMutationsUnderLoad(t *testing.T) {
 		t.Skip("mesh chaos test skipped in -short mode")
 	}
 	if !testingChaosFlag() {
-		t.Skip("set UWGS_RUN_MESH_CHAOS=1 to run runtime-mutation chaos test")
+		t.Skip("set UWGS_RUN_MESH_CHAOS=1 or -uwgs-mesh-chaos to run runtime-mutation chaos test")
 	}
 
 	hubKey := mustMeshKey(t)

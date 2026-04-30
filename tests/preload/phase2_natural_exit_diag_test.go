@@ -22,6 +22,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 )
 
 // TestPhase2NaturalExitDiag runs the static HTTP server in its
@@ -35,8 +37,8 @@ import (
 // Skipped by default (UWG_PHASE2_DIAG=1 to enable) — this test is for
 // manual investigation, not CI.
 func TestPhase2NaturalExitDiag(t *testing.T) {
-	if os.Getenv("UWG_PHASE2_DIAG") != "1" {
-		t.Skip("set UWG_PHASE2_DIAG=1 to run natural-exit hang diagnostic")
+	if !testconfig.Get().Phase2Diag {
+		t.Skip("set UWG_PHASE2_DIAG=1 or -uwgs-phase2-diag to run natural-exit hang diagnostic")
 	}
 	requirePhase1Toolchain(t)
 	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {

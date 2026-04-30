@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 )
 
 // TestPhase1HeadlessChromeSmoke is the chromium-class workload validation
@@ -29,16 +31,17 @@ import (
 // in normal unit-test flow. Needs a chromium/headless_shell binary
 // in UWGS_CHROME_BIN and node on $PATH.
 func TestPhase1HeadlessChromeSmoke(t *testing.T) {
-	if os.Getenv("UWGS_RUN_PHASE1_HEADLESS_CHROME_SMOKE") == "" {
-		t.Skip("set UWGS_RUN_PHASE1_HEADLESS_CHROME_SMOKE=1 to run the phase1 headless Chrome smoke")
+	tcfg := testconfig.Get()
+	if !tcfg.Phase1ChromeSmoke {
+		t.Skip("set UWGS_RUN_PHASE1_HEADLESS_CHROME_SMOKE=1 or -uwgs-phase1-chrome-smoke to run the phase1 headless Chrome smoke")
 	}
 	requirePhase1Toolchain(t)
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node is required for the phase1 headless Chrome smoke test")
 	}
-	chromeBin := strings.TrimSpace(os.Getenv("UWGS_CHROME_BIN"))
+	chromeBin := tcfg.ChromeBin
 	if chromeBin == "" {
-		t.Skip("set UWGS_CHROME_BIN to a Chromium/headless_shell binary to run this smoke test")
+		t.Skip("set UWGS_CHROME_BIN or -uwgs-chrome-bin to a Chromium/headless_shell binary to run this smoke test")
 	}
 
 	art := buildPhase1Artifacts(t)
@@ -52,7 +55,7 @@ func TestPhase1HeadlessChromeSmoke(t *testing.T) {
 	art.preload = phase1So
 
 	pair := setupWrapperHTTPPair(t)
-	transport := strings.TrimSpace(os.Getenv("UWGS_BROWSER_SMOKE_TRANSPORT"))
+	transport := tcfg.BrowserSmokeTransport
 	if transport == "" {
 		// Default to systrap-supervised: the supervisor handles
 		// chromium's zygote + renderer fork+exec model, which

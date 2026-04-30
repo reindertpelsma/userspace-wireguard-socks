@@ -12,26 +12,22 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
-	"os"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/transport"
 )
 
 func TestTransportAdversarialSoakMatrix(t *testing.T) {
-	if os.Getenv("UWGS_TRANSPORT_SOAK") == "" {
-		t.Skip("set UWGS_TRANSPORT_SOAK=1 to run adversarial transport soak coverage")
+	tc := testconfig.Get()
+	if !tc.TransportSoak {
+		t.Skip("set UWGS_TRANSPORT_SOAK=1 or -uwgs-transport-soak to run adversarial transport soak coverage")
 	}
 	duration := 15 * time.Second
-	if raw := os.Getenv("UWGS_TRANSPORT_SOAK_SECONDS"); raw != "" {
-		seconds, err := strconv.Atoi(raw)
-		if err != nil || seconds <= 0 {
-			t.Fatalf("invalid UWGS_TRANSPORT_SOAK_SECONDS=%q", raw)
-		}
-		duration = time.Duration(seconds) * time.Second
+	if tc.TransportSoakSeconds > 0 {
+		duration = time.Duration(tc.TransportSoakSeconds) * time.Second
 	}
 
 	for _, tc := range []struct {

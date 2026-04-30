@@ -19,11 +19,11 @@ import (
 	"log"
 	"net"
 	"net/netip"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/config"
+	"github.com/reindertpelsma/userspace-wireguard-socks/internal/testconfig"
 	hosttun "github.com/reindertpelsma/userspace-wireguard-socks/internal/tun"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
@@ -48,8 +48,8 @@ func freeUDPPortForRealTUNTest(t *testing.T) int {
 }
 
 func TestRealLinuxTUNEngineE2E(t *testing.T) {
-	if os.Getenv("UWG_TEST_REAL_TUN") != "1" {
-		t.Skip("set UWG_TEST_REAL_TUN=1 to run real host TUN end-to-end traffic test")
+	if !testconfig.Get().RealTUN {
+		t.Skip("set UWG_TEST_REAL_TUN=1 or -uwgs-real-tun to run real host TUN end-to-end traffic test")
 	}
 	if err := hosttun.RequireRootForRealTUN(); err != nil {
 		t.Skip(err.Error())
@@ -156,8 +156,24 @@ func TestRealLinuxTUNEngineE2E(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = clientEng.Close() })
 
-	// Wait for the WireGuard handshake (PersistentKeepalive fires within 1 s).
-	time.Sleep(2 * time.Second)
+	// Poll until the WireGuard handshake completes (PersistentKeepalive fires
+	// within 1 s on a warm host; cold Docker containers can take 8–10 s).
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		st, err := clientEng.Status()
+		if err == nil {
+			for _, p := range st.Peers {
+				if p.HasHandshake {
+					goto handshakeDone
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("WireGuard handshake did not complete within 15 s")
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+handshakeDone:
 
 	// Dial from this process through the real TUN device: the kernel routes
 	// packets to 198.19.1.1 via the TUN interface, the engine picks them up,
