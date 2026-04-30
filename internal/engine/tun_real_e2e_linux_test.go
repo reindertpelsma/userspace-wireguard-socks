@@ -19,6 +19,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"os"
 	"testing"
 	"time"
 
@@ -77,7 +78,7 @@ func TestRealLinuxTUNEngineE2E(t *testing.T) {
 		PublicKey:  clientKey.PublicKey().String(),
 		AllowedIPs: []string{clientWGAddr},
 	}}
-	serverEng, err := New(serverCfg, log.New(io.Discard, "", 0))
+	serverEng, err := New(serverCfg, log.New(os.Stderr, "[serverEng] ", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +139,7 @@ func TestRealLinuxTUNEngineE2E(t *testing.T) {
 	// route asymmetrically, causing the WG handshake to silently fail.
 	dropIPv4Invalid := false
 	clientCfg := config.Default()
+	clientCfg.Log.Verbose = true
 	clientCfg.WireGuard.PrivateKey = clientKey.String()
 	clientCfg.WireGuard.Addresses = []string{clientWGAddr}
 	clientCfg.WireGuard.ListenPort = &clientPort
@@ -153,7 +155,7 @@ func TestRealLinuxTUNEngineE2E(t *testing.T) {
 	if err := clientCfg.Normalize(); err != nil {
 		t.Fatal(err)
 	}
-	clientEng, err := New(clientCfg, log.New(io.Discard, "", 0))
+	clientEng, err := New(clientCfg, log.New(os.Stderr, "[clientEng] ", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
