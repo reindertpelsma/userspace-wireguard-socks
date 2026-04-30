@@ -26,6 +26,9 @@ import (
 // machinery — mmap, segment copy, relocations, RIP handoff,
 // return-trap — all work cleanly.
 func TestPhase2InjectAndRunStaticInit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("blob injection test requires ptrace+mmap into a live process; skipped in -short mode")
+	}
 	repo, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("abs: %v", err)

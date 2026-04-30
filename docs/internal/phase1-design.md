@@ -297,7 +297,7 @@ wrlock which suffices for the common case. A try-wrlock-with-defer
 path lights up if SIGSYS-handler re-entrant close becomes a real
 workload pattern.
 
-### Phase 1 followup (still TODO)
+### Phase 1 followup (pending)
 
 - ✅ uwg_listen / uwg_accept / uwg_accept4 for tunnel fds —
   listener_ops.c (commits 05f0012, c84699e). Includes the
