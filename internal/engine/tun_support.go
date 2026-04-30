@@ -121,7 +121,10 @@ func (e *Engine) startHostTUN(localAddrs []netip.Addr) error {
 }
 
 func (e *Engine) pumpTUNPackets(name string, src, dst tun.Device, mtu int) {
-	const tunPacketOffset = 4
+	// 16 satisfies both gVisor's internal TUN (ignores header space) and the
+	// Linux kernel TUN device when vnetHdr/GRO is enabled (requires offset ≥
+	// virtioNetHdrLen = 10 on Write, otherwise returns "invalid offset").
+	const tunPacketOffset = 16
 	batch := src.BatchSize()
 	if batch <= 0 {
 		batch = 1
