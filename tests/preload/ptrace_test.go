@@ -73,13 +73,15 @@ func TestUWGWrapperStaticCapableRawGoTCPUDP(t *testing.T) {
 	// systrap-supervised and systrap-static need the freestanding static
 	// blob to intercept CGO_ENABLED=0 binaries. The blob injection path
 	// (ptrace mmap + POKEDATA + RIP handoff into a 10 MB BSS blob) is
-	// sensitive to GH-runner kernel configuration and is validated by
-	// TestPhase2InjectAndRunStaticInit. Skip those modes here unless the
-	// caller has pre-built and supplied the blob via UWGS_STATIC_BLOB.
+	// validated by TestPhase2InjectAndRunStaticInit, and is sensitive
+	// to kernel configuration.
+	//
+	// Auto-building is opt-in via UWGS_BUILD_STATIC_BLOB=1 to avoid
+	// running unstable injection on stock GH runners. Set that env var
+	// (or point UWGS_STATIC_BLOB at a pre-built blob) to exercise these
+	// modes locally or in dedicated CI.
 	blobPath := os.Getenv("UWGS_STATIC_BLOB")
-	if blobPath == "" {
-		// Try to build it; if build_static.sh succeeds the modes run,
-		// otherwise they are skipped gracefully per-subtest below.
+	if blobPath == "" && os.Getenv("UWGS_BUILD_STATIC_BLOB") == "1" {
 		repo := filepath.Clean(filepath.Join("..", ".."))
 		blobDir := t.TempDir()
 		candidate := filepath.Join(blobDir, "uwgpreload-static-"+runtime.GOARCH+".so")
