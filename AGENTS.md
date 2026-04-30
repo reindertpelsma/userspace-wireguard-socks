@@ -683,8 +683,8 @@ work this codebase:
 
 Two real-internet test hosts are available for iterating when CI feedback is
 too slow:
-- `ssh root@51.159.237.61` (amd64)
-- `ssh root@51.15.66.128` (arm64)
+- amd64 VPS (see owner for SSH target)
+- arm64 VPS (see owner for SSH target)
 
 Use these to repro flake-class issues that need real-network or real-arch
 behavior before pushing — especially Chromium-amd64 / chrome-headless-shell

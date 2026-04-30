@@ -20,7 +20,7 @@
 #   - have iperf3 installed (apt-get install -y iperf3 / brew install iperf3)
 #
 # Usage:
-#   LEFT=root@51.159.237.61 RIGHT=root@51.15.66.128 \
+#   LEFT=root@<amd64-host> RIGHT=root@<arm64-host> \
 #     bash tests/perf/scripts/run-real-network.sh
 
 set -euo pipefail

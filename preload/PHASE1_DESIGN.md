@@ -270,9 +270,8 @@ falls into one of the three layers above. The migration is mechanical:
 
 ### Cross-arch portability
 
-- ✅ amd64 (validated on the developer gVisor container + on
-  root@51.159.237.61, the amd64 VPS)
-- ✅ arm64 (validated on root@51.15.66.128, the arm64 VPS) —
+- ✅ amd64 (validated on the developer gVisor container + on the amd64 VPS)
+- ✅ arm64 (validated on the arm64 VPS) —
   commit 5b5a520 fixed SYS_dup2 absence on arm64 by routing uwg_dup2
   through SYS_dup3 with flags=0
 

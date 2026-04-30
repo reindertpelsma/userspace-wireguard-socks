@@ -81,7 +81,7 @@ A soak run "passes" when, over the 24-hour window:
 
 ### 2026-04-28 → 2026-04-29 — first 24h reference baseline
 
-- **Box**: Scaleway VPS at 51.159.237.61. Linux x86_64, 4 vCPU,
+- **Box**: Scaleway amd64 VPS. Linux x86_64, 4 vCPU,
   7.7 GB RAM, Go 1.25.0.
 - **Test**: `TestLoopbackImpairedChattySOCKSSoak` (24h soak with
   impaired-network chatty SOCKS proxy load).
