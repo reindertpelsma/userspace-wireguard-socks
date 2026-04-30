@@ -66,6 +66,7 @@ func TestRealLinuxTUNEngineE2E(t *testing.T) {
 
 	serverKey, clientKey := genKeyForRealTUNTest(t), genKeyForRealTUNTest(t)
 	serverPort := freeUDPPortForRealTUNTest(t)
+	clientPort := freeUDPPortForRealTUNTest(t)
 
 	// Server engine: WG only, TCP echo listener on its WG address.
 	serverCfg := config.Default()
@@ -131,10 +132,15 @@ func TestRealLinuxTUNEngineE2E(t *testing.T) {
 	t.Cleanup(func() { createHostTUNManager = oldCreate })
 
 	// Client engine: WG + real TUN, peer = server.
+	// Give the client a listen port so both engines use StdNetBind — the
+	// outbound-only bind (default when ListenPort==nil) binds from the Docker
+	// bridge IP and sends to 127.0.0.1, which some Linux kernels reject or
+	// route asymmetrically, causing the WG handshake to silently fail.
 	dropIPv4Invalid := false
 	clientCfg := config.Default()
 	clientCfg.WireGuard.PrivateKey = clientKey.String()
 	clientCfg.WireGuard.Addresses = []string{clientWGAddr}
+	clientCfg.WireGuard.ListenPort = &clientPort
 	clientCfg.TUN.Enabled = true
 	clientCfg.TUN.Name = tunMgr.Name()
 	clientCfg.Filtering.DropIPv4Invalid = &dropIPv4Invalid
