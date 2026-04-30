@@ -22,7 +22,17 @@ import (
 	"github.com/reindertpelsma/userspace-wireguard-socks/internal/transport"
 	hosttun "github.com/reindertpelsma/userspace-wireguard-socks/internal/tun"
 	"golang.zx2c4.com/wireguard/tun"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
+
+func mustKeyForTUNTest(t *testing.T) wgtypes.Key {
+	t.Helper()
+	k, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
 
 func TestReduceRoutePrefixes(t *testing.T) {
 	in := []netip.Prefix{
@@ -429,3 +439,155 @@ func (m *fakeHostTUNManager) BypassDialer(bool, netip.Prefix) transport.ProxyDia
 	return transport.NewDirectDialer(false, netip.Prefix{})
 }
 func (m *fakeHostTUNManager) Close() error { return m.dev.Close() }
+
+// TestMTUConfigDefaults verifies that wireguard.mtu defaults to 1420 and that
+// tun.mtu inherits wireguard.mtu when not explicitly set.
+func TestMTUConfigDefaults(t *testing.T) {
+	cfg := config.Default()
+	cfg.WireGuard.PrivateKey = mustKeyForTUNTest(t).String()
+	cfg.WireGuard.Addresses = []string{"100.64.0.1/32"}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WireGuard.MTU != 1420 {
+		t.Errorf("wireguard.mtu default = %d, want 1420", cfg.WireGuard.MTU)
+	}
+	if cfg.TUN.MTU != 1420 {
+		t.Errorf("tun.mtu should inherit wireguard.mtu: got %d, want 1420", cfg.TUN.MTU)
+	}
+}
+
+// TestMTUCustomPropagation verifies that a custom wireguard.mtu is passed to
+// the host TUN manager and that tun.mtu inherits it.
+func TestMTUCustomPropagation(t *testing.T) {
+	const customMTU = 1300
+
+	var gotMTU int
+	oldCreate := createHostTUNManager
+	createHostTUNManager = func(opts hosttun.Options) (hosttun.Manager, error) {
+		gotMTU = opts.MTU
+		return newFakeHostTUNManager(newFakeTUNDevice(opts.Name, opts.MTU)), nil
+	}
+	t.Cleanup(func() { createHostTUNManager = oldCreate })
+
+	dropIPv4Invalid := false
+	cfg := config.Default()
+	cfg.WireGuard.PrivateKey = mustKeyForTUNTest(t).String()
+	cfg.WireGuard.Addresses = []string{"100.64.0.1/32"}
+	cfg.WireGuard.MTU = customMTU
+	cfg.TUN.Enabled = true
+	cfg.TUN.Name = "uwgmtutest"
+	cfg.Filtering.DropIPv4Invalid = &dropIPv4Invalid
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TUN.MTU != customMTU {
+		t.Errorf("tun.mtu after Normalize = %d, want %d", cfg.TUN.MTU, customMTU)
+	}
+	eng, err := New(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.startHostTUN([]netip.Addr{netip.MustParseAddr("100.64.0.1")}); err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+
+	if gotMTU != customMTU {
+		t.Errorf("createHostTUNManager received MTU %d, want %d", gotMTU, customMTU)
+	}
+}
+
+// TestMTUDefaultTCPMSSClamp confirms that inbound.tcp_mss_clamp defaults to
+// true after config normalization. The packet-level MSS rewriting is covered
+// by the netstackex unit tests (TestClampMSS_*); this test guards the config
+// path so the default cannot silently regress.
+func TestMTUDefaultTCPMSSClamp(t *testing.T) {
+	cfg := config.Default()
+	cfg.WireGuard.PrivateKey = mustKeyForTUNTest(t).String()
+	cfg.WireGuard.Addresses = []string{"100.64.0.1/32"}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Inbound.TCPMSSClamp == nil || !*cfg.Inbound.TCPMSSClamp {
+		t.Error("inbound.tcp_mss_clamp should default to true after Normalize")
+	}
+}
+
+// TestHostTUNTCPMSSClampFunctional verifies that TCP connections work
+// end-to-end through the host TUN stack when MSS clamping is explicitly
+// enabled at a low MTU. Guards against MSS rewriting accidentally breaking TCP.
+func TestHostTUNTCPMSSClampFunctional(t *testing.T) {
+	hostIP := testHostIPv4(t)
+	ln := listenTCP4ForTUNTest(t)
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer c.Close(); _, _ = io.Copy(c, c) }()
+		}
+	}()
+
+	const clampMTU = 1300
+	hostTun := newFakeTUNDevice("uwgmsstest", clampMTU)
+	oldCreate := createHostTUNManager
+	createHostTUNManager = func(opts hosttun.Options) (hosttun.Manager, error) {
+		return newFakeHostTUNManager(hostTun), nil
+	}
+	t.Cleanup(func() { createHostTUNManager = oldCreate })
+
+	mssClamp := true
+	dropIPv4Invalid := false
+	cfg := config.Default()
+	cfg.WireGuard.PrivateKey = mustKeyForTUNTest(t).String()
+	cfg.WireGuard.Addresses = []string{"100.64.11.1/32"}
+	cfg.WireGuard.MTU = clampMTU
+	cfg.TUN.Enabled = true
+	cfg.TUN.Name = "uwgmsstest"
+	cfg.TUN.MTU = clampMTU
+	cfg.Inbound.TCPMSSClamp = &mssClamp
+	cfg.Filtering.DropIPv4Invalid = &dropIPv4Invalid
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := New(cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.startHostTUN([]netip.Addr{netip.MustParseAddr("100.64.11.1")}); err != nil {
+		t.Fatal(err)
+	}
+	defer eng.Close()
+
+	appDev, appNet, err := netstackex.CreateNetTUN([]netip.Addr{netip.MustParseAddr("100.64.11.1")}, nil, clampMTU)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer appDev.Close()
+	stopBridge := bridgeAppNetstackToFakeTUN(t, appDev, hostTun, clampMTU)
+	defer stopBridge()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	conn, err := appNet.DialContext(ctx, "tcp", net.JoinHostPort(hostIP.String(), port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	const msg = "mss-clamp-functional"
+	if _, err := conn.Write([]byte(msg)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read with MSS clamp on: %v", err)
+	}
+	if string(buf) != msg {
+		t.Fatalf("echo mismatch: got %q, want %q", buf, msg)
+	}
+}

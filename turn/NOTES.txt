@@ -1,2 +1,0 @@
-Updating files in smaller chunks to avoid the prior command-size block.
-Next step: rewrite open_turn_server.go and tests, then gofmt/build/test.
