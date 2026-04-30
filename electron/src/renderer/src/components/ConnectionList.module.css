@@ -1,0 +1,65 @@
+.list {
+  list-style: none;
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 20px;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 0 16px;
+  -webkit-app-region: no-drag;
+}
+.item:hover {
+  background: var(--bg-card-hover);
+}
+.item.active {
+  background: var(--accent-dim);
+}
+
+.itemBtn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 0;
+  text-align: left;
+  min-width: 0;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border);
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+.dotOn {
+  background: var(--green);
+  box-shadow: 0 0 0 2px var(--green-dim);
+}
+
+.name {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toggleWrap {
+  flex-shrink: 0;
+}

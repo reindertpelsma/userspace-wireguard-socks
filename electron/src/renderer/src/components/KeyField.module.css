@@ -1,0 +1,38 @@
+.field {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.field:last-child {
+  border-bottom: none;
+}
+
+.label {
+  font-size: 12px;
+  color: var(--text-muted);
+  width: 100px;
+  flex-shrink: 0;
+}
+
+.value {
+  flex: 1;
+  font-size: 13px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  word-break: break-all;
+  user-select: text;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+
+.eyeBtn {
+  flex-shrink: 0;
+  font-size: 14px;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+  padding: 2px 4px;
+}
+.eyeBtn:hover {
+  opacity: 1;
+}

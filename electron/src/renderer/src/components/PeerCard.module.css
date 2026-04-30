@@ -1,0 +1,99 @@
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 14px;
+  width: 100%;
+  text-align: left;
+  gap: 10px;
+  transition: background 0.15s;
+}
+.header:hover {
+  background: var(--bg-card-hover);
+}
+
+.headerLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border);
+  flex-shrink: 0;
+}
+.dotActive {
+  background: var(--green);
+}
+
+.pubkey {
+  font-size: 13px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--text);
+}
+
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.chip {
+  font-size: 11px;
+  padding: 2px 7px;
+  background: var(--bg-input);
+  border-radius: 20px;
+  color: var(--text-muted);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.chevron {
+  font-size: 9px;
+  color: var(--text-muted);
+}
+
+.body {
+  border-top: 1px solid var(--border);
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.row:last-child {
+  border-bottom: none;
+}
+
+.rowLabel {
+  font-size: 11px;
+  color: var(--text-muted);
+  width: 90px;
+  flex-shrink: 0;
+  padding-top: 1px;
+}
+
+.rowValue {
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-all;
+  user-select: text;
+}
+
+.mono {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
